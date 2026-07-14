@@ -9,7 +9,11 @@ mod sample;
 mod select;
 mod structural;
 
+use std::sync::Arc;
+
 use crate::builtins::IntDictScheme;
+use crate::cost::CostModel;
+use crate::cost::SizeCost;
 use crate::scheme::ChildSelection;
 use crate::scheme::DescendantExclusion;
 use crate::scheme::Scheme;
@@ -30,7 +34,7 @@ pub(crate) const ROOT_SCHEME_ID: SchemeId = SchemeId {
 /// The compressor works by:
 /// 1. Canonicalizing input arrays to a standard representation.
 /// 2. Pre-filtering schemes by [`Scheme::matches`] and exclusion rules.
-/// 3. Evaluating each matching scheme's compression estimate and resolving deferred work.
+/// 3. Evaluating each matching scheme's candidate and resolving deferred work.
 /// 4. Compressing with the best scheme and verifying the result is smaller.
 ///
 /// No scheme may appear twice in a cascade chain. The compressor enforces this automatically
@@ -46,10 +50,13 @@ pub struct CascadingCompressor {
     /// Descendant exclusion rules for the compressor's own cascading (e.g. excluding Dict from
     /// list offsets).
     root_exclusions: Vec<DescendantExclusion>,
+
+    /// The cost model used during scheme selection.
+    cost_model: Arc<dyn CostModel>,
 }
 
 impl CascadingCompressor {
-    /// Creates a new compressor with the given schemes.
+    /// Creates a new compressor with the given schemes and the default [`SizeCost`] model.
     ///
     /// Root-level exclusion rules (e.g. excluding Dict from list offsets) are built automatically.
     pub fn new(schemes: Vec<&'static dyn Scheme>) -> Self {
@@ -63,7 +70,17 @@ impl CascadingCompressor {
         Self {
             schemes,
             root_exclusions,
+            cost_model: Arc::new(SizeCost),
         }
+    }
+
+    /// Replaces the cost model used during scheme selection.
+    ///
+    /// The default is [`SizeCost`], which assigns lower cost to higher estimated compression
+    /// ratios.
+    pub fn with_cost_model(mut self, cost_model: Arc<dyn CostModel>) -> Self {
+        self.cost_model = cost_model;
+        self
     }
 }
 
