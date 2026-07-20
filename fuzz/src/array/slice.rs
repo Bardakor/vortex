@@ -126,7 +126,7 @@ pub fn slice_canonical_array(
             )
             .map(|a| a.into_array())
         }
-        DType::Map(..) => {
+        DType::Map(..) | DType::FixedSizeBinary(..) => {
             let mut builder = builder_with_capacity(array.dtype(), stop - start);
             for idx in start..stop {
                 builder.append_scalar(&array.execute_scalar(idx, ctx)?)?;
