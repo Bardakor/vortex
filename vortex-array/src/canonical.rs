@@ -25,6 +25,8 @@ use crate::arrays::Decimal;
 use crate::arrays::DecimalArray;
 use crate::arrays::Extension;
 use crate::arrays::ExtensionArray;
+use crate::arrays::FixedSizeBinary;
+use crate::arrays::FixedSizeBinaryArray;
 use crate::arrays::FixedSizeList;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::ListView;
@@ -44,8 +46,8 @@ use crate::arrays::VarBinViewArray;
 use crate::arrays::Variant;
 use crate::arrays::VariantArray;
 use crate::arrays::bool::BoolDataParts;
-use crate::arrays::decimal::DecimalDataParts;
 use crate::arrays::extension::ExtensionArrayExt;
+use crate::arrays::fixed_size_binary::FixedSizeBinaryDataParts;
 use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
 use crate::arrays::listview::ListViewDataParts;
 use crate::arrays::listview::ListViewRebuildMode;
@@ -134,6 +136,7 @@ pub enum Canonical {
     Bool(BoolArray),
     Primitive(PrimitiveArray),
     Decimal(DecimalArray),
+    FixedSizeBinary(FixedSizeBinaryArray),
     VarBinView(VarBinViewArray),
     List(ListViewArray),
     Map(MapArray),
@@ -154,6 +157,7 @@ macro_rules! match_each_canonical {
             Canonical::Bool($ident) => $eval,
             Canonical::Primitive($ident) => $eval,
             Canonical::Decimal($ident) => $eval,
+            Canonical::FixedSizeBinary($ident) => $eval,
             Canonical::VarBinView($ident) => $eval,
             Canonical::List($ident) => $eval,
             Canonical::Map($ident) => $eval,
@@ -211,6 +215,9 @@ impl Canonical {
                     Validity::from(n),
                 )
             }),
+            DType::FixedSizeBinary(byte_width, n) => {
+                Canonical::FixedSizeBinary(FixedSizeBinaryArray::empty(*byte_width, *n))
+            }
             DType::List(dtype, n) => Canonical::List(unsafe {
                 ListViewArray::new_unchecked(
                     Canonical::empty(dtype).into_array(),
@@ -366,6 +373,22 @@ impl Canonical {
             a
         } else {
             vortex_panic!("Cannot unwrap DecimalArray from {:?}", &self)
+        }
+    }
+
+    pub fn as_fixed_size_binary(&self) -> &FixedSizeBinaryArray {
+        if let Canonical::FixedSizeBinary(a) = self {
+            a
+        } else {
+            vortex_panic!("Cannot get FixedSizeBinaryArray from {:?}", &self)
+        }
+    }
+
+    pub fn into_fixed_size_binary(self) -> FixedSizeBinaryArray {
+        if let Canonical::FixedSizeBinary(a) = self {
+            a
+        } else {
+            vortex_panic!("Cannot unwrap FixedSizeBinaryArray from {:?}", &self)
         }
     }
 
@@ -651,31 +674,42 @@ impl Executable for CanonicalValidity {
                     )?,
                 )))
             }
-            Canonical::Primitive(p) => {
+            Canonical::Primitive(array) => {
                 let PrimitiveDataParts {
                     ptype,
                     buffer,
                     validity,
-                } = p.into_data_parts();
+                } = array.into_data_parts();
                 Ok(CanonicalValidity(Canonical::Primitive(unsafe {
                     PrimitiveArray::new_unchecked_from_handle(buffer, ptype, validity.execute(ctx)?)
                 })))
             }
-            Canonical::Decimal(d) => {
-                let DecimalDataParts {
-                    decimal_dtype,
-                    values,
-                    values_type,
-                    validity,
-                } = d.into_data_parts();
+            Canonical::Decimal(array) => {
+                let parts = array.into_data_parts();
                 Ok(CanonicalValidity(Canonical::Decimal(unsafe {
                     DecimalArray::new_unchecked_handle(
-                        values,
-                        values_type,
-                        decimal_dtype,
-                        validity.execute(ctx)?,
+                        parts.values,
+                        parts.values_type,
+                        parts.decimal_dtype,
+                        parts.validity.execute(ctx)?,
                     )
                 })))
+            }
+            Canonical::FixedSizeBinary(array) => {
+                let FixedSizeBinaryDataParts {
+                    byte_width,
+                    buffer,
+                    len,
+                    validity,
+                } = array.into_data_parts();
+                Ok(CanonicalValidity(Canonical::FixedSizeBinary(
+                    FixedSizeBinaryArray::try_new_handle(
+                        buffer,
+                        byte_width,
+                        len,
+                        validity.execute(ctx)?,
+                    )?,
+                )))
             }
             Canonical::VarBinView(vbv) => {
                 let VarBinViewDataParts {
@@ -828,31 +862,42 @@ impl Executable for RecursiveCanonical {
                     )?,
                 )))
             }
-            Canonical::Primitive(p) => {
+            Canonical::Primitive(array) => {
                 let PrimitiveDataParts {
                     ptype,
                     buffer,
                     validity,
-                } = p.into_data_parts();
+                } = array.into_data_parts();
                 Ok(RecursiveCanonical(Canonical::Primitive(unsafe {
                     PrimitiveArray::new_unchecked_from_handle(buffer, ptype, validity.execute(ctx)?)
                 })))
             }
-            Canonical::Decimal(d) => {
-                let DecimalDataParts {
-                    decimal_dtype,
-                    values,
-                    values_type,
-                    validity,
-                } = d.into_data_parts();
+            Canonical::Decimal(array) => {
+                let parts = array.into_data_parts();
                 Ok(RecursiveCanonical(Canonical::Decimal(unsafe {
                     DecimalArray::new_unchecked_handle(
-                        values,
-                        values_type,
-                        decimal_dtype,
-                        validity.execute(ctx)?,
+                        parts.values,
+                        parts.values_type,
+                        parts.decimal_dtype,
+                        parts.validity.execute(ctx)?,
                     )
                 })))
+            }
+            Canonical::FixedSizeBinary(array) => {
+                let FixedSizeBinaryDataParts {
+                    byte_width,
+                    buffer,
+                    len,
+                    validity,
+                } = array.into_data_parts();
+                Ok(RecursiveCanonical(Canonical::FixedSizeBinary(
+                    FixedSizeBinaryArray::try_new_handle(
+                        buffer,
+                        byte_width,
+                        len,
+                        validity.execute(ctx)?,
+                    )?,
+                )))
             }
             Canonical::VarBinView(vbv) => {
                 let VarBinViewDataParts {
@@ -1021,6 +1066,15 @@ impl Executable for PrimitiveArray {
     }
 }
 
+/// Execute the array to canonical form and unwrap as a [`FixedSizeBinaryArray`].
+impl Executable for FixedSizeBinaryArray {
+    fn execute(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self> {
+        match array.try_downcast::<FixedSizeBinary>() {
+            Ok(fixed_size_binary) => Ok(fixed_size_binary),
+            Err(array) => Ok(Canonical::execute(array, ctx)?.into_fixed_size_binary()),
+        }
+    }
+}
 /// Execute the array to canonical form and unwrap as a [`BoolArray`].
 ///
 /// This will panic if the array's dtype is not bool.
@@ -1180,6 +1234,7 @@ pub enum CanonicalView<'a> {
     Bool(ArrayView<'a, Bool>),
     Primitive(ArrayView<'a, Primitive>),
     Decimal(ArrayView<'a, Decimal>),
+    FixedSizeBinary(ArrayView<'a, FixedSizeBinary>),
     VarBinView(ArrayView<'a, VarBinView>),
     List(ArrayView<'a, ListView>),
     Map(ArrayView<'a, Map>),
@@ -1197,6 +1252,7 @@ impl From<CanonicalView<'_>> for Canonical {
             CanonicalView::Bool(a) => Canonical::Bool(a.into_owned()),
             CanonicalView::Primitive(a) => Canonical::Primitive(a.into_owned()),
             CanonicalView::Decimal(a) => Canonical::Decimal(a.into_owned()),
+            CanonicalView::FixedSizeBinary(a) => Canonical::FixedSizeBinary(a.into_owned()),
             CanonicalView::VarBinView(a) => Canonical::VarBinView(a.into_owned()),
             CanonicalView::List(a) => Canonical::List(a.into_owned()),
             CanonicalView::Map(a) => Canonical::Map(a.into_owned()),
@@ -1217,6 +1273,7 @@ impl CanonicalView<'_> {
             CanonicalView::Bool(a) => a.array().clone(),
             CanonicalView::Primitive(a) => a.array().clone(),
             CanonicalView::Decimal(a) => a.array().clone(),
+            CanonicalView::FixedSizeBinary(a) => a.array().clone(),
             CanonicalView::VarBinView(a) => a.array().clone(),
             CanonicalView::List(a) => a.array().clone(),
             CanonicalView::Map(a) => a.array().clone(),
@@ -1240,6 +1297,7 @@ impl Matcher for AnyCanonical {
             || array.is::<Bool>()
             || array.is::<Primitive>()
             || array.is::<Decimal>()
+            || array.is::<FixedSizeBinary>()
             || array.is::<Struct>()
             || array.is::<Union>()
             || array.is::<ListView>()
@@ -1260,6 +1318,8 @@ impl Matcher for AnyCanonical {
             Some(CanonicalView::Primitive(a))
         } else if let Some(a) = array.as_opt::<Decimal>() {
             Some(CanonicalView::Decimal(a))
+        } else if let Some(a) = array.as_opt::<FixedSizeBinary>() {
+            Some(CanonicalView::FixedSizeBinary(a))
         } else if let Some(a) = array.as_opt::<Struct>() {
             Some(CanonicalView::Struct(a))
         } else if let Some(a) = array.as_opt::<Union>() {

@@ -35,7 +35,7 @@ impl<'a> Arbitrary<'a> for FieldName {
 }
 
 fn random_dtype(u: &mut Unstructured<'_>, depth: u8) -> Result<DType> {
-    const BASE_TYPE_COUNT: i32 = 5;
+    const BASE_TYPE_COUNT: i32 = 6;
     const CONTAINER_TYPE_COUNT: i32 = 4;
     let max_dtype_kind = if depth == 0 {
         BASE_TYPE_COUNT
@@ -49,17 +49,18 @@ fn random_dtype(u: &mut Unstructured<'_>, depth: u8) -> Result<DType> {
         3 => DType::Decimal(u.arbitrary()?, u.arbitrary()?),
         4 => DType::Utf8(u.arbitrary()?),
         5 => DType::Binary(u.arbitrary()?),
+        6 => DType::FixedSizeBinary(u.int_in_range(0..=32)?, u.arbitrary()?),
 
         // container types
-        6 => DType::Struct(random_struct_dtype(u, depth - 1)?, u.arbitrary()?),
-        7 => DType::List(Arc::new(random_dtype(u, depth - 1)?), u.arbitrary()?),
-        8 => DType::FixedSizeList(
+        7 => DType::Struct(random_struct_dtype(u, depth - 1)?, u.arbitrary()?),
+        8 => DType::List(Arc::new(random_dtype(u, depth - 1)?), u.arbitrary()?),
+        9 => DType::FixedSizeList(
             Arc::new(random_dtype(u, depth - 1)?),
             // We limit the list size to 3 rather (following random struct fields).
             u.choose_index(3)?.try_into().vortex_expect("impossible"),
             u.arbitrary()?,
         ),
-        9 => random_map_dtype(u, depth - 1)?,
+        10 => random_map_dtype(u, depth - 1)?,
         // Null,
         // Extension(ExtDType, Nullability),
         _ => unreachable!("Number out of range"),
@@ -137,10 +138,7 @@ fn random_struct_dtype(u: &mut Unstructured<'_>, depth: u8) -> Result<StructFiel
 
 #[cfg(test)]
 mod tests {
-    use arbitrary::Unstructured;
-
-    use super::random_map_dtype;
-    use crate::dtype::DType;
+    use super::*;
 
     #[test]
     fn random_map_dtype_never_asserts_sorted_keys() {
@@ -152,5 +150,14 @@ mod tests {
             };
             assert!(!map_dtype.keys_sorted());
         }
+    }
+
+    #[test]
+    fn fixed_size_binary_is_in_the_base_type_range() {
+        let mut u = Unstructured::new(&[5, 0, 0]);
+        assert!(matches!(
+            random_dtype(&mut u, 0),
+            Ok(DType::FixedSizeBinary(0, Nullability::NonNullable))
+        ));
     }
 }
