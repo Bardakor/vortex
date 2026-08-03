@@ -26,13 +26,10 @@ void duckdb_vx_vector_dictionary(duckdb_vector ffi_vector,
 // vector must not be a DictionaryVector or a SequenceVector
 void duckdb_vx_vector_set_all_valid(duckdb_vector ffi_vector);
 
-// Set the data pointer for the vector. This is the start of the values array in the vector.
-void duckdb_vx_vector_set_data_ptr(duckdb_vector ffi_vector, void *ptr);
-
 // Converts a duckdb flat vector into a Sequence vector.
 void duckdb_vx_sequence_vector(duckdb_vector c_vector, int64_t start, int64_t step, idx_t capacity);
 
-void duckdb_vector_flatten(duckdb_vector vector, unsigned long len);
+void duckdb_vector_flatten(duckdb_vector vector);
 
 duckdb_value duckdb_vx_vector_get_value(duckdb_vector ffi_vector, idx_t index);
 

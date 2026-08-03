@@ -161,11 +161,6 @@ impl VectorRef {
         }
     }
 
-    /// Sets the data pointer for the vector. This is the start of the values array in the vector.
-    pub unsafe fn set_data_ptr<T>(&mut self, ptr: *mut T) {
-        unsafe { cpp::duckdb_vx_vector_set_data_ptr(self.as_ptr(), ptr as *mut c_void) }
-    }
-
     /// Sets the validity data for the vector from a [`ValidityData`]. The buffer is
     /// attached purely as a keep-alive, and the data pointer is used as the validity data
     /// at the given `u64_offset`.
