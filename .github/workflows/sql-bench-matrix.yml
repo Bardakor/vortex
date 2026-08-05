@@ -18,16 +18,24 @@ on:
 jobs:
   resolve-matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.mode == 'pr' && 130 || 10 }}
     permissions:
+      actions: read
       contents: read
     outputs:
       benchmark_matrix: ${{ steps.resolve.outputs.benchmark_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
-          ref: ${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Wait for SQL baseline
+        if: inputs.mode == 'pr' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/wait-for-sql-baseline.sh
       - name: Install uv
         uses: spiraldb/actions/.github/actions/setup-uv@a746510eafaa926484c354541cfc49b2ec06cc63  # 0.18.6
         with:
@@ -59,7 +67,7 @@ jobs:
           sccache: s3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
-          ref: ${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-rust
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -120,7 +128,7 @@ jobs:
           sccache: s3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
-          ref: ${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-rust
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -180,7 +188,7 @@ jobs:
         uses: polarsignals/gh-actions-ps-profiling@68ae857e375a826606352016e5b90f01a2a7ff7a  # v0.8.1
         with:
           polarsignals_cloud_token: ${{ secrets.POLAR_SIGNALS_API_KEY }}
-          labels: "branch=${{ github.ref_name }};gh_run_id=${{ github.run_id }};commit_sha=${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }};benchmark=${{ matrix.id }}"
+          labels: "branch=${{ github.ref_name }};gh_run_id=${{ github.run_id }};commit_sha=${{ github.sha }};benchmark=${{ matrix.id }}"
           project_uuid: "e5d846e1-b54c-46e7-9174-8bf055a3af56"
           job_name: "${{ matrix.id }}"
           profiling_frequency: 199
@@ -236,20 +244,29 @@ jobs:
           uv run --no-project scripts/capture-file-sizes.py \
             vortex-bench/data \
             --benchmark ${{ matrix.subcommand }} \
-            --commit ${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }} \
+            --commit ${{ github.sha }} \
             -o sizes.json
           cat sizes.json >> results.json
 
       - name: Compare results
         if: inputs.mode == 'pr'
         shell: bash
+        env:
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha }}
         run: |
           set -Eeu -o pipefail -x
 
-          python3 scripts/s3-download.py s3://vortex-ci-benchmark-results/data.json.gz data.json.gz --no-sign-request
+          baseline_args=()
+          if [[ -n "$BASELINE_COMMIT" ]]; then
+            baseline_args+=(--baseline-commit "$BASELINE_COMMIT")
+          fi
+
+          python3 scripts/s3-download.py \
+            s3://vortex-ci-benchmark-results/data.json.gz data.json.gz --no-sign-request
           gzip -d -c data.json.gz > base.json
 
-          uv run --no-project scripts/compare-benchmark-jsons.py base.json results.json "${{ matrix.name }}" \
+          uv run --no-project scripts/compare-benchmark-jsons.py \
+            base.json results.json "${{ matrix.name }}" "${baseline_args[@]}" \
             > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 

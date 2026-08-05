@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPARE_SCRIPT = REPO_ROOT / "scripts" / "compare-benchmark-jsons.py"
@@ -202,6 +203,37 @@ def test_read_latest_baseline_rows_streams_latest_matching_benchmark_commit(tmp_
     assert len(selected) == 2
 
 
+def test_read_latest_baseline_rows_uses_requested_base_commit(tmp_path: Path) -> None:
+    compare = load_compare_module()
+    history_path = tmp_path / "history.jsonl"
+    history_rows = [
+        stored_timing_row("base-ancestor", "tpch_q01/datafusion:parquet", 100),
+        stored_timing_row("future-develop", "tpch_q01/datafusion:parquet", 90),
+    ]
+    history_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in history_rows),
+        encoding="utf-8",
+    )
+    pr = pd.DataFrame([stored_timing_row("pr-sha", "tpch_q01/datafusion:parquet", 105)])
+
+    selected = compare.read_latest_baseline_rows(history_path, pr, ["base-ancestor"])
+
+    assert set(selected["commit_id"]) == {"base-ancestor"}
+
+
+def test_read_latest_baseline_rows_does_not_fall_back_from_requested_commit(tmp_path: Path) -> None:
+    compare = load_compare_module()
+    history_path = tmp_path / "history.jsonl"
+    history_path.write_text(
+        f"{json.dumps(stored_timing_row('other-commit', 'tpch_q01/datafusion:parquet', 100))}\n",
+        encoding="utf-8",
+    )
+    pr = pd.DataFrame([stored_timing_row("pr-sha", "tpch_q01/datafusion:parquet", 105)])
+
+    with pytest.raises(ValueError, match="No baseline rows found"):
+        compare.read_latest_baseline_rows(history_path, pr, ["requested-base"])
+
+
 def test_read_latest_baseline_rows_uses_last_result_from_rerun(tmp_path: Path) -> None:
     compare = load_compare_module()
     history_path = tmp_path / "history.jsonl"
@@ -217,7 +249,7 @@ def test_read_latest_baseline_rows_uses_last_result_from_rerun(tmp_path: Path) -
     )
     pr = pd.DataFrame([stored_timing_row("pr", "tpch_q01/datafusion:parquet", 105)])
 
-    selected = compare.read_latest_baseline_rows(history_path, pr)
+    selected = compare.read_latest_baseline_rows(history_path, pr, ["base"])
 
     assert len(selected) == 1
     assert selected.iloc[0]["value"] == 110
