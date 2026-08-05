@@ -8,7 +8,9 @@ use vortex_error::vortex_ensure;
 use vortex_error::vortex_ensure_eq;
 
 use crate::dtype::DType;
+use crate::dtype::MapDType;
 use crate::dtype::PType;
+use crate::dtype::UnionVariants;
 use crate::scalar::PValue;
 use crate::scalar::Scalar;
 use crate::scalar::ScalarValue;
@@ -113,37 +115,7 @@ impl Scalar {
                     })?;
                 }
             }
-            DType::Map(map, _) => {
-                let ScalarValue::Tuple(entries) = value else {
-                    vortex_bail!("map dtype expected Tuple value, got {value}");
-                };
-                let key_dtype = map.key_dtype();
-                let value_dtype = map.value_dtype();
-
-                for (index, entry) in entries.iter().enumerate() {
-                    let entry = entry.as_ref().ok_or_else(|| {
-                        vortex_error::vortex_err!("map entry at index {index} cannot be null")
-                    })?;
-                    let ScalarValue::Tuple(values) = entry else {
-                        vortex_bail!(
-                            "map entry at index {index} expected Tuple value, got {entry}"
-                        );
-                    };
-                    vortex_ensure_eq!(
-                        values.len(),
-                        2,
-                        "map entry at index {index} expected 2 values, got {}",
-                        values.len(),
-                    );
-
-                    Self::validate(&key_dtype, values[0].as_ref()).map_err(|error| {
-                        vortex_error::vortex_err!("map key at entry {index}: {error}")
-                    })?;
-                    Self::validate(&value_dtype, values[1].as_ref()).map_err(|error| {
-                        vortex_error::vortex_err!("map value at entry {index}: {error}")
-                    })?;
-                }
-            }
+            DType::Map(map, _) => Self::validate_map(map, value)?,
             DType::Struct(fields, _) => {
                 let ScalarValue::Tuple(values) = value else {
                     vortex_bail!("struct dtype expected Tuple value, got {value}");
@@ -161,30 +133,7 @@ impl Scalar {
                     Self::validate(&field, field_value.as_ref())?;
                 }
             }
-            DType::Union(variants, _) => {
-                let ScalarValue::Union(union_value) = value else {
-                    vortex_bail!("union dtype expected Union value, got {value}");
-                };
-
-                let type_id = union_value.type_id();
-                let Some(child_index) = variants.tag_to_child_index(type_id) else {
-                    vortex_bail!(
-                        "union value has unknown type ID {type_id}; expected one of {:?}",
-                        variants.type_ids()
-                    );
-                };
-
-                let child_dtype = variants
-                    .variant_by_index(child_index)
-                    .vortex_expect("resolved union child index must be valid");
-
-                Self::validate(&child_dtype, union_value.child_value()).map_err(|error| {
-                    vortex_error::vortex_err!(
-                        "union value for type ID {type_id} is invalid for dtype {child_dtype}: \
-                         {error}"
-                    )
-                })?;
-            }
+            DType::Union(variants, _) => Self::validate_union(variants, value)?,
             DType::Variant(_) => {
                 let ScalarValue::Variant(inner) = value else {
                     vortex_bail!("variant dtype expected Variant value, got {value}");
@@ -201,6 +150,66 @@ impl Scalar {
         }
 
         Ok(())
+    }
+
+    /// Validate that a non-null [`ScalarValue`] holds well-formed `(key, value)` entries for the
+    /// given map dtype.
+    fn validate_map(map: &MapDType, value: &ScalarValue) -> VortexResult<()> {
+        let ScalarValue::Tuple(entries) = value else {
+            vortex_bail!("map dtype expected Tuple value, got {value}");
+        };
+
+        let key_dtype = map.key_dtype();
+        let value_dtype = map.value_dtype();
+
+        for (index, entry) in entries.iter().enumerate() {
+            let entry = entry.as_ref().ok_or_else(|| {
+                vortex_error::vortex_err!("map entry at index {index} cannot be null")
+            })?;
+            let ScalarValue::Tuple(values) = entry else {
+                vortex_bail!("map entry at index {index} expected Tuple value, got {entry}");
+            };
+            vortex_ensure_eq!(
+                values.len(),
+                2,
+                "map entry at index {index} expected 2 values, got {}",
+                values.len(),
+            );
+
+            Self::validate(&key_dtype, values[0].as_ref())
+                .map_err(|error| vortex_error::vortex_err!("map key at entry {index}: {error}"))?;
+            Self::validate(&value_dtype, values[1].as_ref()).map_err(|error| {
+                vortex_error::vortex_err!("map value at entry {index}: {error}")
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate that a non-null [`ScalarValue`] holds a union value whose type ID and child value
+    /// match one of the given union variants.
+    fn validate_union(variants: &UnionVariants, value: &ScalarValue) -> VortexResult<()> {
+        let ScalarValue::Union(union_value) = value else {
+            vortex_bail!("union dtype expected Union value, got {value}");
+        };
+
+        let type_id = union_value.type_id();
+        let Some(child_index) = variants.tag_to_child_index(type_id) else {
+            vortex_bail!(
+                "union value has unknown type ID {type_id}; expected one of {:?}",
+                variants.type_ids()
+            );
+        };
+
+        let child_dtype = variants
+            .variant_by_index(child_index)
+            .vortex_expect("resolved union child index must be valid");
+
+        Self::validate(&child_dtype, union_value.child_value()).map_err(|error| {
+            vortex_error::vortex_err!(
+                "union value for type ID {type_id} is invalid for dtype {child_dtype}: {error}"
+            )
+        })
     }
 }
 
