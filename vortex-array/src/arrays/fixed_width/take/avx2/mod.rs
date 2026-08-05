@@ -14,6 +14,7 @@ mod tests;
 
 use std::arch::x86_64::__m256i;
 use std::arch::x86_64::_mm256_and_si256;
+use std::arch::x86_64::_mm256_movemask_epi8;
 use std::arch::x86_64::_mm256_set1_epi32;
 
 use vortex_buffer::Alignment;
@@ -144,7 +145,7 @@ where
     // after the SIMD loop and avoid a conditional branch on every iteration.
     assert!(
         // SAFETY: `exec_take` is only called by `take_avx2`, whose caller guarantees AVX2 support.
-        unsafe { std::arch::x86_64::_mm256_movemask_epi8(all_indices_valid) } == -1,
+        unsafe { _mm256_movemask_epi8(all_indices_valid) } == -1,
         "take index out of bounds"
     );
 
