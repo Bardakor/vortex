@@ -38,6 +38,7 @@ use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
 use vortex::expr::Expression;
 use vortex::expr::stats::Precision;
+use vortex::expr::traversal::{TraversalOrder, pre_order_visit_down};
 use vortex::file::v2::FileStatsLayoutReader;
 use vortex::io::kanal_ext::KanalExt as _;
 use vortex::io::runtime::BlockingRuntime as _;
@@ -46,6 +47,7 @@ use vortex::layout::scan::multi::MultiLayoutChild;
 use vortex::layout::scan::multi::MultiLayoutDataSource;
 use vortex::metrics::tracing::get_global_labels;
 use vortex::scalar_fn::fns::binary::Binary;
+use vortex::scalar_fn::fns::get_item::GetItem;
 use vortex::scalar_fn::fns::operators::Operator;
 use vortex::scalar_fn::fns::pack::Pack;
 use vortex::scan::DataSource;
@@ -377,6 +379,21 @@ impl Stream for ScanDriverStream {
     }
 }
 
+fn references_field(expr: &Expression, name: &str) -> VortexResult<bool> {
+    let mut contains = false;
+    pre_order_visit_down(expr, |node| {
+        if node
+            .as_opt::<GetItem>()
+            .is_some_and(|field| field.as_ref() == name)
+        {
+            contains = true;
+            return Ok(TraversalOrder::Stop);
+        }
+        Ok(TraversalOrder::Continue)
+    })?;
+    Ok(contains)
+}
+
 fn build_partials(
     aggregates: &[ColumnAggregate],
     fields: &[DuckdbField],
@@ -607,6 +624,11 @@ pub fn pushdown_complex_filter(
         debug!(%expr, "failed to push down expression");
         return Ok(false);
     };
+
+    // Pushed filter can't resolve virtual columns
+    if references_field(&expr, "file_row_number")? || references_field(&expr, "file_index")? {
+        return Ok(false);
+    }
 
     // Duckdb calls pushdown_complex_filter during planning phase.
     // If all filters are pushed down, duckdb enables a LEFT_DELIM_JOIN ->

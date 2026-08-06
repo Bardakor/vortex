@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+include ../setup.slt.no
+
+# aggregates over virtual columns are not pushed
+
+statement ok
+CREATE TABLE tv(i INTEGER);
+
+statement ok
+INSERT INTO tv VALUES (10), (20), (30);
+
+statement ok
+COPY tv TO '${WORK_DIR}/cv.vortex';
+
+query II
+SELECT count(file_row_number), sum(file_row_number) FROM '${WORK_DIR}/cv.vortex';
+----
+3 3
+
+query I
+SELECT min(file_index) FROM '${WORK_DIR}/cv.vortex';
+----
+0
+
+query II
+SELECT count(*), sum(i) FROM '${WORK_DIR}/cv.vortex' WHERE file_row_number < 2;
+----
+2 30
+
+query I
+SELECT i FROM '${WORK_DIR}/cv.vortex' WHERE file_row_number < 2 ORDER BY i;
+----
+10
+20

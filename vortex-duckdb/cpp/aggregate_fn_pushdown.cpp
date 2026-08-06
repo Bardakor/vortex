@@ -53,6 +53,12 @@ LogicalOperatorPtr TryReplaceAggregate(ClientContext &context,
         return op;
     }
 
+    for (const auto &column_id : get->GetColumnIds()) {
+        if (column_id.IsVirtualColumn()) {
+            return op;
+        }
+    }
+
     vector<std::pair<TableColumnScanIndex, const Expression &>> input;
     const idx_t aggregates_len = agg.expressions.size();
     input.reserve(aggregates_len);
