@@ -36,7 +36,6 @@ use crate::builders::DEFAULT_BUILDER_CAPACITY;
 use crate::builders::PrimitiveBuilder;
 use crate::builders::UninitRange;
 use crate::builders::ValidityBuilder;
-use crate::builders::builder_with_capacity;
 use crate::dtype::DType;
 use crate::dtype::IntegerPType;
 use crate::dtype::Nullability;
@@ -255,38 +254,6 @@ impl<O: OffsetBuilderPType, S: OffsetBuilderPType> ListViewBuilder<O, S> {
         }
 
         Ok(())
-    }
-
-    /// Appends the same list `value` `n` times, storing its elements once.
-    ///
-    /// This materializes the scalar's elements and hands them to
-    /// [`append_array_as_repeated_list`](Self::append_array_as_repeated_list). A caller with a run
-    /// of appends to make should materialize the elements once itself and call that directly.
-    pub fn append_constant_list(
-        &mut self,
-        value: ListScalar,
-        n: usize,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<()> {
-        if n == 0 {
-            return Ok(());
-        }
-
-        let Some(elements) = value.elements() else {
-            vortex_ensure!(
-                self.dtype.is_nullable(),
-                "Cannot append null value to non-nullable list builder"
-            );
-            self.append_nulls(n);
-            return Ok(());
-        };
-
-        let mut elements_builder = builder_with_capacity(self.element_dtype(), elements.len());
-        for scalar in elements {
-            elements_builder.append_scalar(&scalar)?;
-        }
-
-        self.append_array_as_repeated_list(&elements_builder.finish(), n, ctx)
     }
 
     /// Finishes the builder directly into a [`ListViewArray`].

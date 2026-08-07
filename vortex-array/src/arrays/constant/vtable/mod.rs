@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::hash::Hasher;
 
+use itertools::Itertools;
 use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -26,6 +27,7 @@ use crate::array::ArrayId;
 use crate::array::ArrayView;
 use crate::array::VTable;
 use crate::array::unsupported_buffer_replacement;
+use crate::arrays::ExtensionArray;
 use crate::arrays::constant::ConstantData;
 use crate::arrays::constant::compute::rules::PARENT_RULES;
 use crate::arrays::constant::vtable::canonical::constant_canonicalize;
@@ -33,19 +35,21 @@ use crate::buffer::BufferHandle;
 use crate::builders::ArrayBuilder;
 use crate::builders::BoolBuilder;
 use crate::builders::DecimalBuilder;
-use crate::builders::ExtensionBuilder;
 use crate::builders::FixedSizeListBuilder;
+use crate::builders::ListViewBuilder;
 use crate::builders::NullBuilder;
 use crate::builders::PrimitiveBuilder;
-use crate::builders::StructBuilder;
 use crate::builders::VarBinViewBuilder;
+use crate::builders::builder_with_capacity;
 use crate::canonical::Canonical;
 use crate::dtype::DType;
+use crate::dtype::OffsetBuilderPType;
 use crate::match_each_decimal_value;
-use crate::match_each_list_builder;
+use crate::match_each_listview_builder;
 use crate::match_each_native_ptype;
 use crate::match_each_varbin_builder;
 use crate::scalar::DecimalValue;
+use crate::scalar::ListScalar;
 use crate::scalar::Scalar;
 use crate::scalar::ScalarValue;
 use crate::serde::ArrayChildren;
@@ -257,20 +261,22 @@ impl VTable for Constant {
                 }
             }
             DType::List(..) => append_constant_list_run(array, n, builder, ctx)?,
-            DType::Struct(..) => match builder.as_any_mut().downcast_mut::<StructBuilder>() {
-                Some(b) => b.append_constant(scalar.as_struct(), n, ctx)?,
-                None => append_via_canonical(array, builder, ctx)?,
-            },
-            DType::Extension(..) => match builder.as_any_mut().downcast_mut::<ExtensionBuilder>() {
-                Some(b) => b.append_constant(scalar.as_extension(), n, ctx)?,
-                None => append_via_canonical(array, builder, ctx)?,
-            },
-            DType::FixedSizeList(..) => {
-                match builder.as_any_mut().downcast_mut::<FixedSizeListBuilder>() {
-                    Some(b) => b.append_constant(scalar.as_list(), n, ctx)?,
-                    None => append_via_canonical(array, builder, ctx)?,
-                }
+            DType::Extension(ext_dtype) => {
+                // An extension array is its storage wearing a dtype, so a run of identical values
+                // is a constant storage array, which stays constant-encoded in the builder.
+                // Canonicalizing instead would materialize the storage: see the note in
+                // `constant_canonicalize` about `ExtensionConstantRule`.
+                let storage = ConstantArray::new(scalar.as_extension().to_storage_scalar(), n);
+                ExtensionArray::new(ext_dtype.clone(), storage.into_array())
+                    .into_array()
+                    .append_to_builder(builder, ctx)?
             }
+            DType::FixedSizeList(..) => {
+                append_constant_fixed_size_list_run(array, n, builder, ctx)?
+            }
+            // The remaining dtypes canonicalize cheaply: a constant struct canonicalizes to
+            // constant fields, and a constant map to views sharing one copy of the entries, so
+            // appending the canonical array preserves the run's economy.
             // TODO: add a fast path for DType::Union once it has a builder.
             _ => append_via_canonical(array, builder, ctx)?,
         }
@@ -279,12 +285,13 @@ impl VTable for Constant {
     }
 }
 
-/// Appends the constant list `array` as one repeated run per list builder.
+/// Appends the constant list `array` as one run sharing a single copy of its elements.
 ///
-/// Only the concrete list builders can record a run from the scalar; any other builder for a list
-/// dtype has to go the long way around.
-// The complexity comes from the expansion of `match_each_list_builder!`.
-#[expect(clippy::cognitive_complexity)]
+/// The list's elements materialize once, and
+/// [`ListViewBuilder::append_array_as_repeated_list`] points the run's `n` views at that one
+/// copy. Only a list-view builder has a layout that can share elements; any other builder for a
+/// list dtype - a [`ListBuilder`](crate::builders::ListBuilder), whose offsets can only describe
+/// contiguous lists - appends the canonical run instead.
 fn append_constant_list_run(
     array: ArrayView<'_, Constant>,
     n: usize,
@@ -292,7 +299,8 @@ fn append_constant_list_run(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<()> {
     let scalar = array.scalar();
-    match match_each_list_builder!(builder, |b| b.append_constant_list(
+    match match_each_listview_builder!(builder, |b| append_repeated_list_run(
+        b,
         scalar.as_list(),
         n,
         ctx
@@ -300,6 +308,71 @@ fn append_constant_list_run(
         Some(result) => result,
         None => append_via_canonical(array, builder, ctx),
     }
+}
+
+/// Appends the list `scalar` to a [`ListViewBuilder`] `n` times, storing its elements once.
+fn append_repeated_list_run<O: OffsetBuilderPType, S: OffsetBuilderPType>(
+    builder: &mut ListViewBuilder<O, S>,
+    scalar: ListScalar,
+    n: usize,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<()> {
+    if n == 0 {
+        return Ok(());
+    }
+
+    let Some(elements) = scalar.elements() else {
+        // A null run stores no elements at all.
+        builder.append_nulls(n);
+        return Ok(());
+    };
+
+    let mut elements_builder = builder_with_capacity(scalar.element_dtype(), elements.len());
+    for element in &elements {
+        elements_builder.append_scalar(element)?;
+    }
+
+    builder.append_array_as_repeated_list(&elements_builder.finish(), n, ctx)
+}
+
+/// Appends the constant fixed-size-list `array` as its list's elements tiled `n` times.
+///
+/// The list's elements materialize into a tile once - a single [`ConstantArray`] when they are
+/// all the same scalar, so that the tiling costs nothing - and
+/// [`FixedSizeListBuilder::append_array_as_repeated_list`] shares that one tile across the run.
+fn append_constant_fixed_size_list_run(
+    array: ArrayView<'_, Constant>,
+    n: usize,
+    builder: &mut dyn ArrayBuilder,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<()> {
+    let Some(builder) = builder.as_any_mut().downcast_mut::<FixedSizeListBuilder>() else {
+        return append_via_canonical(array, builder, ctx);
+    };
+
+    if n == 0 {
+        return Ok(());
+    }
+
+    let scalar = array.scalar().as_list();
+    let Some(elements) = scalar.elements() else {
+        // A null run stores no elements of its own, only the placeholders the builder writes.
+        builder.append_nulls(n);
+        return Ok(());
+    };
+
+    let tile = match elements.iter().all_equal_value() {
+        Ok(uniform) => ConstantArray::new(uniform.clone(), elements.len()).into_array(),
+        Err(_) => {
+            let mut tile_builder = builder_with_capacity(builder.element_dtype(), elements.len());
+            for element in &elements {
+                tile_builder.append_scalar(element)?;
+            }
+            tile_builder.finish()
+        }
+    };
+
+    builder.append_array_as_repeated_list(&tile, n, ctx)
 }
 
 /// Appends `array` by canonicalizing it first, for the dtypes with no fast path of their own.
@@ -347,16 +420,22 @@ mod tests {
 
     use crate::IntoArray;
     use crate::VortexSessionExecute;
+    use crate::arrays::Chunked;
     use crate::arrays::Constant;
     use crate::arrays::ConstantArray;
     use crate::arrays::Extension;
     use crate::arrays::FixedSizeList;
+    use crate::arrays::ListView;
     use crate::arrays::Struct;
+    use crate::arrays::chunked::ChunkedArrayExt;
     use crate::arrays::constant::vtable::canonical::constant_canonicalize;
     use crate::arrays::extension::ExtensionArrayExt;
     use crate::arrays::fixed_size_list::FixedSizeListArraySlotsExt;
+    use crate::arrays::listview::ListViewArraySlotsExt;
     use crate::arrays::struct_::StructArrayExt;
     use crate::assert_arrays_eq;
+    use crate::builders::ArrayBuilder;
+    use crate::builders::ListBuilder;
     use crate::builders::builder_with_capacity;
     use crate::dtype::DType;
     use crate::dtype::Nullability;
@@ -470,6 +549,79 @@ mod tests {
         ))
     }
 
+    #[rstest]
+    #[case::non_empty(vec![Scalar::from(1i32), Scalar::from(2i32)], 4)]
+    #[case::empty(vec![], 3)]
+    #[case::n_zero(vec![Scalar::from(1i32)], 0)]
+    fn test_list_constant_append(
+        #[case] elements: Vec<Scalar>,
+        #[case] n: usize,
+    ) -> VortexResult<()> {
+        let scalar = Scalar::list(
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),
+            elements,
+            Nullability::NonNullable,
+        );
+        assert_append_matches_canonical(ConstantArray::new(scalar, n))
+    }
+
+    #[test]
+    fn test_null_list_constant_append() -> VortexResult<()> {
+        let dtype = DType::List(
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),
+            Nullability::Nullable,
+        );
+        assert_append_matches_canonical(ConstantArray::new(Scalar::null(dtype), 3))
+    }
+
+    /// A run of identical lists appended into a list-view builder shares one copy of its elements
+    /// across the whole run.
+    #[test]
+    fn test_list_constant_append_keeps_one_copy_of_the_elements() -> VortexResult<()> {
+        let mut ctx = crate::array_session().create_execution_ctx();
+        let scalar = Scalar::list(
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),
+            vec![Scalar::from(1i32), Scalar::from(2i32), Scalar::from(3i32)],
+            Nullability::NonNullable,
+        );
+        let array = ConstantArray::new(scalar, 1_000);
+
+        let mut builder = builder_with_capacity(array.dtype(), array.len());
+        array
+            .into_array()
+            .append_to_builder(builder.as_mut(), &mut ctx)?;
+        let result = builder.finish();
+
+        assert_eq!(
+            result.as_::<ListView>().elements().len(),
+            3,
+            "the run's elements should be stored once, not once per row",
+        );
+        Ok(())
+    }
+
+    /// A `ListBuilder`'s offsets can only describe contiguous lists, so a constant run cannot
+    /// share its elements there and takes the canonical path instead.
+    #[test]
+    fn test_list_constant_append_into_list_builder() -> VortexResult<()> {
+        let mut ctx = crate::array_session().create_execution_ctx();
+        let element_dtype: Arc<DType> =
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable));
+        let scalar = Scalar::list(
+            Arc::clone(&element_dtype),
+            vec![Scalar::from(1i32), Scalar::from(2i32)],
+            Nullability::NonNullable,
+        );
+        let array = ConstantArray::new(scalar, 4).into_array();
+
+        let mut builder =
+            ListBuilder::<u32>::with_capacity(element_dtype, Nullability::NonNullable, 0, 0);
+        array.append_to_builder(&mut builder, &mut ctx)?;
+
+        assert_arrays_eq!(&builder.finish(), &array, &mut ctx);
+        Ok(())
+    }
+
     #[test]
     fn test_struct_constant_append() -> VortexResult<()> {
         let fields = StructFields::new(
@@ -558,8 +710,8 @@ mod tests {
         assert_append_matches_canonical(ConstantArray::new(Scalar::null(dtype), 3))
     }
 
-    /// A fixed-size list whose elements are all the same scalar tiles to a constant array, so the
-    /// elements child should not be materialized at all.
+    /// A fixed-size list whose elements are all the same scalar tiles a constant array, so the
+    /// tile's chunks stay constant-encoded rather than materializing a value per row.
     #[test]
     fn test_uniform_fixed_size_list_constant_append_keeps_elements_constant() -> VortexResult<()> {
         let mut ctx = crate::array_session().create_execution_ctx();
@@ -576,8 +728,12 @@ mod tests {
             .append_to_builder(builder.as_mut(), &mut ctx)?;
         let result = builder.finish();
 
+        let elements = result.as_::<FixedSizeList>().elements().clone();
         assert!(
-            result.as_::<FixedSizeList>().elements().is::<Constant>(),
+            elements
+                .as_::<Chunked>()
+                .iter_chunks()
+                .all(|chunk| chunk.is::<Constant>()),
             "a uniform tile should have stayed constant-encoded",
         );
         Ok(())

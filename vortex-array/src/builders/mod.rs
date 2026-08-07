@@ -222,6 +222,24 @@ macro_rules! match_each_list_builder {
     }};
 }
 
+/// Matches a `&mut dyn ArrayBuilder` against every concrete [`ListViewBuilder`]`<O, S>`
+/// instantiation over the [`OffsetBuilderPType`](crate::dtype::OffsetBuilderPType) offset/size
+/// types (`u32`, `u64`, `i32`, `i64`), and only those.
+///
+/// Binds the downcast builder as `$builder` and evaluates `$body` with it, yielding
+/// `Some($body)`; yields `None` when the builder is not a list-view builder - including when it
+/// is a [`ListBuilder`]. Callers reach for this instead of
+/// [`match_each_list_builder!`](crate::match_each_list_builder) when the body needs methods only
+/// a list-view builder has, such as
+/// [`append_array_as_repeated_list`](ListViewBuilder::append_array_as_repeated_list).
+#[macro_export]
+macro_rules! match_each_listview_builder {
+    ($dyn_builder:expr, | $builder:ident | $body:expr) => {{
+        let __dyn_builder: &mut dyn $crate::builders::ArrayBuilder = $dyn_builder;
+        $crate::__match_each_listview_builder!(__dyn_builder, $builder, $body, [u32, u64, i32, i64])
+    }};
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __match_each_list_builder {
