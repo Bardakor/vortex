@@ -361,7 +361,6 @@ mod tests {
     use crate::arrays::VarBinViewArray;
     use crate::arrays::VariantArray;
     use crate::arrays::listview::ListViewRebuildMode;
-    use crate::builders::builder_with_capacity;
     use crate::dtype::DType;
     use crate::dtype::DecimalDType;
     use crate::dtype::FieldNames;
@@ -379,15 +378,8 @@ mod tests {
 
     fn materialized_uncompressed_size_in_bytes(array: &ArrayRef) -> u64 {
         let mut ctx = array_session().create_execution_ctx();
-        let mut builder = builder_with_capacity(array.dtype(), array.len());
         array
-            .append_to_builder(builder.as_mut(), &mut ctx)
-            .vortex_expect("appended");
-
-        // A builder keeps its children in whatever encoding they were appended in, so the bytes of
-        // what it finishes only stand in for the uncompressed size once the whole tree is decoded.
-        builder
-            .finish()
+            .clone()
             .execute::<RecursiveCanonical>(&mut ctx)
             .vortex_expect("recursively canonicalized")
             .0
