@@ -100,8 +100,8 @@ LogicalOperatorPtr TryReplaceAggregate(ClientContext &context,
         if (column_index == COUNT_STAR_PROJ_IDX) {
             names[i] = "count_star()";
         } else {
-            const TableColumnStorageIndex storage_index = get->GetColumnIds()[column_index].GetPrimaryIndex();
-            names[i] = get->names[storage_index];
+            const TableColumnStorageIndex storage_index = get->StorageIndex(column_index).names[i] =
+                get->names[storage_index];
         }
         get->types[i] = expr.return_type;
         get->returned_types[i] = expr.return_type;

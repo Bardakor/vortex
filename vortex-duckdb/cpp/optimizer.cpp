@@ -86,20 +86,3 @@ std::optional<GetBinding> Resolve(ColumnBinding binding, Analyses &analyses, con
     }
     return std::nullopt;
 }
-
-bool CanPushdownColumn(const GetAnalysis &analysis, TableColumnScanIndex idx) {
-    const auto it = analysis.col_to_expr.find(idx);
-    return it != analysis.col_to_expr.end() && it->second != nullptr;
-}
-
-bool IsPassthrough(const LogicalProjection &projection) {
-    if (projection.expressions.empty()) {
-        return false; // don't register empty projections in Projections
-    }
-    for (const auto &e : projection.expressions) {
-        if (e->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
-            return false;
-        }
-    }
-    return true;
-}

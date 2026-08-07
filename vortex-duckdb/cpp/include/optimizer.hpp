@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 #pragma once
-#include "table_function.hpp"
-
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -94,44 +92,3 @@ struct GetBinding {
  * GET nor part of PROJECTION wrapping a GET.
  */
 std::optional<GetBinding> Resolve(ColumnBinding binding, Analyses &analyses, const Projections &projections);
-
-// A passthrough projection only forwards its child columns, e.g. a VIEW's
-// "SELECT col".
-bool IsPassthrough(const LogicalProjection &projection);
-
-// There are no conflicting column usages in the plan
-bool CanPushdownColumn(const GetAnalysis &analysis, TableColumnScanIndex idx);
-
-template <class Collect, class Replace>
-LogicalOperatorPtr TryPushdown(ClientContext &context, LogicalOperatorPtr plan) {
-    Analyses analyses;
-    Projections projections;
-    FindGetsAndProjections(*plan, analyses, projections);
-    if (analyses.empty()) {
-        return plan;
-    }
-    Collect(analyses, projections).VisitOperator(*plan);
-
-    bool any_pushed = false;
-    for (auto &[_, analysis] : analyses) {
-        for (auto &[column_index, expr] : analysis.col_to_expr) {
-            if (expr == nullptr) { // Conflict for column
-                continue;
-            }
-            const TableColumnStorageIndex storage_index = analysis.StorageIndex(column_index);
-            TableFunctionProjectionExpressionInput input {analysis.get, *expr, storage_index};
-            if (projection_expression_pushdown(context, input)) {
-                // LOGICAL_GET doesn't initialize .types of LogicalOperator
-                analysis.get.returned_types[storage_index] = expr->return_type;
-                any_pushed = true;
-            } else { // failed to push down expression, can't replace it
-                expr = nullptr;
-            }
-        }
-    }
-
-    if (any_pushed) {
-        Replace(analyses, projections).VisitOperator(*plan);
-    }
-    return plan;
-}

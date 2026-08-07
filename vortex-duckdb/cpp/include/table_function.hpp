@@ -17,17 +17,6 @@ unique_ptr<FunctionData> duckdb_vx_table_function_bind(ClientContext &context,
                                                        TableFunctionBindInput &input,
                                                        vector<LogicalType> &return_types,
                                                        vector<string> &names);
-
-struct TableFunctionProjectionExpressionInput {
-    const LogicalGet &get;
-    const Expression &expression;
-    idx_t projection_idx;
-};
-
-// true if we can push down the expression, false otherwise
-bool projection_expression_pushdown(ClientContext &context,
-                                    const TableFunctionProjectionExpressionInput &input);
-
 struct TableFunctionUngroupedAggregateInput {
     const LogicalGet &get;
     // Column scan index -> aggregate expression

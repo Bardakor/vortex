@@ -271,8 +271,6 @@ extern "C" duckdb_blob duckdb_vx_value_get_geometry(duckdb_value value) {
 }
 
 static void VortexOptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-    plan = TryPushdown<CastCollect, CastReplace>(input.context, std::move(plan));
-    plan = TryPushdown<ScalarFnCollect, ScalarFnReplace>(input.context, std::move(plan));
     plan = TryPushdownAggregateFunctions(input.context, std::move(plan));
 }
 
