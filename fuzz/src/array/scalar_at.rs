@@ -6,10 +6,12 @@ use std::sync::Arc;
 use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
+use vortex_array::arrays::StructArray;
 use vortex_array::arrays::bool::BoolArrayExt;
 use vortex_array::arrays::extension::ExtensionArrayExt;
 use vortex_array::arrays::fixed_size_list::FixedSizeListArrayExt;
 use vortex_array::arrays::listview::ListViewArrayExt;
+use vortex_array::arrays::map::MapArrayExt;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::varbin::varbin_scalar;
 use vortex_array::dtype::DType;
@@ -107,7 +109,26 @@ pub fn scalar_at_canonical_array(
         Canonical::Union(_) => {
             todo!("TODO(connor)[Union]: support Union arrays in the scalar_at fuzzer")
         }
-        Canonical::Map(_) => unreachable!("Map arrays are not fuzzed"),
+        Canonical::Map(array) => {
+            let entries = array.entries_at(index)?.execute::<StructArray>(ctx)?;
+            let keys = entries
+                .unmasked_field(0)
+                .clone()
+                .execute::<Canonical>(ctx)?;
+            let values = entries
+                .unmasked_field(1)
+                .clone()
+                .execute::<Canonical>(ctx)?;
+            let pairs = (0..entries.len())
+                .map(|entry_index| {
+                    Ok((
+                        scalar_at_canonical_array(keys.clone(), entry_index, ctx)?,
+                        scalar_at_canonical_array(values.clone(), entry_index, ctx)?,
+                    ))
+                })
+                .collect::<VortexResult<Vec<_>>>()?;
+            Scalar::try_map(array.dtype().clone(), pairs)?
+        }
         Canonical::Variant(_) => unreachable!("Variant arrays are not fuzzed"),
     })
 }

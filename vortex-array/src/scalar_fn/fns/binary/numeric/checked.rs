@@ -15,17 +15,15 @@ use vortex_compute::lane_kernels::IndexedSourceExt;
 use vortex_mask::AllOr;
 use vortex_mask::Mask;
 
-/// Apply the fallible `f` over every lane of `source`, failing only when `f` returns `None`
-/// on a valid lane.
+/// Apply the fallible `apply` over every lane of `source`, returning
+/// `Err(first_failing_valid_lane)` only when it returns `None` on a valid lane.
 ///
-/// `f` is also invoked on invalid lanes (their failures are masked out and their values are
-/// unspecified), so it must be total: no panics or side effects on any stored lane value.
+/// `apply` also runs on invalid lanes, whose failures are masked out and whose values are
+/// unspecified, so it must be total: no panics or side effects on any stored lane value.
 ///
 /// This drives the one-pass early-exit kernels: failures abort at the end of the enclosing
 /// 64-lane chunk. It suits an operation whose per-lane failure handling is cheap relative to the
 /// operation itself, which is what the decimal kernels and their per-lane casts are.
-///
-/// On failure returns `Err(first_failing_valid_lane)`.
 ///
 /// `#[inline(always)]`: this wrapper and its kernel calls must inline into the caller that
 /// constructs the closure, so the closure environment (e.g. a captured constant operand)
@@ -33,11 +31,15 @@ use vortex_mask::Mask;
 /// keeps the environment behind a pointer, and reloading a captured constant on every lane
 /// blocks vectorization of the whole loop.
 #[inline(always)]
-pub(super) fn checked_lanes<S, T, F>(source: S, valid_rows: &Mask, f: F) -> Result<Buffer<T>, usize>
+pub(super) fn checked_lanes<S, T, Apply>(
+    source: S,
+    valid_rows: &Mask,
+    apply: Apply,
+) -> Result<Buffer<T>, usize>
 where
     S: IndexedSource,
     T: Copy + Default,
-    F: FnMut(S::Item) -> Option<T>,
+    Apply: FnMut(S::Item) -> Option<T>,
 {
     let len = source.len();
     debug_assert_eq!(len, valid_rows.len());
@@ -51,10 +53,12 @@ where
     let mut values = BufferMut::<T>::with_capacity(len);
     let out = &mut values.spare_capacity_mut()[..len];
     match valid_bits {
-        None => source.try_map_into(out, f)?,
-        Some(valid_bits) => source.try_map_masked_into(valid_bits, out, f)?,
+        None => source.try_map_into(out, apply)?,
+        Some(valid_bits) => source.try_map_masked_into(valid_bits, out, apply)?,
     }
+
     // SAFETY: the kernels initialize every lane in `out`.
     unsafe { values.set_len(len) };
+
     Ok(values.freeze())
 }

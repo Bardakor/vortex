@@ -28,6 +28,7 @@ use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::scan::scan_builder::ScanBuilder;
 use vortex::layout::scan::split_by::SplitBy;
 use vortex::layout::segments::MokaSegmentCache;
+use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex_arrow::ToArrowType;
 
 use crate::RUNTIME;
@@ -231,7 +232,7 @@ fn scan_builder(
     if let Some(indices) = indices {
         let casted = indices.cast(DType::Primitive(PType::U64, NonNullable))?;
         let indices = casted.execute::<PrimitiveArray>(ctx)?.into_buffer::<u64>();
-        builder = builder.with_row_indices(indices);
+        builder = builder.with_row_indices(StrictSortedBuffer::try_new(indices)?);
     }
 
     if let Some(batch_size) = batch_size {

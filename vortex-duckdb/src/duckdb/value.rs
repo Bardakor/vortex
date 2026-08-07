@@ -131,7 +131,7 @@ impl ValueRef {
             DUCKDB_TYPE::DUCKDB_TYPE_TIMESTAMP_S => ExtractedValue::TimestampS(unsafe {
                 cpp::duckdb_get_timestamp_s(self.as_ptr()).seconds
             }),
-            DUCKDB_TYPE::DUCKDB_TYPE_TIMESTAMP_TZ => ExtractedValue::TimestampS(unsafe {
+            DUCKDB_TYPE::DUCKDB_TYPE_TIMESTAMP_TZ => ExtractedValue::TimestampTz(unsafe {
                 cpp::duckdb_get_timestamp_tz(self.as_ptr()).micros
             }),
             DUCKDB_TYPE::DUCKDB_TYPE_DECIMAL => {
@@ -190,6 +190,17 @@ impl Value {
 
     pub fn null(logical_type: &LogicalTypeRef) -> Self {
         unsafe { Self::own(cpp::duckdb_vx_value_create_null(logical_type.as_ptr())) }
+    }
+
+    pub fn new_hugeint(value: i128) -> Self {
+        let lower: u64 = value.as_();
+        let upper: i64 = (value >> 64).as_();
+        unsafe {
+            Self::own(cpp::duckdb_create_hugeint(cpp::duckdb_hugeint {
+                lower,
+                upper,
+            }))
+        }
     }
 
     pub fn new_decimal(precision: u8, scale: i8, value: i128) -> Self {
@@ -448,6 +459,8 @@ pub enum ExtractedValue {
     Timestamp(i64),
     TimestampMs(i64),
     TimestampS(i64),
+    /// UTC microseconds
+    TimestampTz(i64),
     Decimal(u8, i8, i128),
     List(Vec<Value>),
 }
