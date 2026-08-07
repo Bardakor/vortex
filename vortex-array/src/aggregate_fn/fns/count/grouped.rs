@@ -223,8 +223,13 @@ mod tests {
 
     #[test]
     fn rejects_out_of_range_group_id() -> VortexResult<()> {
+        assert!(GroupIds::from_iter([0u32, 2], 2).is_err());
+
         let values = PrimitiveArray::new(buffer![1i32, 2], Validity::NonNullable).into_array();
-        let group_ids = GroupIds::from_iter([0u32, 2], 2)?;
+        let group_ids = GroupIds::new(
+            PrimitiveArray::new(buffer![0u32, 2], Validity::NonNullable).into_array(),
+            2,
+        )?;
         let mut ctx = array_session().create_execution_ctx();
         let mut acc = GroupedAccumulator::try_new(
             Count,

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::sync::Arc;
+use std::sync::OnceLock;
+
 use num_traits::ToPrimitive;
 use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
@@ -28,6 +31,7 @@ use crate::arrays::listview::ListViewArraySlotsExt;
 use crate::builders::builder_with_capacity;
 use crate::builtins::ArrayBuiltins;
 use crate::columnar::AnyColumnar;
+use crate::columnar::Columnar;
 use crate::dtype::DType;
 use crate::dtype::Nullability;
 use crate::dtype::PType;
@@ -191,6 +195,7 @@ impl GroupRanges {
 pub struct GroupIds {
     ids: ArrayRef,
     num_groups: usize,
+    validated: Arc<OnceLock<Buffer<u32>>>,
 }
 
 impl GroupIds {
@@ -202,15 +207,21 @@ impl GroupIds {
             "Group ids must be non-nullable u32, got {}",
             ids.dtype()
         );
-        Ok(Self { ids, num_groups })
+        Ok(Self {
+            ids,
+            num_groups,
+            validated: Arc::new(OnceLock::new()),
+        })
     }
 
-    /// Create group ids from a materialized buffer.
+    /// Create group ids from a materialized buffer, validating the dense-id invariant once.
     pub fn from_buffer(ids: Buffer<u32>, num_groups: usize) -> VortexResult<Self> {
-        Self::new(
-            PrimitiveArray::new(ids, Validity::NonNullable).into_array(),
+        validate_group_ids(ids.as_ref(), num_groups)?;
+        Ok(Self {
+            ids: PrimitiveArray::new(ids.clone(), Validity::NonNullable).into_array(),
             num_groups,
-        )
+            validated: Arc::new(OnceLock::from(ids)),
+        })
     }
 
     /// Create group ids from materialized values.
@@ -244,9 +255,17 @@ impl GroupIds {
     }
 
     /// Execute the ids to a native buffer and validate every id is in range.
+    ///
+    /// The validated buffer is cached and shared by clones, so multiple aggregate functions over
+    /// the same group ids pay materialization and validation at most once.
     pub fn validated_ids(&self, ctx: &mut ExecutionCtx) -> VortexResult<Buffer<u32>> {
+        if let Some(ids) = self.validated.get() {
+            return Ok(ids.clone());
+        }
+
         let ids = self.ids.clone().execute::<Buffer<u32>>(ctx)?;
         validate_group_ids(ids.as_ref(), self.num_groups)?;
+        drop(self.validated.set(ids.clone()));
         Ok(ids)
     }
 }
@@ -306,6 +325,8 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
     fn ensure_groups(&mut self, num_groups: usize) -> VortexResult<()> {
         validate_num_groups(num_groups)?;
 
+        self.partials
+            .reserve(num_groups.saturating_sub(self.partials.len()));
         while self.partials.len() < num_groups {
             self.partials
                 .push(self.vtable.empty_partial(&self.options, &self.dtype)?);
@@ -355,28 +376,44 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
         }
 
         let first = first as usize;
-        let mut buckets = vec![Vec::new(); last as usize - first + 1];
-        for (row_idx, &group_id) in group_ids.iter().enumerate() {
-            buckets[group_id as usize - first].push(row_idx as u64);
+        let span = last as usize - first + 1;
+        // Stable counting-sort the rows so every group becomes a slice of one gathered array.
+        let mut offsets = vec![0usize; span + 1];
+        for &group_id in group_ids {
+            offsets[group_id as usize - first + 1] += 1;
+        }
+        for idx in 1..offsets.len() {
+            offsets[idx] += offsets[idx - 1];
         }
 
-        for (offset, rows) in buckets.into_iter().enumerate() {
-            if rows.is_empty() {
+        let mut cursors = offsets.clone();
+        let mut permutation = vec![0u64; group_ids.len()];
+        for (row_idx, &group_id) in group_ids.iter().enumerate() {
+            let cursor = &mut cursors[group_id as usize - first];
+            permutation[*cursor] = row_idx as u64;
+            *cursor += 1;
+        }
+
+        let batch = batch.clone().execute::<Columnar>(ctx)?.into_array();
+        let gathered = batch.take(Buffer::from_iter(permutation).into_array())?;
+        for group_offset in 0..span {
+            let start = offsets[group_offset];
+            let end = offsets[group_offset + 1];
+            if start == end {
                 continue;
             }
 
-            let group = first + offset;
+            let group = first + group_offset;
             if self.vtable.is_saturated(&self.partials[group]) {
                 continue;
             }
 
-            let taken = batch.clone().take(Buffer::from_iter(rows).into_array())?;
             let mut accumulator = Accumulator::try_new(
                 self.vtable.clone(),
                 self.options.clone(),
                 self.dtype.clone(),
             )?;
-            accumulator.accumulate(&taken, ctx)?;
+            accumulator.accumulate(&gathered.slice(start..end)?, ctx)?;
             let partial = accumulator.flush()?;
             self.vtable
                 .combine_partials(&mut self.partials[group], partial)?;

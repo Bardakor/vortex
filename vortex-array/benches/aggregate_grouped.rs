@@ -37,6 +37,8 @@ const GROUP_COUNT: usize = 128;
 const GROUP_SIZE_SEED: u64 = 42;
 const MIN_VALUES_PER_GROUP: usize = 1;
 const MAX_VALUES_PER_GROUP: usize = 15;
+const SHUFFLED_ELEMENT_COUNT: usize = 1 << 16;
+const SHUFFLED_GROUP_COUNT: usize = 1 << 12;
 
 fn random_group_sizes() -> Vec<usize> {
     let mut rng = StdRng::seed_from_u64(GROUP_SIZE_SEED);
@@ -140,6 +142,21 @@ fn varbinview_input() -> DenseGroupedInput {
     )
 }
 
+fn i32_shuffled_input() -> DenseGroupedInput {
+    let mut rng = StdRng::seed_from_u64(GROUP_SIZE_SEED);
+    let values: Buffer<i32> = (0..SHUFFLED_ELEMENT_COUNT)
+        .map(|_| rng.random_range(-512..512))
+        .collect();
+    let group_ids: Buffer<u32> = (0..SHUFFLED_ELEMENT_COUNT)
+        .map(|_| rng.random_range(0..SHUFFLED_GROUP_COUNT as u32))
+        .collect();
+
+    DenseGroupedInput {
+        values: PrimitiveArray::new(values, Validity::NonNullable).into_array(),
+        group_ids: GroupIds::from_buffer(group_ids, SHUFFLED_GROUP_COUNT).unwrap(),
+    }
+}
+
 fn grouped_accumulator<V>(input: &DenseGroupedInput, vtable: V) -> ArrayRef
 where
     V: AggregateFnVTable<Options = NumericalAggregateOpts> + Clone,
@@ -203,6 +220,22 @@ fn count_i32_clustered_nulls(bencher: Bencher) {
 #[divan::bench]
 fn count_varbinview(bencher: Bencher) {
     let input = varbinview_input();
+    bencher
+        .with_inputs(|| &input)
+        .bench_refs(|input| grouped_accumulator(input, Count));
+}
+
+#[divan::bench]
+fn sum_i32_shuffled_4k_groups(bencher: Bencher) {
+    let input = i32_shuffled_input();
+    bencher
+        .with_inputs(|| &input)
+        .bench_refs(|input| grouped_accumulator(input, Sum));
+}
+
+#[divan::bench]
+fn count_i32_shuffled_4k_groups(bencher: Bencher) {
+    let input = i32_shuffled_input();
     bencher
         .with_inputs(|| &input)
         .bench_refs(|input| grouped_accumulator(input, Count));

@@ -18,6 +18,7 @@ use super::checked_add_u64;
 use super::primitive::sum_float_all;
 use super::primitive::sum_signed_all;
 use super::primitive::sum_unsigned_all;
+use super::sum_decimal_dtype;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::aggregate_fn::GroupIds;
@@ -38,7 +39,7 @@ use crate::match_each_decimal_value_type;
 use crate::match_each_native_ptype;
 use crate::scalar::DecimalValue;
 
-const MIN_AVG_RUN_LENGTH_FOR_GROUPED_SUM_RUNS: usize = 4;
+const MIN_GROUP_RUN_LENGTH: usize = 4;
 
 pub(crate) static SUM_GROUPED_KERNEL: GroupedAggregateKernelAdapter<Sum, SumGroupedKernel> =
     GroupedAggregateKernelAdapter::new(SumGroupedKernel);
@@ -91,21 +92,6 @@ fn for_each_valid_idx(validity: &Mask, len: usize, mut f: impl FnMut(usize)) {
     }
 }
 
-fn should_accumulate_group_runs(group_ids: &[u32]) -> bool {
-    let Some((&first, rest)) = group_ids.split_first() else {
-        return false;
-    };
-    let mut run_count = 1usize;
-    let mut group_id = first;
-    for &next_group_id in rest {
-        if next_group_id != group_id {
-            run_count += 1;
-            group_id = next_group_id;
-        }
-    }
-    run_count * MIN_AVG_RUN_LENGTH_FOR_GROUPED_SUM_RUNS <= group_ids.len()
-}
-
 fn for_each_group_run(group_ids: &[u32], mut f: impl FnMut(u32, usize, usize)) {
     let Some((&first, rest)) = group_ids.split_first() else {
         return;
@@ -150,6 +136,21 @@ where
     }
 }
 
+fn accumulate_grouped_unsigned_all<T>(partials: &mut [SumPartial], values: &[T], group_ids: &[u32])
+where
+    T: NativePType + AsPrimitive<u64>,
+{
+    for_each_group_run(group_ids, |group_id, start, end| {
+        if end - start >= MIN_GROUP_RUN_LENGTH {
+            accumulate_grouped_unsigned_run(partials, group_id, &values[start..end]);
+        } else {
+            for &value in &values[start..end] {
+                accumulate_grouped_unsigned(partials, group_id, value.as_());
+            }
+        }
+    });
+}
+
 fn accumulate_grouped_signed(partials: &mut [SumPartial], group_id: u32, value: i64) {
     let partial = &mut partials[group_id as usize];
     let saturated = match partial.current.as_mut() {
@@ -175,6 +176,21 @@ where
     if saturated {
         partial.current = None;
     }
+}
+
+fn accumulate_grouped_signed_all<T>(partials: &mut [SumPartial], values: &[T], group_ids: &[u32])
+where
+    T: NativePType + AsPrimitive<i64>,
+{
+    for_each_group_run(group_ids, |group_id, start, end| {
+        if end - start >= MIN_GROUP_RUN_LENGTH {
+            accumulate_grouped_signed_run(partials, group_id, &values[start..end]);
+        } else {
+            for &value in &values[start..end] {
+                accumulate_grouped_signed(partials, group_id, value.as_());
+            }
+        }
+    });
 }
 
 fn accumulate_grouped_float(
@@ -206,6 +222,24 @@ fn accumulate_grouped_float_run<T: NativePType>(
     }
 }
 
+fn accumulate_grouped_float_all<T: NativePType>(
+    partials: &mut [SumPartial],
+    values: &[T],
+    group_ids: &[u32],
+    skip_nans: bool,
+) {
+    for_each_group_run(group_ids, |group_id, start, end| {
+        if end - start >= MIN_GROUP_RUN_LENGTH {
+            accumulate_grouped_float_run(partials, group_id, &values[start..end], skip_nans);
+        } else {
+            for value in &values[start..end] {
+                let value = ToPrimitive::to_f64(value).vortex_expect("float to f64");
+                accumulate_grouped_float(partials, group_id, value, skip_nans);
+            }
+        }
+    });
+}
+
 fn accumulate_grouped_primitive(
     partials: &mut [SumPartial],
     primitive: &PrimitiveArray,
@@ -217,16 +251,13 @@ fn accumulate_grouped_primitive(
         .as_ref()
         .validity()?
         .execute_mask(primitive.as_ref().len(), ctx)?;
-    let use_runs =
-        matches!(validity.slices(), AllOr::All) && should_accumulate_group_runs(group_ids);
+    let all_valid = matches!(validity.slices(), AllOr::All);
 
     match_each_native_ptype!(primitive.ptype(),
         unsigned: |T| {
             let values = primitive.as_slice::<T>();
-            if use_runs {
-                for_each_group_run(group_ids, |group_id, start, end| {
-                    accumulate_grouped_unsigned_run(partials, group_id, &values[start..end]);
-                });
+            if all_valid {
+                accumulate_grouped_unsigned_all(partials, values, group_ids);
             } else {
                 for_each_valid_idx(&validity, values.len(), |idx| {
                     accumulate_grouped_unsigned(partials, group_ids[idx], values[idx].as_());
@@ -235,10 +266,8 @@ fn accumulate_grouped_primitive(
         },
         signed: |T| {
             let values = primitive.as_slice::<T>();
-            if use_runs {
-                for_each_group_run(group_ids, |group_id, start, end| {
-                    accumulate_grouped_signed_run(partials, group_id, &values[start..end]);
-                });
+            if all_valid {
+                accumulate_grouped_signed_all(partials, values, group_ids);
             } else {
                 for_each_valid_idx(&validity, values.len(), |idx| {
                     accumulate_grouped_signed(partials, group_ids[idx], values[idx].as_());
@@ -247,15 +276,8 @@ fn accumulate_grouped_primitive(
         },
         floating: |T| {
             let values = primitive.as_slice::<T>();
-            if use_runs {
-                for_each_group_run(group_ids, |group_id, start, end| {
-                    accumulate_grouped_float_run(
-                        partials,
-                        group_id,
-                        &values[start..end],
-                        skip_nans,
-                    );
-                });
+            if all_valid {
+                accumulate_grouped_float_all(partials, values, group_ids, skip_nans);
             } else {
                 for_each_valid_idx(&validity, values.len(), |idx| {
                     let value = ToPrimitive::to_f64(&values[idx]).vortex_expect("float to f64");
@@ -299,15 +321,7 @@ fn accumulate_grouped_decimal(
         .as_ref()
         .validity()?
         .execute_mask(decimals.as_ref().len(), ctx)?;
-    let Some(output_dtype) = partials
-        .iter()
-        .find_map(|partial| match partial.current.as_ref() {
-            Some(SumState::Decimal { dtype, .. }) => Some(*dtype),
-            _ => None,
-        })
-    else {
-        return Ok(());
-    };
+    let output_dtype = sum_decimal_dtype(&decimals.decimal_dtype());
     let output_type = DecimalType::smallest_decimal_value_type(&output_dtype);
     match_each_decimal_value_type!(decimals.values_type(), |T| {
         match_each_decimal_value_type!(output_type, |I| {

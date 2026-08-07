@@ -466,18 +466,13 @@ mod tests {
     fn mean_grouped_finalize() -> VortexResult<()> {
         let cases = mean_nan_null();
         let values = PrimitiveArray::from_option_iter(
-            cases.iter().flat_map(|(group, _)| group.iter().copied()),
+            (0..3).flat_map(|row| cases.iter().map(move |(group, _)| group[row])),
         )
         .into_array();
         let groups = (0..cases.len())
             .map(u32::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let group_ids = GroupIds::from_iter(
-            groups
-                .into_iter()
-                .flat_map(|group| std::iter::repeat_n(group, 3)),
-            cases.len(),
-        )?;
+        let group_ids = GroupIds::from_iter(std::iter::repeat_n(groups, 3).flatten(), cases.len())?;
 
         let mut acc = GroupedAccumulator::try_new(
             Mean::combined(),
