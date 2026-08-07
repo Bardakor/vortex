@@ -132,6 +132,12 @@ impl Expression {
         &self,
         cache: &SimplifyCache<'_>,
     ) -> VortexResult<Option<Expression>> {
+        // A lambda's body types against a parameter frame that this pass does not carry, so
+        // descending would try to resolve a variable against the root dtype and fail. Leave it to
+        // whoever binds the lambda and knows the parameter types.
+        if self.as_lambda().is_some() {
+            return Ok(None);
+        }
         // First optimize the root
         let mut current = self.try_optimize(cache)?;
 
@@ -270,6 +276,50 @@ mod tests {
             .as_opt::<Literal>()
             .ok_or_else(|| vortex_err!("expected a bare literal RHS, got {optimized}"))?;
         assert_eq!(rhs, &Scalar::primitive(3.0f64, Nullability::NonNullable));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lambda_tests {
+    use vortex_error::VortexResult;
+
+    use crate::expr::Expression;
+    use crate::expr::col;
+    use crate::expr::fill_null;
+    use crate::expr::lambda;
+    use crate::expr::lit;
+    use crate::expr::test_harness::struct_dtype;
+    use crate::expr::var;
+
+    /// A lambda body types against a parameter frame this pass does not carry, so descending into
+    /// one would try to resolve the variable against the root dtype and error.
+    #[test]
+    fn a_lambda_is_an_optimization_boundary() -> VortexResult<()> {
+        let expr = Expression::from(lambda(["x"], fill_null(var("x"), lit(0_i32))));
+        assert_eq!(expr.clone().optimize_recursive(&struct_dtype())?, expr);
+        Ok(())
+    }
+
+    /// The boundary must not stop optimization of everything around it. `cast` of a literal folds,
+    /// which is a rewrite the optimizer actually performs.
+    #[test]
+    fn optimization_still_applies_outside_a_lambda() -> VortexResult<()> {
+        use crate::dtype::DType;
+        use crate::dtype::Nullability;
+        use crate::dtype::PType;
+        use crate::expr::cast;
+        use crate::expr::lt_eq;
+
+        let expr = lt_eq(
+            col("a"),
+            cast(
+                lit(3_i32),
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+            ),
+        );
+        let optimized = expr.optimize_recursive(&struct_dtype())?;
+        assert_ne!(optimized, expr, "casting a literal should fold");
         Ok(())
     }
 }
