@@ -79,7 +79,10 @@ impl PartialEq for ExactBoundExpr {
                     && Arc::ptr_eq(lhs_children, rhs_children)
                     && lhs_dtype == rhs_dtype
             }
-            _ => false,
+            // No catch-all: a new variant must state its own identity rather than silently
+            // comparing unequal, which would put `eq` out of step with `hash`.
+            (BoundExpression::Root { .. }, BoundExpression::Scalar { .. })
+            | (BoundExpression::Scalar { .. }, BoundExpression::Root { .. }) => false,
         }
     }
 }
@@ -250,6 +253,43 @@ impl BoundExpression {
     /// Display the bound expression as a formatted tree structure.
     pub fn display_tree(&self) -> impl Display {
         DisplayTreeExpr(self)
+    }
+
+    /// Convert this bound tree back into its unbound logical representation.
+    ///
+    /// This rebuilds the expression iteratively; the bound representation does not retain a
+    /// second expression tree.
+    // TODO: This is temporary artifact of the migration from using `Expression`s to
+    // `BoundExpression`s
+    pub fn unbind(&self) -> Expression {
+        let mut pending = vec![(self, false)];
+        let mut expressions = Vec::new();
+
+        while let Some((node, visited)) = pending.pop() {
+            match node {
+                BoundExpression::Root { .. } => expressions.push(crate::expr::root()),
+                BoundExpression::Scalar {
+                    scalar_fn,
+                    children,
+                    ..
+                } if visited => {
+                    let child_start = expressions.len() - children.len();
+                    let child_expressions = expressions.split_off(child_start);
+                    expressions.push(
+                        Expression::try_new(scalar_fn.clone(), child_expressions)
+                            .vortex_expect("a bound expression always has valid arity"),
+                    );
+                }
+                BoundExpression::Scalar { children, .. } => {
+                    pending.push((node, true));
+                    pending.extend(children.iter().rev().map(|child| (child, false)));
+                }
+            }
+        }
+
+        expressions
+            .pop()
+            .vortex_expect("binding always produces one expression root")
     }
 }
 
