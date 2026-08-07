@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use arrow_array::RecordBatchReader;
+use arrow_schema::Schema;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use pyo3_object_store::PyObjectStore;
 use vortex::array::ArrayRef;
 use vortex::array::ExecutionCtx;
 use vortex::array::VortexSessionExecute;
@@ -27,15 +27,19 @@ use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::scan::scan_builder::ScanBuilder;
 use vortex::layout::scan::split_by::SplitBy;
 use vortex::layout::segments::MokaSegmentCache;
+use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
+use vortex_arrow::ToArrowType;
 
 use crate::RUNTIME;
 use crate::arrays::PyArrayRef;
+use crate::arrow::FromPyArrow;
 use crate::arrow::IntoPyArrow;
 use crate::dataset::PyVortexDataset;
 use crate::dtype::PyDType;
 use crate::error::PyVortexResult;
 use crate::expr::PyExpr;
 use crate::install_module;
+use crate::io::AnyVortexStore;
 use crate::iter::PyArrayIterator;
 use crate::object_store::resolve::ResolvedStore;
 use crate::object_store::resolve::resolve_store;
@@ -62,7 +66,7 @@ pub(crate) fn init(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
 pub fn open(
     py: Python,
     path: &str,
-    store: Option<PyObjectStore>,
+    store: Option<AnyVortexStore>,
     without_segment_cache: bool,
 ) -> PyVortexResult<PyVortexFile> {
     let vxf = py.detach(move || {
@@ -152,21 +156,38 @@ impl PyVortexFile {
         })
     }
 
-    #[pyo3(signature = (projection = None, *, expr = None, limit = None, batch_size = None))]
+    #[pyo3(signature = (projection = None, *, expr = None, limit = None, batch_size = None, schema = None))]
     fn to_arrow(
         slf: Bound<Self>,
         projection: Option<PyIntoProjection>,
         expr: Option<PyExpr>,
         limit: Option<u64>,
         batch_size: Option<usize>,
+        schema: Option<&Bound<PyAny>>,
     ) -> PyVortexResult<Py<PyAny>> {
         let vxf = slf.get().vxf.clone();
+        let schema = schema
+            .map(|schema| Schema::from_pyarrow(&schema.as_borrowed()))
+            .transpose()?
+            .map(Arc::new);
 
         let reader = slf.py().detach(|| {
+            let filter = expr
+                .map(|e| {
+                    e.into_inner()
+                        .optimize_recursive(vxf.dtype())?
+                        .bind(vxf.dtype())
+                })
+                .transpose()?;
+            let projection = projection
+                .map(|p| p.0)
+                .unwrap_or_else(root)
+                .optimize_recursive(vxf.dtype())?
+                .bind(vxf.dtype())?;
             let mut builder = vxf
                 .scan()?
-                .with_some_filter(expr.map(|e| e.into_inner()))
-                .with_projection(projection.map(|p| p.0).unwrap_or_else(root));
+                .with_some_filter(filter)
+                .with_projection(projection);
 
             if let Some(limit) = limit {
                 builder = builder.with_limit(limit);
@@ -176,7 +197,10 @@ impl PyVortexFile {
                 builder = builder.with_split_by(SplitBy::RowCount(batch_size));
             }
 
-            let schema = Arc::new(builder.dtype()?.to_arrow_schema()?);
+            let schema = match schema {
+                Some(schema) => schema,
+                None => Arc::new(builder.dtype()?.to_arrow_schema()?),
+            };
             builder.into_record_batch_reader(schema, &*RUNTIME)
         })?;
 
@@ -208,10 +232,17 @@ fn scan_builder(
     batch_size: Option<usize>,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ScanBuilder<ArrayRef>> {
+    let projection = projection
+        .unwrap_or_else(root)
+        .optimize_recursive(vxf.dtype())?
+        .bind(vxf.dtype())?;
+    let expr = expr
+        .map(|expr| expr.optimize_recursive(vxf.dtype())?.bind(vxf.dtype()))
+        .transpose()?;
     let mut builder = vxf
         .scan()?
         .with_some_filter(expr)
-        .with_projection(projection.unwrap_or_else(root));
+        .with_projection(projection);
 
     if let Some(limit) = limit {
         builder = builder.with_limit(limit);
@@ -220,7 +251,7 @@ fn scan_builder(
     if let Some(indices) = indices {
         let casted = indices.cast(DType::Primitive(PType::U64, NonNullable))?;
         let indices = casted.execute::<PrimitiveArray>(ctx)?.into_buffer::<u64>();
-        builder = builder.with_row_indices(indices);
+        builder = builder.with_row_indices(StrictSortedBuffer::try_new(indices)?);
     }
 
     if let Some(batch_size) = batch_size {

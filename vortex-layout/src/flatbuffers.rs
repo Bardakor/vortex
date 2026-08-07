@@ -15,15 +15,17 @@ use vortex_flatbuffers::FlatBuffer;
 use vortex_flatbuffers::FlatBufferRoot;
 use vortex_flatbuffers::WriteFlatBuffer;
 use vortex_flatbuffers::layout;
+use vortex_session::VortexSession;
 use vortex_session::registry::ReadContext;
 
-use crate::Layout;
+use crate::DynLayout;
+use crate::LayoutBuildContext;
 use crate::LayoutContext;
 use crate::LayoutRef;
 use crate::children::ViewedLayoutChildren;
 use crate::layouts::foreign::new_foreign_layout;
 use crate::segments::SegmentId;
-use crate::session::LayoutRegistry;
+use crate::session::LayoutSessionExt;
 
 static LAYOUT_VERIFIER: LazyLock<VerifierOptions> = LazyLock::new(|| {
     VerifierOptions {
@@ -48,9 +50,9 @@ pub fn layout_from_flatbuffer(
     dtype: &DType,
     layout_ctx: &ReadContext,
     ctx: &ReadContext,
-    layouts: &LayoutRegistry,
+    session: &VortexSession,
 ) -> VortexResult<LayoutRef> {
-    layout_from_flatbuffer_with_options(flatbuffer, dtype, layout_ctx, ctx, layouts, false)
+    layout_from_flatbuffer_with_options(flatbuffer, dtype, layout_ctx, ctx, session, false)
 }
 
 /// Parse a [`LayoutRef`] from a layout flatbuffer with unknown-encoding behavior control.
@@ -59,14 +61,16 @@ pub fn layout_from_flatbuffer_with_options(
     dtype: &DType,
     layout_ctx: &ReadContext,
     ctx: &ReadContext,
-    layouts: &LayoutRegistry,
+    session: &VortexSession,
     allow_unknown: bool,
 ) -> VortexResult<LayoutRef> {
+    let layout_session = session.layouts();
+    let layouts = layout_session.registry();
     let fb_layout = root_with_opts::<layout::Layout>(&LAYOUT_VERIFIER, &flatbuffer)?;
     let encoding_id = layout_ctx
         .resolve(fb_layout.encoding())
         .ok_or_else(|| vortex_err!("Invalid encoding ID: {}", fb_layout.encoding()))?;
-    let encoding = layouts.find(&encoding_id);
+    let encoding = layouts.get(&encoding_id);
 
     if encoding.is_none() && allow_unknown {
         return foreign_layout_from_fb(fb_layout, dtype, layout_ctx);
@@ -83,9 +87,14 @@ pub fn layout_from_flatbuffer_with_options(
             layout_ctx.clone(),
             layouts.clone(),
             allow_unknown,
+            session.clone(),
         )
     };
 
+    let build_ctx = LayoutBuildContext {
+        session,
+        array_read_ctx: ctx,
+    };
     let layout = encoding.build(
         dtype,
         fb_layout.row_count(),
@@ -100,7 +109,7 @@ pub fn layout_from_flatbuffer_with_options(
             .map(SegmentId::from)
             .collect(),
         &viewed_children,
-        ctx,
+        &build_ctx,
     )?;
 
     Ok(layout)
@@ -140,7 +149,7 @@ fn foreign_layout_from_fb(
     ))
 }
 
-impl dyn Layout + '_ {
+impl dyn DynLayout + '_ {
     /// Serialize the layout into a [`FlatBufferBuilder`].
     pub fn flatbuffer_writer<'a>(
         &'a self,
@@ -152,7 +161,7 @@ impl dyn Layout + '_ {
 
 /// An adapter struct for writing a layout to a FlatBuffer.
 struct LayoutFlatBufferWriter<'a> {
-    layout: &'a dyn Layout,
+    layout: &'a dyn DynLayout,
     ctx: &'a LayoutContext,
 }
 
@@ -215,6 +224,7 @@ impl WriteFlatBuffer for LayoutFlatBufferWriter<'_> {
 #[cfg(test)]
 mod tests {
     use flatbuffers::FlatBufferBuilder;
+    use vortex_array::array_session;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_flatbuffers::layout as fbl;
@@ -224,6 +234,7 @@ mod tests {
     use crate::LayoutEncodingId;
     use crate::session::LayoutSession;
 
+    #[expect(clippy::disallowed_methods, reason = "test-only id")]
     #[test]
     fn unknown_layout_encoding_allow_unknown() {
         let mut fbb = FlatBufferBuilder::new();
@@ -264,14 +275,14 @@ mod tests {
             LayoutEncodingId::new("vortex.test.foreign_child_layout"),
         ]);
         let array_ctx = ReadContext::new([]);
-        let layouts = LayoutSession::default().registry().clone();
+        let session = array_session().with::<LayoutSession>();
 
         let layout = layout_from_flatbuffer_with_options(
             layout_buffer,
             &DType::Variant(Nullability::Nullable),
             &layout_ctx,
             &array_ctx,
-            &layouts,
+            &session,
             true,
         )
         .unwrap();
@@ -283,7 +294,7 @@ mod tests {
         assert_eq!(*layout.segment_ids()[0], 7);
         assert_eq!(layout.nchildren(), 1);
 
-        let child = layout.child(0).unwrap();
+        let child = layout.slot(0).unwrap().unwrap();
         assert_eq!(
             child.encoding_id().as_ref(),
             "vortex.test.foreign_child_layout"

@@ -30,6 +30,7 @@ parking_lot = { workspace = true }
 pin-project-lite = { workspace = true }
 tokio = { workspace = true, features = ["rt"], optional = true }
 tracing = { workspace = true }
+url = { workspace = true }
 vortex-alp = { workspace = true }
 vortex-array = { workspace = true }
 vortex-btrblocks = { workspace = true }
@@ -38,6 +39,7 @@ vortex-bytebool = { workspace = true }
 
 vortex-datetime-parts = { workspace = true }
 vortex-decimal-byte-parts = { workspace = true }
+vortex-edition = { workspace = true }
 vortex-error = { workspace = true }
 vortex-fastlanes = { workspace = true }
 vortex-flatbuffers = { workspace = true, features = ["file"] }
@@ -46,7 +48,7 @@ vortex-io = { workspace = true }
 vortex-layout = { workspace = true }
 vortex-mask = { workspace = true }
 vortex-metrics = { workspace = true }
-vortex-onpair = { workspace = true, optional = true }
+vortex-onpair = { workspace = true }
 vortex-pco = { workspace = true }
 vortex-runend = { workspace = true }
 vortex-scan = { workspace = true }
@@ -59,6 +61,8 @@ vortex-zigzag = { workspace = true }
 vortex-zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+divan = { workspace = true }
+rstest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 vortex-array = { workspace = true, features = ["_test-harness"] }
 vortex-io = { workspace = true, features = ["tokio"] }
@@ -67,6 +71,10 @@ vortex-scan = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "split_collection"
+harness = false
 
 [features]
 object_store = ["dep:object_store", "vortex-io/object_store", "tokio"]
@@ -79,7 +87,6 @@ tokio = [
 zstd = ["dep:vortex-zstd", "vortex-btrblocks/zstd", "vortex-btrblocks/pco"]
 # This feature enables unstable encodings for which we don't guarantee stability.
 unstable_encodings = [
-    "dep:vortex-onpair",
     "dep:vortex-tensor",
     "vortex-zstd?/unstable_encodings",
     "vortex-btrblocks/unstable_encodings",

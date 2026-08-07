@@ -5,7 +5,6 @@ use std::hash::Hasher;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use kernel::PARENT_KERNELS;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -15,6 +14,7 @@ use vortex_error::vortex_panic;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
 
+use crate::ArrayParts;
 use crate::ArrayRef;
 use crate::EqMode;
 use crate::ExecutionCtx;
@@ -25,13 +25,15 @@ use crate::array::ArrayView;
 use crate::array::VTable;
 use crate::arrays::varbinview::BinaryView;
 use crate::arrays::varbinview::VarBinViewData;
-use crate::arrays::varbinview::array::NUM_SLOTS;
-use crate::arrays::varbinview::array::SLOT_NAMES;
+use crate::arrays::varbinview::array::VarBinViewSlots;
 use crate::arrays::varbinview::compute::rules::PARENT_RULES;
 use crate::buffer::BufferHandle;
+use crate::builders::ArrayBuilder;
+use crate::builders::VarBinViewBuilder;
 use crate::dtype::DType;
 use crate::hash::ArrayEq;
 use crate::hash::ArrayHash;
+use crate::match_each_varbin_builder;
 use crate::serde::ArrayChildren;
 use crate::validity::Validity;
 mod kernel;
@@ -39,6 +41,10 @@ mod operations;
 mod validity;
 /// A [`VarBinView`]-encoded Vortex array.
 pub type VarBinViewArray = Array<VarBinView>;
+
+pub(crate) fn initialize(session: &VortexSession) {
+    kernel::initialize(session);
+}
 
 #[derive(Clone, Debug)]
 pub struct VarBinView;
@@ -87,8 +93,9 @@ impl VTable for VarBinView {
         slots: &[Option<ArrayRef>],
     ) -> VortexResult<()> {
         vortex_ensure!(
-            slots.len() == NUM_SLOTS,
-            "VarBinViewArray expected {NUM_SLOTS} slots, found {}",
+            slots.len() == VarBinViewSlots::COUNT,
+            "VarBinViewArray expected {} slots, found {}",
+            VarBinViewSlots::COUNT,
             slots.len()
         );
         vortex_ensure!(
@@ -126,6 +133,26 @@ impl VTable for VarBinView {
         }
     }
 
+    fn with_buffers(
+        &self,
+        array: ArrayView<'_, Self>,
+        buffers: &[BufferHandle],
+    ) -> VortexResult<ArrayParts<Self>> {
+        let Some((views, data_buffers)) = buffers.split_last() else {
+            vortex_bail!("Expected at least 1 buffer, got 0");
+        };
+        let data = VarBinViewData::try_new_handle(
+            views.clone(),
+            Arc::from(data_buffers.to_vec()),
+            array.dtype().clone(),
+            array.validity()?,
+        )?;
+        Ok(
+            ArrayParts::new(self.clone(), array.dtype().clone(), array.len(), data)
+                .with_slots(array.slots().iter().cloned().collect()),
+        )
+    }
+
     fn serialize(
         _array: ArrayView<'_, Self>,
         _session: &VortexSession,
@@ -142,7 +169,7 @@ impl VTable for VarBinView {
         buffers: &[BufferHandle],
         children: &dyn ArrayChildren,
         _session: &VortexSession,
-    ) -> VortexResult<crate::array::ArrayParts<Self>> {
+    ) -> VortexResult<ArrayParts<Self>> {
         if !metadata.is_empty() {
             vortex_bail!(
                 "VarBinViewArray expects empty metadata, got {} bytes",
@@ -183,10 +210,7 @@ impl VTable for VarBinView {
                 validity.clone(),
             )?;
             let slots = VarBinViewData::make_slots(&validity, len);
-            return Ok(
-                crate::array::ArrayParts::new(self.clone(), dtype.clone(), len, data)
-                    .with_slots(slots),
-            );
+            return Ok(ArrayParts::new(self.clone(), dtype.clone(), len, data).with_slots(slots));
         }
 
         let data_buffers = data_handles
@@ -202,11 +226,11 @@ impl VTable for VarBinView {
             validity.clone(),
         )?;
         let slots = VarBinViewData::make_slots(&validity, len);
-        Ok(crate::array::ArrayParts::new(self.clone(), dtype.clone(), len, data).with_slots(slots))
+        Ok(ArrayParts::new(self.clone(), dtype.clone(), len, data).with_slots(slots))
     }
 
     fn slot_name(_array: ArrayView<'_, Self>, idx: usize) -> String {
-        SLOT_NAMES[idx].to_string()
+        VarBinViewSlots::NAMES[idx].to_string()
     }
 
     fn reduce_parent(
@@ -217,13 +241,20 @@ impl VTable for VarBinView {
         PARENT_RULES.evaluate(array, parent, child_idx)
     }
 
-    fn execute_parent(
+    fn append_to_builder(
         array: ArrayView<'_, Self>,
-        parent: &ArrayRef,
-        child_idx: usize,
+        builder: &mut dyn ArrayBuilder,
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_KERNELS.execute(array, parent, child_idx, ctx)
+    ) -> VortexResult<()> {
+        if let Some(builder) = builder.as_any_mut().downcast_mut::<VarBinViewBuilder>() {
+            return builder.append_varbinview_array(&array.into_owned(), ctx);
+        }
+        if let Some(result) =
+            match_each_varbin_builder!(builder, |builder| builder.append_varbinview(array, ctx))
+        {
+            return result;
+        }
+        vortex_bail!("append_to_builder for VarBinView requires a variable-binary builder")
     }
 
     fn execute(array: Array<Self>, _ctx: &mut ExecutionCtx) -> VortexResult<ExecutionResult> {
@@ -239,7 +270,8 @@ mod tests {
     use super::*;
     use crate::ArrayContext;
     use crate::IntoArray;
-    use crate::LEGACY_SESSION;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::assert_arrays_eq;
     use crate::serde::SerializeOptions;
     use crate::serde::SerializedArray;
@@ -256,11 +288,13 @@ mod tests {
         let dtype = array.dtype().clone();
         let len = array.len();
 
-        let ctx = ArrayContext::empty();
+        let session = array_session();
+        let mut ctx = session.create_execution_ctx();
+        let array_ctx = ArrayContext::empty();
         let serialized = array
             .clone()
             .into_array()
-            .serialize(&ctx, &LEGACY_SESSION, &SerializeOptions::default())
+            .serialize(&array_ctx, &session, &SerializeOptions::default())
             .unwrap();
 
         let mut concat = ByteBufferMut::empty();
@@ -269,14 +303,9 @@ mod tests {
         }
         let parts = SerializedArray::try_from(concat.freeze()).unwrap();
         let decoded = parts
-            .decode(
-                &dtype,
-                len,
-                &ReadContext::new(ctx.to_ids()),
-                &LEGACY_SESSION,
-            )
+            .decode(&dtype, len, &ReadContext::new(array_ctx.to_ids()), &session)
             .unwrap();
 
-        assert_arrays_eq!(decoded, array);
+        assert_arrays_eq!(decoded, array, &mut ctx);
     }
 }

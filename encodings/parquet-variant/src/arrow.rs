@@ -19,15 +19,15 @@ use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::VTable;
 use vortex_array::arrays::Variant;
-use vortex_array::arrays::variant::VariantArrayExt;
-use vortex_array::arrow::ArrowExport;
-use vortex_array::arrow::ArrowExportVTable;
-use vortex_array::arrow::ArrowImport;
-use vortex_array::arrow::ArrowImportVTable;
-use vortex_array::arrow::ArrowSession;
-use vortex_array::arrow::ArrowSessionExt;
-use vortex_array::arrow::to_arrow_null_buffer;
+use vortex_array::arrays::variant::VariantArraySlotsExt;
 use vortex_array::dtype::DType;
+use vortex_arrow::ArrowExport;
+use vortex_arrow::ArrowExportVTable;
+use vortex_arrow::ArrowImport;
+use vortex_arrow::ArrowImportVTable;
+use vortex_arrow::ArrowSession;
+use vortex_arrow::ArrowSessionExt;
+use vortex_arrow::to_arrow_null_buffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
@@ -36,6 +36,8 @@ use vortex_session::registry::Id;
 
 use crate::ParquetVariant;
 use crate::ParquetVariantArrayExt;
+use crate::ParquetVariantArraySlotsExt;
+use crate::array::parquet_typed_value_from_logical_shredded;
 
 /// Arrow canonical extension name for Parquet Variant storage.
 const PARQUET_VARIANT_ARROW_EXTENSION_NAME: &str = "arrow.parquet.variant";
@@ -58,7 +60,7 @@ fn parquet_variant_storage_request(fields: &Fields) -> Option<(bool, bool)> {
     (has_metadata && (has_value || has_typed_value)).then_some((has_value, has_typed_value))
 }
 
-fn export_storage_to_target<T: ParquetVariantArrayExt>(
+pub(crate) fn export_storage_to_target<T: ParquetVariantArrayExt>(
     parquet_array: &T,
     target_fields: &Fields,
     ctx: &mut ExecutionCtx,
@@ -67,9 +69,9 @@ fn export_storage_to_target<T: ParquetVariantArrayExt>(
 
     for field in target_fields {
         let child = match field.name().as_str() {
-            "metadata" => Some(parquet_array.metadata_array().clone()),
-            "value" => parquet_array.value_array().cloned(),
-            "typed_value" => parquet_array.typed_value_array().cloned(),
+            "metadata" => Some(parquet_array.metadata().clone()),
+            "value" => parquet_array.value().cloned(),
+            "typed_value" => parquet_array.typed_value().cloned(),
             _ => unreachable!("storage fields were validated before export"),
         };
         let Some(child) = child else {
@@ -88,7 +90,7 @@ fn export_storage_to_target<T: ParquetVariantArrayExt>(
     }
 
     let nulls = to_arrow_null_buffer(
-        ParquetVariantArrayExt::validity(parquet_array),
+        ParquetVariantArrayExt::parquet_variant_validity(parquet_array),
         parquet_array.as_ref().len(),
         ctx,
     )?;
@@ -99,7 +101,7 @@ fn export_storage_to_target<T: ParquetVariantArrayExt>(
     )?))
 }
 
-fn export_unshredded_storage_to_target<T: ParquetVariantArrayExt>(
+pub(crate) fn export_unshredded_storage_to_target<T: ParquetVariantArrayExt>(
     parquet_array: &T,
     target_fields: &Fields,
     ctx: &mut ExecutionCtx,
@@ -115,7 +117,10 @@ fn export_unshredded_storage_to_target<T: ParquetVariantArrayExt>(
     export_storage_to_target(&unshredded_parquet, target_fields, ctx)
 }
 
-fn parquet_variant_for_export(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+pub(crate) fn parquet_variant_for_export(
+    array: ArrayRef,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ArrayRef> {
     let executed = array.execute_until::<ParquetVariant>(ctx)?;
     if executed.is::<ParquetVariant>() {
         return Ok(executed);
@@ -135,11 +140,16 @@ fn parquet_variant_for_export(array: ArrayRef, ctx: &mut ExecutionCtx) -> Vortex
         return Ok(core_storage);
     };
 
+    // The canonical shredded child has had its Parquet `value`/`typed_value` wrapper shells
+    // stripped; rebuild them so the reattached `typed_value` is valid Parquet storage that
+    // `to_arrow` and `unshred_variant` can consume.
+    let typed_value = parquet_typed_value_from_logical_shredded(shredded.clone(), ctx)?;
+
     ParquetVariant::try_new(
-        ParquetVariantArrayExt::validity(&parquet_core),
-        parquet_core.metadata_array().clone(),
-        parquet_core.value_array().cloned(),
-        Some(shredded.clone()),
+        ParquetVariantArrayExt::parquet_variant_validity(&parquet_core),
+        parquet_core.metadata().clone(),
+        parquet_core.value().cloned(),
+        Some(typed_value),
     )
     .map(IntoArray::into_array)
 }
@@ -186,8 +196,8 @@ impl ArrowExportVTable for ParquetVariant {
             && let Some((request_has_value, request_has_typed_value)) =
                 parquet_variant_storage_request(fields)
         {
-            let has_value = parquet_array.value_array().is_some();
-            let has_typed_value = parquet_array.typed_value_array().is_some();
+            let has_value = parquet_array.value().is_some();
+            let has_typed_value = parquet_array.typed_value().is_some();
 
             if request_has_value && !request_has_typed_value && has_typed_value {
                 return Ok(ArrowExport::Exported(export_unshredded_storage_to_target(
@@ -250,7 +260,7 @@ impl ArrowImportVTable for ParquetVariant {
         field: &Field,
         dtype: &DType,
     ) -> VortexResult<ArrowImport> {
-        if !matches!(dtype, DType::Variant(_))
+        if !dtype.is_variant()
             || field
                 .metadata()
                 .get(EXTENSION_TYPE_NAME_KEY)
@@ -291,12 +301,11 @@ mod tests {
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::VarBinViewArray;
     use vortex_array::arrays::VariantArray;
-    use vortex_array::arrow::ArrowSessionExt;
     use vortex_array::assert_arrays_eq;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
-    use vortex_array::session::ArraySession;
     use vortex_array::validity::Validity;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
     use vortex_session::VortexSession;
@@ -306,7 +315,7 @@ mod tests {
 
     #[fixture]
     fn session() -> VortexSession {
-        let session = VortexSession::empty().with::<ArraySession>();
+        let session = vortex_array::array_session();
         crate::initialize(&session);
         session
     }
@@ -500,7 +509,7 @@ mod tests {
             .arrow()
             .from_arrow_array(Arc::clone(&exported), &field)?;
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
         Ok(())
     }
 
@@ -701,7 +710,7 @@ mod tests {
 
         let actual = session.arrow().from_arrow_array(exported, &field)?;
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
         Ok(())
     }
 }

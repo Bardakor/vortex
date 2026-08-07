@@ -16,6 +16,7 @@ use vortex::file::VortexFile;
 use vortex::layout::LayoutRef;
 use vortex::layout::VTable;
 use vortex::layout::layouts::flat::Flat;
+use vortex::layout::layouts::zoned::LegacyStats;
 use vortex::layout::layouts::zoned::Zoned;
 use vortex::layout::segments::SegmentId;
 use vortex::layout::segments::SegmentSource;
@@ -78,10 +79,14 @@ impl LayoutCursor {
     ) -> Self {
         let mut layout = Arc::clone(footer.layout());
 
-        // Traverse the layout tree at each element of the path.
+        // Traverse the layout tree at each element of the path. Path components index into the
+        // serialized (present) children, matching the order shown in the browser.
         for component in path.iter().copied() {
             layout = layout
-                .child(component)
+                .children()
+                .vortex_expect("Failed to get child layouts")
+                .into_iter()
+                .nth(component)
                 .vortex_expect("Failed to get child layout");
         }
 
@@ -151,10 +156,11 @@ impl LayoutCursor {
 
     /// Returns `true` if the cursor is currently pointing at a statistics table.
     ///
-    /// A statistics table is the second child of a [`Zoned`] layout.
+    /// A statistics table is the second child of a zoned layout.
     pub fn is_stats_table(&self) -> bool {
         let parent = self.parent();
-        parent.layout().is::<Zoned>() && self.path.last().copied().unwrap_or_default() == 1
+        (parent.layout().is::<Zoned>() || parent.layout().is::<LegacyStats>())
+            && self.path.last().copied().unwrap_or_default() == 1
     }
 
     /// Get the data type of the current layout.
@@ -367,10 +373,13 @@ impl AppState {
                 &Default::default(),
             )
             .vortex_expect("Failed to create reader");
+        let expr = root()
+            .bind(reader.dtype())
+            .vortex_expect("root must bind against the layout dtype");
         let array = reader
             .projection_evaluation(
                 &(0..row_count),
-                &root(),
+                &expr,
                 MaskFuture::new_true(
                     usize::try_from(row_count).vortex_expect("row_count overflowed usize"),
                 ),

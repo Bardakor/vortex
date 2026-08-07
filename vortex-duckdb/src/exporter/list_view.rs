@@ -13,10 +13,10 @@ use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::listview::DEFAULT_REBUILD_DENSITY_THRESHOLD;
 use vortex::array::arrays::listview::DEFAULT_TRIM_ELEMENTS_THRESHOLD;
 use vortex::array::arrays::listview::ListViewArrayExt;
+use vortex::array::arrays::listview::ListViewArraySlotsExt;
 use vortex::array::arrays::listview::ListViewDataParts;
 use vortex::array::arrays::listview::ListViewRebuildMode;
 use vortex::array::match_each_integer_ptype;
-use vortex::array::validity::Validity;
 use vortex::dtype::IntegerPType;
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
@@ -92,7 +92,7 @@ pub(crate) fn new_exporter(
     // Cache an `elements` vector up front so that future exports can reference it.
     let num_elements = elements.len();
 
-    if matches!(validity, Validity::AllInvalid) {
+    if validity.definitely_all_null() {
         return Ok(all_invalid::new_exporter());
     }
     let validity = validity.to_array(len).execute::<Mask>(ctx)?;

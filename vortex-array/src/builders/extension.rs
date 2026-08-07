@@ -8,6 +8,7 @@ use vortex_error::vortex_ensure;
 use vortex_mask::Mask;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::arrays::ExtensionArray;
 use crate::arrays::extension::ExtensionArrayExt;
@@ -15,8 +16,6 @@ use crate::builders::ArrayBuilder;
 use crate::builders::DEFAULT_BUILDER_CAPACITY;
 use crate::builders::builder_with_capacity;
 use crate::canonical::Canonical;
-#[expect(deprecated)]
-use crate::canonical::ToCanonical as _;
 use crate::dtype::DType;
 use crate::dtype::extension::ExtDTypeRef;
 use crate::scalar::ExtScalar;
@@ -45,6 +44,18 @@ impl ExtensionBuilder {
     /// Appends an extension `value` to the builder.
     pub fn append_value(&mut self, value: ExtScalar) -> VortexResult<()> {
         self.storage.append_scalar(&value.to_storage_scalar())
+    }
+
+    /// Appends the values of a canonical [`ExtensionArray`] to the builder by appending its
+    /// storage array to the underlying storage builder.
+    pub(crate) fn append_extension_array(
+        &mut self,
+        array: &ExtensionArray,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<()> {
+        array
+            .storage_array()
+            .append_to_builder(self.storage.as_mut(), ctx)
     }
 
     /// Finishes the builder directly into a [`ExtensionArray`].
@@ -101,12 +112,6 @@ impl ArrayBuilder for ExtensionBuilder {
         self.append_value(scalar.as_extension())
     }
 
-    unsafe fn extend_from_array_unchecked(&mut self, array: &ArrayRef) {
-        #[expect(deprecated)]
-        let ext_array = array.to_extension();
-        self.storage.extend_from_array(ext_array.storage_array())
-    }
-
     fn reserve_exact(&mut self, capacity: usize) {
         self.storage.reserve_exact(capacity)
     }
@@ -119,7 +124,7 @@ impl ArrayBuilder for ExtensionBuilder {
         self.finish_into_extension().into_array()
     }
 
-    fn finish_into_canonical(&mut self) -> Canonical {
+    fn finish_into_canonical(&mut self, _ctx: &mut ExecutionCtx) -> Canonical {
         Canonical::Extension(self.finish_into_extension())
     }
 }
@@ -127,6 +132,8 @@ impl ArrayBuilder for ExtensionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::PrimitiveArray;
     use crate::assert_arrays_eq;
     use crate::builders::ArrayBuilder;
@@ -137,6 +144,7 @@ mod tests {
 
     #[test]
     fn test_append_scalar() {
+        let mut ctx = array_session().create_execution_ctx();
         let ext_dtype = Date::new(TimeUnit::Days, Nullability::Nullable).erased();
 
         let mut builder = ExtensionBuilder::new(ext_dtype.clone());
@@ -165,7 +173,7 @@ mod tests {
             PrimitiveArray::from_option_iter([Some(42i32), Some(84), None]).into_array(),
         );
 
-        assert_arrays_eq!(&array, &expected);
+        assert_arrays_eq!(&array, &expected, &mut ctx);
         assert_eq!(array.len(), 3);
 
         // Test wrong dtype error.

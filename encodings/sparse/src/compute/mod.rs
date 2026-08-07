@@ -14,15 +14,21 @@ pub(crate) mod sum;
 mod take;
 
 #[cfg(test)]
-mod test {
+mod tests {
+    use std::f32;
+    use std::sync::LazyLock;
+
     use rstest::fixture;
     use rstest::rstest;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
+    use vortex_array::VortexSessionExecute;
+    use vortex_array::array_session;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
     use vortex_array::builtins::ArrayBuiltins;
     use vortex_array::compute::conformance::binary_numeric::test_binary_numeric_array;
+    use vortex_array::compute::conformance::consistency::test_array_consistency;
     use vortex_array::compute::conformance::mask::test_mask_conformance;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
@@ -31,8 +37,16 @@ mod test {
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_mask::Mask;
+    use vortex_session::VortexSession;
 
     use crate::Sparse;
+    use crate::SparseArray;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[fixture]
     fn array() -> ArrayRef {
@@ -64,7 +78,11 @@ mod test {
         )
         .unwrap();
 
-        assert_arrays_eq!(filtered_array, expected);
+        assert_arrays_eq!(
+            filtered_array,
+            expected,
+            &mut SESSION.create_execution_ctx()
+        );
     }
 
     #[test]
@@ -93,12 +111,16 @@ mod test {
         )
         .unwrap();
 
-        assert_arrays_eq!(filtered_array, expected);
+        assert_arrays_eq!(
+            filtered_array,
+            expected,
+            &mut SESSION.create_execution_ctx()
+        );
     }
 
     #[rstest]
-    fn test_sparse_binary_numeric(array: ArrayRef) {
-        test_binary_numeric_array(array)
+    fn test_sparse_binary_numeric_default(array: ArrayRef) {
+        test_binary_numeric_array(&array, &mut SESSION.create_execution_ctx());
     }
 
     #[test]
@@ -116,6 +138,7 @@ mod test {
             )
             .unwrap()
             .into_array(),
+            &mut SESSION.create_execution_ctx(),
         );
 
         let ten_fill_value = Scalar::from(10i32);
@@ -128,28 +151,9 @@ mod test {
             )
             .unwrap()
             .into_array(),
+            &mut SESSION.create_execution_ctx(),
         )
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::f32;
-
-    use rstest::rstest;
-    use vortex_array::IntoArray;
-    use vortex_array::arrays::PrimitiveArray;
-    use vortex_array::builtins::ArrayBuiltins;
-    use vortex_array::compute::conformance::binary_numeric::test_binary_numeric_array;
-    use vortex_array::compute::conformance::consistency::test_array_consistency;
-    use vortex_array::dtype::DType;
-    use vortex_array::dtype::Nullability;
-    use vortex_array::dtype::PType;
-    use vortex_array::scalar::Scalar;
-    use vortex_buffer::buffer;
-
-    use crate::Sparse;
-    use crate::SparseArray;
 
     #[rstest]
     // Basic sparse arrays
@@ -211,9 +215,8 @@ mod tests {
             null_fill_value
         ).unwrap()
     })]
-
     fn test_sparse_consistency(#[case] array: SparseArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(&array.into_array(), &mut SESSION.create_execution_ctx());
     }
 
     #[rstest]
@@ -254,6 +257,6 @@ mod tests {
         Scalar::from(0i32)
     ).unwrap())]
     fn test_sparse_binary_numeric(#[case] array: SparseArray) {
-        test_binary_numeric_array(array.into_array());
+        test_binary_numeric_array(&array.into_array(), &mut SESSION.create_execution_ctx());
     }
 }

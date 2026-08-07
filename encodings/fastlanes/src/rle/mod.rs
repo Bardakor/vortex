@@ -3,7 +3,9 @@
 
 mod array;
 pub use array::RLEArrayExt;
+pub use array::RLEArraySlotsExt;
 pub use array::RLEData;
+pub use array::RLESlots;
 
 mod compute;
 mod kernel;
@@ -11,3 +13,7 @@ mod kernel;
 mod vtable;
 pub use vtable::RLE;
 pub use vtable::RLEArray;
+
+pub(crate) fn initialize(session: &vortex_session::VortexSession) {
+    kernel::initialize(session);
+}

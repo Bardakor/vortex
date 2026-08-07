@@ -3,6 +3,7 @@
 
 use vortex_buffer::BitBuffer;
 use vortex_buffer::BitBufferMut;
+use vortex_buffer::CpuKernel;
 use vortex_buffer::get_bit;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -90,14 +91,19 @@ pub fn filter_bitbuffer_by_mask(
     mask_buf: &BitBuffer,
     true_count: usize,
 ) -> BitBuffer {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::arch::is_x86_feature_detected!("bmi2") {
-            // SAFETY: BMI2 confirmed available; the inner function is compiled with BMI2.
-            return unsafe { filter_pext_bmi2(src, mask_buf, true_count) };
+    type FilterKernel = unsafe fn(&BitBuffer, &BitBuffer, usize) -> BitBuffer;
+    static KERNEL: CpuKernel<FilterKernel> = CpuKernel::new(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("bmi2") {
+                return filter_pext_bmi2;
+            }
         }
-    }
-    filter_pext_fallback(src, mask_buf, true_count)
+        filter_pext_fallback
+    });
+    // SAFETY: the selector only returns kernels that are safe or whose required CPU
+    // features were probed before selection.
+    unsafe { KERNEL.get()(src, mask_buf, true_count) }
 }
 
 /// BMI2-native filter: entire function compiled with BMI2+POPCNT enabled.
@@ -303,44 +309,50 @@ mod tests {
 
     use super::*;
     use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::BoolArray;
     use crate::assert_arrays_eq;
     use crate::compute::conformance::filter::test_filter_conformance;
 
     #[test]
     fn filter_bool_test() {
+        let mut ctx = array_session().create_execution_ctx();
         let arr = BoolArray::from_iter([true, true, false]);
         let mask = Mask::from_iter([true, false, true]);
 
         let filtered = arr.filter(mask).unwrap();
-        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]));
+        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]), &mut ctx);
     }
 
     #[test]
     fn filter_bool_sparse_index_mask() {
+        let mut ctx = array_session().create_execution_ctx();
         let arr = BoolArray::from_iter([true, true, false]);
         let mask = Mask::from_indices(3, [0, 2]);
 
         let filtered = arr.filter(mask).unwrap();
-        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]));
+        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]), &mut ctx);
     }
 
     #[test]
     fn filter_bool_sparse_slice_mask() {
+        let mut ctx = array_session().create_execution_ctx();
         let arr = BoolArray::from_iter([true, true, false]);
         let mask = Mask::from_slices(3, vec![(0, 1), (2, 3)]);
 
         let filtered = arr.filter(mask).unwrap();
-        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]));
+        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]), &mut ctx);
     }
 
     #[test]
     fn filter_bool_sparse_buffer_mask() {
+        let mut ctx = array_session().create_execution_ctx();
         let arr = BoolArray::from_iter([true, true, false]);
         let mask = Mask::from_buffer(BitBuffer::from_iter([true, false, true]));
 
         let filtered = arr.filter(mask).unwrap();
-        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]));
+        assert_arrays_eq!(filtered, BoolArray::from_iter([true, false]), &mut ctx);
     }
 
     #[test]
@@ -360,7 +372,10 @@ mod tests {
     #[case(BoolArray::from_iter((0..100).map(|i| i % 2 == 0)))]
     #[case(BoolArray::from_iter((0..1024).map(|i| i % 3 != 0)))]
     fn test_filter_bool_conformance(#[case] array: BoolArray) {
-        test_filter_conformance(&array.into_array());
+        test_filter_conformance(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[cfg(target_arch = "x86_64")]

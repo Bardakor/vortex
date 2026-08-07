@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_panic;
 use vortex_session::VortexSession;
@@ -18,8 +19,11 @@ use crate::array::EmptyArrayData;
 use crate::array::OperationsVTable;
 use crate::array::VTable;
 use crate::array::ValidityVTable;
+use crate::array::with_empty_buffers;
 use crate::arrays::null::compute::rules::PARENT_RULES;
 use crate::buffer::BufferHandle;
+use crate::builders::ArrayBuilder;
+use crate::builders::NullBuilder;
 use crate::dtype::DType;
 use crate::scalar::Scalar;
 use crate::serde::ArrayChildren;
@@ -62,6 +66,14 @@ impl VTable for Null {
 
     fn buffer_name(_array: ArrayView<'_, Self>, _idx: usize) -> Option<String> {
         None
+    }
+
+    fn with_buffers(
+        &self,
+        array: ArrayView<'_, Self>,
+        buffers: &[BufferHandle],
+    ) -> VortexResult<ArrayParts<Self>> {
+        with_empty_buffers(self, array, buffers)
     }
 
     fn slot_name(_array: ArrayView<'_, Self>, idx: usize) -> String {
@@ -109,6 +121,18 @@ impl VTable for Null {
     fn execute(array: Array<Self>, _ctx: &mut ExecutionCtx) -> VortexResult<ExecutionResult> {
         Ok(ExecutionResult::done(array))
     }
+
+    fn append_to_builder(
+        array: ArrayView<'_, Self>,
+        builder: &mut dyn ArrayBuilder,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<()> {
+        let Some(builder) = builder.as_any_mut().downcast_mut::<NullBuilder>() else {
+            vortex_bail!("append_to_builder for Null requires a NullBuilder");
+        };
+        builder.append_nulls(array.len());
+        Ok(())
+    }
 }
 
 /// A array where all values are null.
@@ -123,7 +147,7 @@ impl VTable for Null {
 /// ```
 /// # fn main() -> vortex_error::VortexResult<()> {
 /// use vortex_array::arrays::NullArray;
-/// use vortex_array::{IntoArray, LEGACY_SESSION, VortexSessionExecute};
+/// use vortex_array::{IntoArray, VortexSessionExecute, array_session};
 ///
 /// // Create a null array with 5 elements
 /// let array = NullArray::new(5);
@@ -133,7 +157,7 @@ impl VTable for Null {
 /// assert_eq!(sliced.len(), 2);
 ///
 /// // All elements are null
-/// let mut ctx = LEGACY_SESSION.create_execution_ctx();
+/// let mut ctx = array_session().create_execution_ctx();
 /// let scalar = array.execute_scalar(0, &mut ctx).unwrap();
 /// assert!(scalar.is_null());
 /// # Ok(())

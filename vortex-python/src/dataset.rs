@@ -25,6 +25,8 @@ use vortex::file::OpenOptionsSessionExt;
 use vortex::file::VortexFile;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::scan::split_by::SplitBy;
+use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
+use vortex_arrow::ToArrowType;
 
 use crate::RUNTIME;
 use crate::arrays::PyArrayRef;
@@ -57,6 +59,16 @@ pub fn read_array_from_reader(
     row_range: Option<(u64, u64)>,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
+    let projection = projection
+        .optimize_recursive(vortex_file.dtype())?
+        .bind(vortex_file.dtype())?;
+    let filter = filter
+        .map(|filter| {
+            filter
+                .optimize_recursive(vortex_file.dtype())?
+                .bind(vortex_file.dtype())
+        })
+        .transpose()?;
     let mut scan = vortex_file.scan()?.with_projection(projection);
 
     if let Some(filter) = filter {
@@ -66,7 +78,7 @@ pub fn read_array_from_reader(
     if let Some(indices) = indices {
         let primitive = indices.execute::<PrimitiveArray>(ctx)?;
         let indices = primitive.into_buffer();
-        scan = scan.with_row_indices(indices);
+        scan = scan.with_row_indices(StrictSortedBuffer::try_new(indices)?);
     }
 
     if let Some((l, r)) = row_range {
@@ -184,6 +196,12 @@ impl PyVortexDataset {
         let filter = filter_from_python(row_filter);
 
         let reader = self_.py().detach(move || {
+            let projection = projection
+                .optimize_recursive(vxf.dtype())?
+                .bind(vxf.dtype())?;
+            let filter = filter
+                .map(|filter| filter.optimize_recursive(vxf.dtype())?.bind(vxf.dtype()))
+                .transpose()?;
             let mut scan = vxf
                 .scan()?
                 .with_projection(projection)
@@ -223,9 +241,15 @@ impl PyVortexDataset {
         let vxf = self_.vxf.clone();
         let filter = filter_from_python(row_filter);
         let n_rows: usize = self_.py().detach(move || {
+            let projection = select(FieldNames::empty(), root())
+                .optimize_recursive(vxf.dtype())?
+                .bind(vxf.dtype())?;
+            let filter = filter
+                .map(|filter| filter.optimize_recursive(vxf.dtype())?.bind(vxf.dtype()))
+                .transpose()?;
             let mut scan = vxf
                 .scan()?
-                .with_projection(select(FieldNames::empty(), root()))
+                .with_projection(projection)
                 .with_some_filter(filter)
                 .with_split_by(split_by.map(SplitBy::RowCount).unwrap_or(SplitBy::Layout));
             if let Some((l, r)) = row_range {

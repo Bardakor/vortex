@@ -39,6 +39,7 @@ impl ExprSerializeProtoExt for Expression {
 
 impl Expression {
     pub fn from_proto(expr: &pb::Expr, session: &VortexSession) -> VortexResult<Expression> {
+        #[expect(clippy::disallowed_methods, reason = "interning a dynamic id")]
         let expr_id = ScalarFnId::new(expr.id.as_str());
         let children = expr
             .children
@@ -46,7 +47,7 @@ impl Expression {
             .map(|e| Expression::from_proto(e, session))
             .collect::<VortexResult<Vec<_>>>()?;
 
-        let scalar_fn = if let Some(vtable) = session.scalar_fns().registry().find(&expr_id) {
+        let scalar_fn = if let Some(vtable) = session.scalar_fns().registry().get(&expr_id) {
             vtable.deserialize(expr.metadata(), session)?
         } else if session.allows_unknown() {
             ForeignScalarFnVTable::make_scalar_fn(expr_id, expr.metadata().to_vec(), children.len())
@@ -74,7 +75,7 @@ mod tests {
     use vortex_session::VortexSession;
 
     use super::ExprSerializeProtoExt;
-    use crate::LEGACY_SESSION;
+    use crate::array_session;
     use crate::expr::Expression;
     use crate::expr::and;
     use crate::expr::between;
@@ -108,16 +109,15 @@ mod tests {
         let s_expr = expr.serialize_proto().unwrap();
         let buf = s_expr.encode_to_vec();
         let s_expr = pb::Expr::decode(buf.as_slice()).unwrap();
-        let deser_expr = Expression::from_proto(&s_expr, &LEGACY_SESSION).unwrap();
+        let deser_expr = Expression::from_proto(&s_expr, &array_session()).unwrap();
 
         assert_eq!(&deser_expr, &expr);
     }
 
     #[test]
     fn unknown_expression_id_allow_unknown() {
-        let session = VortexSession::empty()
-            .with::<ScalarFnSession>()
-            .allow_unknown();
+        let session = VortexSession::empty().with::<ScalarFnSession>();
+        session.allow_unknown();
 
         let expr_proto = pb::Expr {
             id: "vortex.test.foreign_scalar_fn".to_string(),

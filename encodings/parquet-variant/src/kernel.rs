@@ -11,41 +11,85 @@ use arrow_schema::FieldRef;
 use parquet_variant::VariantPath as PqVariantPath;
 use parquet_variant::VariantPathElement as PqVariantPathElement;
 use parquet_variant_compute::GetOptions;
+use parquet_variant_compute::ShreddedSchemaBuilder;
 use parquet_variant_compute::VariantArray as ArrowVariantArray;
+use parquet_variant_compute::shred_variant;
 use parquet_variant_compute::variant_get as arrow_variant_get;
 use vortex_array::ArrayRef;
+use vortex_array::ArrayVTable;
 use vortex_array::ArrayView;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
+use vortex_array::aggregate_fn::AggregateFnVTable;
+use vortex_array::aggregate_fn::fns::all_non_distinct::AllNonDistinct;
+use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
+use vortex_array::arrays::Dict;
+use vortex_array::arrays::Extension;
+use vortex_array::arrays::Filter;
+use vortex_array::arrays::Slice;
+use vortex_array::arrays::Struct;
 use vortex_array::arrays::dict::TakeExecute;
 use vortex_array::arrays::dict::TakeExecuteAdaptor;
+use vortex_array::arrays::extension::ExtensionArrayExt;
 use vortex_array::arrays::filter::FilterExecuteAdaptor;
 use vortex_array::arrays::filter::FilterKernel;
 use vortex_array::arrays::scalar_fn::ExactScalarFn;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayView;
 use vortex_array::arrays::slice::SliceExecuteAdaptor;
 use vortex_array::arrays::slice::SliceKernel;
-use vortex_array::arrow::FromArrowArray;
 use vortex_array::dtype::DType;
 use vortex_array::kernel::ExecuteParentKernel;
-use vortex_array::kernel::ParentKernelSet;
+use vortex_array::optimizer::kernels::ArrayKernelsExt;
+use vortex_array::scalar_fn::ScalarFnVTable;
 use vortex_array::scalar_fn::fns::variant_get::VariantGet;
 use vortex_array::scalar_fn::fns::variant_get::VariantPath;
 use vortex_array::scalar_fn::fns::variant_get::VariantPathElement;
+use vortex_arrow::ArrowSessionExt;
+use vortex_arrow::FromArrowArray;
+use vortex_arrow::ToArrowType;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
+use vortex_json::Json;
+use vortex_json::JsonToVariant;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 
 use crate::ParquetVariant;
 use crate::ParquetVariantArrayExt;
+use crate::ParquetVariantArraySlotsExt;
+use crate::compute::AllNonDistinctParquetVariant;
 
-pub(crate) static PARENT_KERNELS: ParentKernelSet<ParquetVariant> = ParentKernelSet::new(&[
-    ParentKernelSet::lift(&FilterExecuteAdaptor(ParquetVariant)),
-    ParentKernelSet::lift(&SliceExecuteAdaptor(ParquetVariant)),
-    ParentKernelSet::lift(&TakeExecuteAdaptor(ParquetVariant)),
-    ParentKernelSet::lift(&VariantGetKernel),
-]);
+pub(crate) fn initialize(session: &VortexSession) {
+    let kernels = session.kernels();
+    kernels.register_execute_parent_kernel(
+        Filter.id(),
+        ParquetVariant,
+        FilterExecuteAdaptor(ParquetVariant),
+    );
+    kernels.register_execute_parent_kernel(
+        Slice.id(),
+        ParquetVariant,
+        SliceExecuteAdaptor(ParquetVariant),
+    );
+    kernels.register_execute_parent_kernel(
+        Dict.id(),
+        ParquetVariant,
+        TakeExecuteAdaptor(ParquetVariant),
+    );
+    kernels.register_execute_parent_kernel(VariantGet.id(), ParquetVariant, VariantGetKernel);
+    kernels.register_execute_parent_kernel(
+        JsonToVariant.id(),
+        Extension,
+        JsonExtensionToVariantKernel,
+    );
+    let aggregates = session.aggregate_fns();
+    aggregates.register_aggregate_kernel(
+        Struct.id(),
+        Some(AllNonDistinct.id()),
+        &AllNonDistinctParquetVariant,
+    );
+}
 
 #[derive(Default, Debug)]
 struct VariantGetKernel;
@@ -87,7 +131,67 @@ impl ExecuteParentKernel<ParquetVariant> for VariantGetKernel {
     }
 }
 
-fn to_parquet_variant_path(path: &VariantPath) -> VortexResult<PqVariantPath<'static>> {
+/// Performs the [`JsonToVariant`] conversion (and optional shredding) over JSON string storage.
+///
+/// `JsonToVariant`'s definition lives in `vortex-json`; the registered `execute_parent` kernels
+/// delegate here to do the actual JSON parsing and optional shredding using
+/// `parquet_variant_compute`, producing a [`ParquetVariant`] array. `strings` is the JSON
+/// extension's storage array; it is executed to Arrow and parsed. Nullability of the result follows
+/// `parent.dtype()`, which equals the input's nullability.
+fn json_strings_to_variant(
+    strings: ArrayRef,
+    parent: ScalarFnArrayView<'_, JsonToVariant>,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ArrayRef> {
+    let nullable = parent.dtype().is_nullable();
+    let session = ctx.session().clone();
+    let arrow_strings = session.arrow().execute_arrow(strings, None, ctx)?;
+    // Any row that fails to parse as JSON fails the whole conversion.
+    let arrow_variant = parquet_variant_compute::json_to_variant(&arrow_strings)?;
+
+    let arrow_variant = if parent.options.shredding().is_empty() {
+        arrow_variant
+    } else {
+        let mut builder = ShreddedSchemaBuilder::new();
+        for (path, dtype) in parent.options.shredding().fields() {
+            let field: FieldRef = Arc::new(session.arrow().to_arrow_field("shredded", dtype)?);
+            builder = builder.with_path(to_parquet_variant_path(path)?, field)?;
+        }
+        shred_variant(&arrow_variant, &builder.build())?
+    };
+
+    if nullable {
+        ParquetVariant::from_arrow_variant_nullable(&arrow_variant)
+    } else {
+        ParquetVariant::from_arrow_variant(&arrow_variant)
+    }
+}
+
+/// Builds Parquet Variant arrays for [`JsonToVariant`] over a [`Json`] extension input.
+///
+/// This kernel unwraps the extension's string storage and runs the JSON conversion. It is keyed on
+/// the shared extension encoding, so it declines any non-`Json` extension.
+#[derive(Default, Debug)]
+struct JsonExtensionToVariantKernel;
+
+impl ExecuteParentKernel<Extension> for JsonExtensionToVariantKernel {
+    type Parent = ExactScalarFn<JsonToVariant>;
+
+    fn execute_parent(
+        &self,
+        array: ArrayView<'_, Extension>,
+        parent: ScalarFnArrayView<'_, JsonToVariant>,
+        child_idx: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        if child_idx != 0 || !array.ext_dtype().is::<Json>() {
+            return Ok(None);
+        }
+        json_strings_to_variant(array.storage_array().clone(), parent, ctx).map(Some)
+    }
+}
+
+pub(crate) fn to_parquet_variant_path(path: &VariantPath) -> VortexResult<PqVariantPath<'static>> {
     path.elements()
         .iter()
         .map(|element| match element {
@@ -126,15 +230,9 @@ impl SliceKernel for ParquetVariant {
         _ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<ArrayRef>> {
         let validity = array.validity()?.slice(range.clone())?;
-        let metadata = array.metadata_array().slice(range.clone())?;
-        let value = array
-            .value_array()
-            .map(|v| v.slice(range.clone()))
-            .transpose()?;
-        let typed_value = array
-            .typed_value_array()
-            .map(|tv| tv.slice(range))
-            .transpose()?;
+        let metadata = array.metadata().slice(range.clone())?;
+        let value = array.value().map(|v| v.slice(range.clone())).transpose()?;
+        let typed_value = array.typed_value().map(|tv| tv.slice(range)).transpose()?;
         Ok(Some(
             ParquetVariant::try_new(validity, metadata, value, typed_value)?.into_array(),
         ))
@@ -148,13 +246,10 @@ impl FilterKernel for ParquetVariant {
         _ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<ArrayRef>> {
         let validity = array.validity()?.filter(mask)?;
-        let metadata = array.metadata_array().filter(mask.clone())?;
-        let value = array
-            .value_array()
-            .map(|v| v.filter(mask.clone()))
-            .transpose()?;
+        let metadata = array.metadata().filter(mask.clone())?;
+        let value = array.value().map(|v| v.filter(mask.clone())).transpose()?;
         let typed_value = array
-            .typed_value_array()
+            .typed_value()
             .map(|tv| tv.filter(mask.clone()))
             .transpose()?;
         Ok(Some(
@@ -170,13 +265,10 @@ impl TakeExecute for ParquetVariant {
         _ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<ArrayRef>> {
         let validity = array.validity()?.take(indices)?;
-        let metadata = array.metadata_array().take(indices.clone())?;
-        let value = array
-            .value_array()
-            .map(|v| v.take(indices.clone()))
-            .transpose()?;
+        let metadata = array.metadata().take(indices.clone())?;
+        let value = array.value().map(|v| v.take(indices.clone())).transpose()?;
         let typed_value = array
-            .typed_value_array()
+            .typed_value()
             .map(|tv| tv.take(indices.clone()))
             .transpose()?;
         Ok(Some(
@@ -188,6 +280,7 @@ impl TakeExecute for ParquetVariant {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::LazyLock;
 
     use arrow_array::Array as ArrowArray;
     use arrow_array::ArrayRef as ArrowArrayRef;
@@ -207,7 +300,6 @@ mod tests {
     use vortex_array::ArrayRef;
     use vortex_array::Canonical;
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray as VortexStructArray;
@@ -215,8 +307,7 @@ mod tests {
     use vortex_array::arrays::Variant;
     use vortex_array::arrays::VariantArray;
     use vortex_array::arrays::struct_::StructArrayExt;
-    use vortex_array::arrays::variant::VariantArrayExt;
-    use vortex_array::arrow::FromArrowArray;
+    use vortex_array::arrays::variant::VariantArraySlotsExt;
     use vortex_array::assert_arrays_eq;
     use vortex_array::assert_nth_scalar_is_null;
     use vortex_array::dtype::DType as VortexDType;
@@ -227,14 +318,22 @@ mod tests {
     use vortex_array::scalar_fn::fns::variant_get::VariantPath;
     use vortex_array::scalar_fn::fns::variant_get::VariantPathElement;
     use vortex_array::validity::Validity;
+    use vortex_arrow::FromArrowArray;
     use vortex_error::VortexResult;
     use vortex_error::vortex_bail;
     use vortex_error::vortex_ensure;
     use vortex_error::vortex_err;
     use vortex_mask::Mask;
+    use vortex_session::VortexSession;
 
     use crate::ParquetVariant;
-    use crate::ParquetVariantArrayExt;
+    use crate::ParquetVariantArraySlotsExt;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     fn make_unshredded_array() -> VortexResult<ArrayRef> {
         let mut builder = VariantArrayBuilder::new(4);
@@ -358,7 +457,7 @@ mod tests {
         let expr = variant_get(root(), parse_path(path)?, dtype);
         array
             .apply(&expr)?
-            .execute::<ArrayRef>(&mut LEGACY_SESSION.create_execution_ctx())
+            .execute::<ArrayRef>(&mut SESSION.create_execution_ctx())
     }
 
     macro_rules! assert_rows_eq {
@@ -368,7 +467,7 @@ mod tests {
             let expected_rows = [$($expected_idx),*];
             assert_eq!(actual.len(), expected_rows.len());
 
-            let mut ctx = LEGACY_SESSION.create_execution_ctx();
+            let mut ctx = SESSION.create_execution_ctx();
             for (actual_idx, expected_idx) in expected_rows.into_iter().enumerate() {
                 assert_eq!(
                     actual.execute_scalar(actual_idx, &mut ctx)?,
@@ -385,7 +484,7 @@ mod tests {
             let expected = [$($is_null),*];
             assert_eq!(array.len(), expected.len());
 
-            let mut ctx = LEGACY_SESSION.create_execution_ctx();
+            let mut ctx = SESSION.create_execution_ctx();
             for (idx, is_null) in expected.into_iter().enumerate() {
                 assert_eq!(
                     array.execute_scalar(idx, &mut ctx)?.is_null(),
@@ -493,7 +592,8 @@ mod tests {
             result.dtype(),
             &VortexDType::Primitive(PType::I32, Nullability::Nullable)
         );
-        assert_arrays_eq!(result, PrimitiveArray::from_option_iter(expected));
+        let mut ctx = SESSION.create_execution_ctx();
+        assert_arrays_eq!(result, PrimitiveArray::from_option_iter(expected), &mut ctx);
         Ok(())
     }
 
@@ -509,7 +609,7 @@ mod tests {
         let result = execute_variant_get(arr, "$.a", None)?;
 
         assert_eq!(result.dtype(), &VortexDType::Variant(Nullability::Nullable));
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let row0 = result.execute_scalar(0, &mut ctx)?;
         assert_eq!(
             row0.as_variant()
@@ -518,7 +618,7 @@ mod tests {
                 .map(|value| value.as_str()),
             Some("ok")
         );
-        assert_nth_scalar_is_null!(result, 1);
+        assert_nth_scalar_is_null!(result, 1, &mut ctx);
         assert_eq!(
             result
                 .execute_scalar(2, &mut ctx)?
@@ -526,7 +626,7 @@ mod tests {
                 .is_variant_null(),
             Some(true)
         );
-        assert_nth_scalar_is_null!(result, 3);
+        assert_nth_scalar_is_null!(result, 3, &mut ctx);
 
         Ok(())
     }
@@ -684,7 +784,7 @@ mod tests {
     fn make_partially_shredded_object_array() -> VortexResult<ArrayRef> {
         let arrow_variant = make_partially_shredded_arrow_variant()?;
         let parquet_array = ParquetVariant::from_arrow_variant(&arrow_variant)?;
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let Canonical::Variant(canonical) = parquet_array.execute::<Canonical>(&mut ctx)? else {
             return Err(vortex_err!("expected canonical variant array"));
         };
@@ -722,7 +822,7 @@ mod tests {
 
     fn assert_variant_i32_scalars(array: &ArrayRef, expected: &[Option<i32>]) -> VortexResult<()> {
         assert_eq!(array.len(), expected.len());
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         for (idx, expected) in expected.iter().enumerate() {
             let scalar = array.execute_scalar(idx, &mut ctx)?;
             let variant = scalar.as_variant();
@@ -748,7 +848,7 @@ mod tests {
     ) -> VortexResult<()> {
         assert_eq!(array.len(), expected_a.len());
         assert_eq!(array.len(), expected_b.len());
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         for idx in 0..array.len() {
             let scalar = array.execute_scalar(idx, &mut ctx)?;
             let object = scalar
@@ -807,16 +907,20 @@ mod tests {
         array: &ArrayRef,
         expected: impl IntoIterator<Item = Option<i32>>,
     ) -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let executed = array.clone().execute::<ArrayRef>(&mut ctx)?;
         let typed_value = executed
             .as_::<ParquetVariant>()
-            .typed_value_array()
+            .typed_value()
             .ok_or_else(|| vortex_err!("expected typed_value child"))?
             .clone()
             .execute::<PrimitiveArray>(&mut ctx)?;
 
-        assert_arrays_eq!(typed_value, PrimitiveArray::from_option_iter(expected));
+        assert_arrays_eq!(
+            typed_value,
+            PrimitiveArray::from_option_iter(expected),
+            &mut ctx
+        );
         Ok(())
     }
 
@@ -856,7 +960,8 @@ mod tests {
 
         assert_arrays_eq!(
             result,
-            PrimitiveArray::from_option_iter([Some(10), Some(30), None])
+            PrimitiveArray::from_option_iter([Some(10), Some(30), None]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -873,7 +978,8 @@ mod tests {
 
         assert_arrays_eq!(
             result,
-            VarBinArray::from(vec![Some("left"), Some("right"), Some("missing_a")])
+            VarBinArray::from(vec![Some("left"), Some("right"), Some("missing_a")]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -887,14 +993,14 @@ mod tests {
             .core_storage()
             .as_opt::<ParquetVariant>()
             .ok_or_else(|| vortex_err!("expected parquet variant core storage"))?;
-        assert!(core_storage.typed_value_array().is_none());
-        assert!(core_storage.value_array().is_some());
+        assert!(core_storage.typed_value().is_none());
+        assert!(core_storage.value().is_some());
 
         let shredded = canonical_variant
             .shredded()
             .ok_or_else(|| vortex_err!("expected canonical shredded child"))?
             .clone()
-            .execute::<VortexStructArray>(&mut LEGACY_SESSION.create_execution_ctx())?;
+            .execute::<VortexStructArray>(&mut SESSION.create_execution_ctx())?;
         assert_eq!(
             shredded.unmasked_field_by_name("a")?.dtype(),
             &VortexDType::Variant(Nullability::Nullable)
@@ -909,7 +1015,8 @@ mod tests {
 
         assert_arrays_eq!(
             result,
-            PrimitiveArray::from_option_iter([Some(10), Some(30), None])
+            PrimitiveArray::from_option_iter([Some(10), Some(30), None]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -926,7 +1033,8 @@ mod tests {
 
         assert_arrays_eq!(
             result,
-            PrimitiveArray::from_option_iter([Some(10), Some(30), None])
+            PrimitiveArray::from_option_iter([Some(10), Some(30), None]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -943,7 +1051,8 @@ mod tests {
 
         assert_arrays_eq!(
             result,
-            PrimitiveArray::from_option_iter([Some(100), Some(20), Some(30)])
+            PrimitiveArray::from_option_iter([Some(100), Some(20), Some(30)]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -983,11 +1092,11 @@ mod tests {
         assert!(
             parquet_array
                 .as_::<ParquetVariant>()
-                .typed_value_array()
+                .typed_value()
                 .is_some()
         );
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let Canonical::Variant(canonical) = parquet_array.execute::<Canonical>(&mut ctx)? else {
             return Err(vortex_err!("expected canonical variant array"));
         };
@@ -997,8 +1106,8 @@ mod tests {
             .core_storage()
             .as_opt::<ParquetVariant>()
             .ok_or_else(|| vortex_err!("expected parquet variant core storage"))?;
-        assert!(core_storage.typed_value_array().is_none());
-        assert!(core_storage.value_array().is_some());
+        assert!(core_storage.typed_value().is_none());
+        assert!(core_storage.value().is_some());
 
         Ok(())
     }

@@ -28,6 +28,7 @@ use crate::array::ArrayId;
 use crate::array::ArrayParts;
 use crate::array::ArrayView;
 use crate::array::VTable;
+use crate::array::with_empty_buffers;
 use crate::arrays::scalar_fn::array::ScalarFnArrayExt;
 use crate::arrays::scalar_fn::array::ScalarFnData;
 use crate::arrays::scalar_fn::rules::PARENT_RULES;
@@ -37,6 +38,7 @@ use crate::dtype::DType;
 use crate::executor::ExecutionCtx;
 use crate::executor::ExecutionResult;
 use crate::expr::Expression;
+use crate::expr::display::ExprDisplay;
 use crate::matcher::Matcher;
 use crate::scalar_fn;
 use crate::scalar_fn::Arity;
@@ -116,6 +118,14 @@ impl VTable for ScalarFn {
         None
     }
 
+    fn with_buffers(
+        &self,
+        array: ArrayView<'_, Self>,
+        buffers: &[BufferHandle],
+    ) -> VortexResult<ArrayParts<Self>> {
+        with_empty_buffers(self, array, buffers)
+    }
+
     fn serialize(
         _array: ArrayView<'_, Self>,
         _session: &VortexSession,
@@ -146,7 +156,6 @@ impl VTable for ScalarFn {
     }
 
     fn execute(array: Array<Self>, ctx: &mut ExecutionCtx) -> VortexResult<ExecutionResult> {
-        ctx.log(format_args!("scalar_fn({}): executing", array.scalar_fn()));
         let args = VecExecutionArgs::new(array.children(), array.len());
         array
             .scalar_fn()
@@ -301,7 +310,7 @@ impl scalar_fn::ScalarFnVTable for ArrayExpr {
     fn fmt_sql(
         &self,
         options: &Self::Options,
-        _expr: &Expression,
+        _expr: &dyn ExprDisplay,
         f: &mut Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "{}", options.0.encoding_id())
@@ -327,5 +336,9 @@ impl scalar_fn::ScalarFnVTable for ArrayExpr {
     ) -> VortexResult<Option<Expression>> {
         let validity_array = options.0.validity()?.to_array(options.0.len());
         Ok(Some(ArrayExpr.new_expr(FakeEq(validity_array), [])))
+    }
+
+    fn is_strict(&self, _options: &Self::Options) -> bool {
+        true
     }
 }

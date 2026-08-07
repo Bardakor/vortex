@@ -18,6 +18,8 @@ mod test {
     use rstest::rstest;
 
     use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::ConstantArray;
     use crate::compute::conformance::consistency::test_array_consistency;
     use crate::compute::conformance::filter::test_filter_conformance;
@@ -27,21 +29,41 @@ mod test {
 
     #[test]
     fn test_mask_constant() {
-        test_mask_conformance(&ConstantArray::new(Scalar::null_native::<i32>(), 5).into_array());
-        test_mask_conformance(&ConstantArray::new(Scalar::from(3u16), 5).into_array());
-        test_mask_conformance(&ConstantArray::new(Scalar::from(1.0f32 / 0.0f32), 5).into_array());
+        test_mask_conformance(
+            &ConstantArray::new(Scalar::null_native::<i32>(), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_mask_conformance(
+            &ConstantArray::new(Scalar::from(3u16), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_mask_conformance(
+            &ConstantArray::new(Scalar::from(1.0f32 / 0.0f32), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
         test_mask_conformance(
             &ConstantArray::new(Scalar::from(f16::from_f32(3.0f32)), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
         );
     }
 
     #[test]
     fn test_filter_constant() {
-        test_filter_conformance(&ConstantArray::new(Scalar::null_native::<i32>(), 5).into_array());
-        test_filter_conformance(&ConstantArray::new(Scalar::from(3u16), 5).into_array());
-        test_filter_conformance(&ConstantArray::new(Scalar::from(1.0f32 / 0.0f32), 5).into_array());
+        test_filter_conformance(
+            &ConstantArray::new(Scalar::null_native::<i32>(), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_filter_conformance(
+            &ConstantArray::new(Scalar::from(3u16), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_filter_conformance(
+            &ConstantArray::new(Scalar::from(1.0f32 / 0.0f32), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
         test_filter_conformance(
             &ConstantArray::new(Scalar::from(f16::from_f32(3.0f32)), 5).into_array(),
+            &mut array_session().create_execution_ctx(),
         );
     }
 
@@ -62,6 +84,9 @@ mod test {
     #[case::constant_single(ConstantArray::new(Scalar::from(99u64), 1))]
     #[case::constant_large(ConstantArray::new(Scalar::from("hello"), 1000))]
     fn test_constant_consistency(#[case] array: ConstantArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 }

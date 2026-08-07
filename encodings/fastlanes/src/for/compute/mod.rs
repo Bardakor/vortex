@@ -17,6 +17,7 @@ use vortex_mask::Mask;
 
 use crate::FoR;
 use crate::r#for::array::FoRArrayExt;
+use crate::r#for::array::FoRArraySlotsExt;
 
 impl TakeExecute for FoR {
     fn take(
@@ -49,8 +50,11 @@ mod test {
     use rstest::rstest;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
+    use vortex_array::VortexSessionExecute;
+    use vortex_array::array_session;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::compute::conformance::filter::test_filter_conformance;
+    use vortex_array::compute::conformance::take::test_take_conformance;
     use vortex_array::scalar::Scalar;
     use vortex_buffer::buffer;
     use vortex_error::VortexExpect;
@@ -68,18 +72,27 @@ mod test {
             buffer![100i32, 101, 102, 103, 104].into_array(),
             Scalar::from(100i32),
         );
-        test_filter_conformance(&for_array.into_array());
+        test_filter_conformance(
+            &for_array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
 
         let for_array = fa(
             buffer![1000u64, 1001, 1002, 1003, 1004].into_array(),
             Scalar::from(1000u64),
         );
-        test_filter_conformance(&for_array.into_array());
+        test_filter_conformance(
+            &for_array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
 
         let values =
             PrimitiveArray::from_option_iter([Some(50i16), None, Some(52), Some(53), None]);
         let for_array = fa(values.into_array(), Scalar::from(50i16));
-        test_filter_conformance(&for_array.into_array());
+        test_filter_conformance(
+            &for_array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[rstest]
@@ -92,8 +105,10 @@ mod test {
     #[case(fa(buffer![-100i32, -99, -98, -97, -96].into_array(), Scalar::from(-100i32)))]
     #[case(fa(buffer![42i64].into_array(), Scalar::from(40i64)))]
     fn test_take_for_conformance(#[case] for_array: FoRArray) {
-        use vortex_array::compute::conformance::take::test_take_conformance;
-        test_take_conformance(&for_array.into_array());
+        test_take_conformance(
+            &for_array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 }
 
@@ -102,6 +117,8 @@ mod tests {
     use rstest::rstest;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
+    use vortex_array::VortexSessionExecute;
+    use vortex_array::array_session;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::compute::conformance::binary_numeric::test_binary_numeric_array;
     use vortex_array::compute::conformance::consistency::test_array_consistency;
@@ -145,7 +162,10 @@ mod tests {
     #[case::for_large_deltas(fa(buffer![100i64, 200, 300, 400, 500].into_array(), Scalar::from(100i64)))]
 
     fn test_for_consistency(#[case] array: FoRArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[rstest]
@@ -158,6 +178,9 @@ mod tests {
         Scalar::from(2000i32)
     ))]
     fn test_for_binary_numeric(#[case] array: FoRArray) {
-        test_binary_numeric_array(array.into_array());
+        test_binary_numeric_array(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 }

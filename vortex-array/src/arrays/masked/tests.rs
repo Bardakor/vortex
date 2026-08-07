@@ -8,10 +8,9 @@ use vortex_error::VortexResult;
 use super::*;
 use crate::Canonical;
 use crate::IntoArray;
-use crate::LEGACY_SESSION;
-#[expect(deprecated)]
-use crate::ToCanonical as _;
 use crate::VortexSessionExecute;
+use crate::array_session;
+use crate::arrays::ListViewArray;
 use crate::arrays::PrimitiveArray;
 use crate::assert_arrays_eq;
 use crate::dtype::DType;
@@ -51,7 +50,7 @@ fn test_canonical_dtype_matches_array_dtype() -> VortexResult<()> {
     let canonical = array
         .clone()
         .into_array()
-        .execute::<Canonical>(&mut LEGACY_SESSION.create_execution_ctx())?;
+        .execute::<Canonical>(&mut array_session().create_execution_ctx())?;
     assert_eq!(canonical.dtype(), array.dtype());
     Ok(())
 }
@@ -63,38 +62,41 @@ fn test_masked_child_with_validity() {
     let array =
         MaskedArray::try_new(child, Validity::from_iter([true, false, true, false, true])).unwrap();
 
-    #[expect(deprecated)]
-    let prim = array.as_array().to_primitive();
-
     // Positions where validity is false should be null in masked_child.
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
+    let prim = array
+        .as_array()
+        .clone()
+        .execute::<PrimitiveArray>(&mut ctx)
+        .unwrap();
     assert_eq!(prim.valid_count(&mut ctx).unwrap(), 3);
     assert!(
-        prim.is_valid(0, &mut LEGACY_SESSION.create_execution_ctx())
+        prim.is_valid(0, &mut array_session().create_execution_ctx())
             .unwrap()
     );
     assert!(
         !prim
-            .is_valid(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .is_valid(1, &mut array_session().create_execution_ctx())
             .unwrap()
     );
     assert!(
-        prim.is_valid(2, &mut LEGACY_SESSION.create_execution_ctx())
+        prim.is_valid(2, &mut array_session().create_execution_ctx())
             .unwrap()
     );
     assert!(
         !prim
-            .is_valid(3, &mut LEGACY_SESSION.create_execution_ctx())
+            .is_valid(3, &mut array_session().create_execution_ctx())
             .unwrap()
     );
     assert!(
-        prim.is_valid(4, &mut LEGACY_SESSION.create_execution_ctx())
+        prim.is_valid(4, &mut array_session().create_execution_ctx())
             .unwrap()
     );
 }
 
 #[test]
 fn test_masked_child_all_valid() {
+    let mut ctx = array_session().create_execution_ctx();
     // When validity is AllValid, masked_child should invert to AllInvalid.
     let child = PrimitiveArray::from_iter([10i32, 20, 30]).into_array();
     let array = MaskedArray::try_new(child, Validity::AllValid).unwrap();
@@ -102,13 +104,14 @@ fn test_masked_child_all_valid() {
     assert_eq!(array.len(), 3);
     assert_eq!(
         array
-            .valid_count(&mut LEGACY_SESSION.create_execution_ctx())
+            .valid_count(&mut array_session().create_execution_ctx())
             .unwrap(),
         3
     );
     assert_arrays_eq!(
         PrimitiveArray::from_option_iter([10i32, 20, 30].map(Some)),
-        array
+        array,
+        &mut ctx
     );
 }
 
@@ -129,7 +132,7 @@ fn test_masked_child_preserves_length(#[case] validity: Validity) {
 
     assert_eq!(array.len(), len);
 
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     assert!(
         array
             .validity()
@@ -137,4 +140,24 @@ fn test_masked_child_preserves_length(#[case] validity: Validity) {
             .mask_eq(&validity, array.len(), &mut ctx)
             .unwrap(),
     );
+}
+
+#[test]
+fn masked_listview_execute_preserves_zctl_true() -> VortexResult<()> {
+    // Masking only intersects validity, so the zero-copy-to-list survives
+    // execution.
+    let elements = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();
+    let offsets = PrimitiveArray::from_iter([0i32, 2]).into_array();
+    let sizes = PrimitiveArray::from_iter([2i32, 1]).into_array();
+    let list_view = unsafe {
+        ListViewArray::new_unchecked(elements, offsets, sizes, Validity::NonNullable)
+            .with_zero_copy_to_list(true)
+    };
+
+    let masked = MaskedArray::try_new(list_view.into_array(), Validity::from_iter([true, false]))?;
+    let canonical = masked
+        .into_array()
+        .execute::<Canonical>(&mut array_session().create_execution_ctx())?;
+    assert!(canonical.into_listview().is_zero_copy_to_list());
+    Ok(())
 }

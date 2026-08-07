@@ -17,7 +17,7 @@ use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
 use crate::ZigZag;
-use crate::array::ZigZagArrayExt;
+use crate::array::ZigZagArraySlotsExt;
 
 impl FilterReduce for ZigZag {
     fn filter(array: ArrayView<'_, Self>, mask: &Mask) -> VortexResult<Option<ArrayRef>> {
@@ -70,10 +70,11 @@ impl ZigZagEncoded for u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use rstest::rstest;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
@@ -85,9 +86,16 @@ mod tests {
     use vortex_buffer::BitBuffer;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
+    use vortex_session::VortexSession;
 
     use crate::ZigZagArray;
     use crate::zigzag_encode;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[test]
     pub fn nullable_scalar_at() -> VortexResult<()> {
@@ -95,7 +103,7 @@ mod tests {
             PrimitiveArray::new(buffer![-189, -160, 1], Validity::AllValid).as_view(),
         )?;
         assert_eq!(
-            zigzag.execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())?,
+            zigzag.execute_scalar(1, &mut SESSION.create_execution_ctx())?,
             Scalar::primitive(-160, Nullability::Nullable)
         );
         Ok(())
@@ -112,7 +120,7 @@ mod tests {
         let expected =
             zigzag_encode(PrimitiveArray::new(buffer![-189, 1], Validity::AllValid).as_view())?
                 .into_array();
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -127,7 +135,7 @@ mod tests {
         let expected =
             zigzag_encode(PrimitiveArray::new(buffer![-189, 1], Validity::AllValid).as_view())?
                 .into_array();
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -139,7 +147,7 @@ mod tests {
         let zigzag = zigzag_encode(
             PrimitiveArray::new(buffer![-189i32, -160, 1, 42, -73], Validity::AllValid).as_view(),
         )?;
-        test_filter_conformance(&zigzag.into_array());
+        test_filter_conformance(&zigzag.into_array(), &mut SESSION.create_execution_ctx());
 
         // Test with i64 values
         let zigzag = zigzag_encode(
@@ -149,13 +157,13 @@ mod tests {
             )
             .as_view(),
         )?;
-        test_filter_conformance(&zigzag.into_array());
+        test_filter_conformance(&zigzag.into_array(), &mut SESSION.create_execution_ctx());
 
         // Test with nullable values
         let array =
             PrimitiveArray::from_option_iter([Some(-10i16), None, Some(20), Some(-30), None]);
         let zigzag = zigzag_encode(array.as_view())?;
-        test_filter_conformance(&zigzag.into_array());
+        test_filter_conformance(&zigzag.into_array(), &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -168,13 +176,13 @@ mod tests {
             PrimitiveArray::new(buffer![-100i32, 200, -300, 400, -500], Validity::AllValid)
                 .as_view(),
         )?;
-        test_mask_conformance(&zigzag.into_array());
+        test_mask_conformance(&zigzag.into_array(), &mut SESSION.create_execution_ctx());
 
         // Test with i8 values
         let zigzag = zigzag_encode(
             PrimitiveArray::new(buffer![-127i8, 0, 127, -1, 1], Validity::AllValid).as_view(),
         )?;
-        test_mask_conformance(&zigzag.into_array());
+        test_mask_conformance(&zigzag.into_array(), &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -187,10 +195,10 @@ mod tests {
     fn test_take_zigzag_conformance(#[case] array: ArrayRef) -> VortexResult<()> {
         use vortex_array::compute::conformance::take::test_take_conformance;
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let array_primitive = array.execute::<PrimitiveArray>(&mut ctx)?;
         let zigzag = zigzag_encode(array_primitive.as_view())?;
-        test_take_conformance(&zigzag.into_array());
+        test_take_conformance(&zigzag.into_array(), &mut ctx);
         Ok(())
     }
 
@@ -210,7 +218,7 @@ mod tests {
     #[case::zigzag_large_i32(zigzag_encode(PrimitiveArray::from_iter(-500..500).as_view()).unwrap())]
     #[case::zigzag_large_i64(zigzag_encode(PrimitiveArray::from_iter((-1000..1000).map(|i| i as i64 * 100)).as_view()).unwrap())]
     fn test_zigzag_consistency(#[case] array: ZigZagArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(&array.into_array(), &mut SESSION.create_execution_ctx());
     }
 
     #[rstest]
@@ -220,6 +228,6 @@ mod tests {
     #[case::zigzag_i64_basic(zigzag_encode(PrimitiveArray::from_iter([-10000i64, -5000, 0, 5000, 10000]).as_view()).unwrap())]
     #[case::zigzag_i32_large(zigzag_encode(PrimitiveArray::from_iter((-50..50).map(|i| i * 10)).as_view()).unwrap())]
     fn test_zigzag_binary_numeric(#[case] array: ZigZagArray) {
-        test_binary_numeric_array(array.into_array());
+        test_binary_numeric_array(&array.into_array(), &mut SESSION.create_execution_ctx());
     }
 }

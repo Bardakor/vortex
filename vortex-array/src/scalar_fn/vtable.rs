@@ -19,10 +19,9 @@ use vortex_session::VortexSession;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::dtype::DType;
+use crate::expr::BoundExpression;
 use crate::expr::Expression;
-use crate::expr::StatsCatalog;
-use crate::expr::stats::Stat;
-use crate::expr::traversal::Node;
+use crate::expr::display::ExprDisplay;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnRef;
 use crate::scalar_fn::TypedScalarFnInstance;
@@ -69,20 +68,20 @@ pub trait ScalarFnVTable: 'static + Sized + Clone + Send + Sync {
     /// Returns the name of the nth child of the expr.
     fn child_name(&self, options: &Self::Options, child_idx: usize) -> ChildName;
 
-    /// Format this expression in a nice human-readable SQL-style format
+    /// Format an expression tree in a human-readable SQL-style format.
     ///
-    /// The implementation should recursively format child expressions by calling
-    /// `expr.child(i).fmt_sql(f)`.
+    /// The expression may be either an [`Expression`] or a
+    /// [`bound expression`](crate::expr::BoundExpression).
     fn fmt_sql(
         &self,
         options: &Self::Options,
-        expr: &Expression,
+        expr: &dyn ExprDisplay,
         f: &mut Formatter<'_>,
     ) -> fmt::Result {
         write!(f, "{}(", self.id())?;
-        let nchildren = expr.children_count();
-        for (i, child) in expr.children().iter().enumerate() {
-            child.fmt_sql(f)?;
+        let nchildren = expr.display_children_count();
+        for i in 0..nchildren {
+            Display::fmt(expr.display_child(i), f)?;
             if i + 1 < nchildren {
                 write!(f, ", ")?;
             }
@@ -179,34 +178,6 @@ pub trait ScalarFnVTable: 'static + Sized + Clone + Send + Sync {
         Ok(None)
     }
 
-    /// See [`Expression::stat_falsification`].
-    fn stat_falsification(
-        &self,
-        options: &Self::Options,
-        expr: &Expression,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression> {
-        _ = options;
-        _ = expr;
-        _ = catalog;
-        None
-    }
-
-    /// See [`Expression::stat_expression`].
-    fn stat_expression(
-        &self,
-        options: &Self::Options,
-        expr: &Expression,
-        stat: Stat,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression> {
-        _ = options;
-        _ = expr;
-        _ = stat;
-        _ = catalog;
-        None
-    }
-
     /// Returns an expression that evaluates to the validity of the result of this expression.
     ///
     /// If a validity expression cannot be constructed, returns `None` and the expression will
@@ -222,46 +193,45 @@ pub trait ScalarFnVTable: 'static + Sized + Clone + Send + Sync {
         Ok(None)
     }
 
-    /// Returns whether this expression itself is null-sensitive. Conservatively default to *true*.
+    /// Returns whether this scalar function is strict.
     ///
-    /// An expression is null-sensitive if it directly operates on null values,
-    /// such as `is_null`. Most expressions are not null-sensitive.
+    /// A strict function returns null for a row when any argument is null for that row. This
+    /// matches [PostgreSQL's `STRICT` convention](https://www.postgresql.org/docs/current/sql-createfunction.html)
+    /// for null propagation.
     ///
-    /// The property we are interested in is if the expression (e) distributes over `mask`.
-    /// Define a `mask(a, m)` expression that applies the boolean array `m` to the validity of the
-    /// array `a`.
+    /// Return `true` only when this holds for every argument. `add` is strict, but Kleene `AND`
+    /// is not because `false AND null` returns `false`. `is_null` is also not strict.
     ///
-    /// A unary expression `e` is not null-sensitive iff forall arrays `a` and masks `m`,
-    /// `e(mask(a, m)) == mask(e(a), m)`.
+    /// Strictness does not require valid inputs to produce a valid output. For example,
+    /// [`crate::expr::list_sum`] returns null for a valid empty list. Implement
+    /// [`ScalarFnVTable::validity`] only when the output validity can be derived without
+    /// evaluation.
     ///
-    /// This can be extended to an n-ary expression.
+    /// [`ScalarFnVTable::return_dtype`] must return a nullable output dtype when any input dtype is
+    /// nullable. A `cast` that forces a non-nullable output dtype is therefore not strict.
     ///
-    /// This method only checks the expression itself, not its children.
-    fn is_null_sensitive(&self, options: &Self::Options) -> bool {
+    /// This property applies only to the scalar function, not its child expressions. Nullary
+    /// functions are vacuously strict. The default is conservatively `false`.
+    fn is_strict(&self, options: &Self::Options) -> bool {
         _ = options;
-        true
+        false
     }
 
-    /// Returns whether this expression is semantically fallible. Conservatively defaults to
-    /// `true`.
+    /// Returns whether this scalar function can raise a semantic error.
     ///
-    /// An expression is semantically fallible if there exists a set of well-typed inputs that
-    /// causes the expression to produce an error as part of its _defined behavior_. For example,
-    /// `checked_add` is fallible because integer overflow is a domain error, and division is
-    /// fallible because of division by zero.
+    /// Return `true` if a well-typed call can error because of its values. `checked_add` is
+    /// fallible on integer overflow, and integer division is fallible when its divisor is zero.
+    /// A null result is not an error: [`crate::expr::list_sum`] is infallible for an empty list.
     ///
-    /// This does **not** include execution errors that are incidental to the implementation, such
-    /// as canonicalization failures, memory allocation errors, or encoding mismatches. Those can
-    /// happen to any expression and are not what this method captures.
+    /// Exclude incidental execution errors, such as canonicalization failures, allocation errors,
+    /// and encoding mismatches. They are not part of the function's semantics.
     ///
-    /// This property is used by optimizations that speculatively evaluate an expression over values
-    /// that may not appear in the actual input. For example, pushing a scalar function down to a
-    /// dictionary's values array is only safe when the function is infallible or all values are
-    /// referenced, since a fallible function might error on a value left unreferenced after
-    /// slicing that would never be encountered during normal evaluation.
+    /// Returning `false` permits optimizations that evaluate the function over values that no input
+    /// row references. Dictionary push-down, for example, evaluates every dictionary value, so a
+    /// fallible function could error on a value that row-wise evaluation would never reach.
     ///
-    /// Note: this is only applicable to expressions that pass type-checking via
-    /// [`ScalarFnVTable::return_dtype`].
+    /// This applies only to the scalar function, not its child expressions, and only to inputs
+    /// accepted by [`ScalarFnVTable::return_dtype`]. The default is conservatively `true`.
     fn is_fallible(&self, options: &Self::Options) -> bool {
         _ = options;
         true
@@ -422,6 +392,15 @@ pub trait ScalarFnVTableExt: ScalarFnVTable {
         children: impl IntoIterator<Item = Expression>,
     ) -> VortexResult<Expression> {
         Expression::try_new(self.bind(options), children)
+    }
+
+    /// Try to create a bound expression with this vtable, the given options, and bound children.
+    fn try_new_bound_expr(
+        &self,
+        options: Self::Options,
+        children: impl IntoIterator<Item = BoundExpression>,
+    ) -> VortexResult<BoundExpression> {
+        BoundExpression::try_new(self.bind(options), children)
     }
 }
 impl<V: ScalarFnVTable> ScalarFnVTableExt for V {}

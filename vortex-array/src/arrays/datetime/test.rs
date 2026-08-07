@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright the Vortex contributorsuse crate::dtype::Nullability;
+// SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use rstest::rstest;
 use vortex_buffer::buffer;
@@ -8,8 +8,8 @@ use vortex_error::VortexResult;
 
 use crate::EqMode;
 use crate::IntoArray;
-#[expect(deprecated)]
-use crate::ToCanonical as _;
+use crate::VortexSessionExecute;
+use crate::array_session;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::datetime::TemporalData;
 use crate::assert_arrays_eq;
@@ -26,12 +26,14 @@ use crate::validity::Validity;
 
 macro_rules! test_temporal_roundtrip {
     ($prim:ty, $constructor:expr, $unit:expr) => {{
+        let mut ctx = array_session().create_execution_ctx();
         let array = buffer![100 as $prim].into_array();
         let temporal: TemporalData = $constructor(array, $unit);
 
         assert_arrays_eq!(
             temporal.temporal_values(),
-            PrimitiveArray::from_iter([100 as $prim])
+            PrimitiveArray::from_iter([100 as $prim]),
+            &mut ctx
         );
         assert_eq!(temporal.temporal_metadata().time_unit(), $unit);
     }};
@@ -145,6 +147,7 @@ test_fail_case!(
 // We test Timestamp explicitly to avoid the macro getting too complex.
 #[test]
 fn test_timestamp() {
+    let mut ctx = array_session().create_execution_ctx();
     let ts = buffer![100i64].into_array();
     let ts_array = ts.into_array();
 
@@ -159,7 +162,8 @@ fn test_timestamp() {
 
             assert_arrays_eq!(
                 temporal_array.temporal_values(),
-                PrimitiveArray::from_iter([100i64])
+                PrimitiveArray::from_iter([100i64]),
+                &mut ctx
             );
             assert_eq!(
                 temporal_array.temporal_metadata(),
@@ -196,8 +200,11 @@ fn test_validity_preservation(#[case] validity: Validity) {
     let temporal_array =
         TemporalData::new_timestamp(milliseconds, TimeUnit::Milliseconds, Some("UTC".into()));
 
-    #[expect(deprecated)]
-    let prim = temporal_array.temporal_values().to_primitive();
+    let prim = temporal_array
+        .temporal_values()
+        .clone()
+        .execute::<PrimitiveArray>(&mut array_session().create_execution_ctx())
+        .unwrap();
     assert!(
         prim.validity()
             .vortex_expect("temporal validity should be derivable")

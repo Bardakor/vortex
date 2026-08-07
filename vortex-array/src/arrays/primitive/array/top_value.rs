@@ -10,33 +10,30 @@ use vortex_mask::AllOr;
 use vortex_mask::Mask;
 use vortex_utils::aliases::hash_map::HashMap;
 
-use crate::LEGACY_SESSION;
-use crate::VortexSessionExecute;
+use crate::ExecutionCtx;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::primitive::NativeValue;
 use crate::dtype::NativePType;
 use crate::match_each_native_ptype;
 use crate::scalar::PValue;
-use crate::validity::Validity;
 
 impl PrimitiveArray {
     /// Compute most common present value of this array
-    pub fn top_value(&self) -> VortexResult<Option<(PValue, usize)>> {
+    pub fn top_value(&self, ctx: &mut ExecutionCtx) -> VortexResult<Option<(PValue, usize)>> {
         if self.is_empty() {
             return Ok(None);
         }
 
-        if matches!(self.validity()?, Validity::AllInvalid) {
+        if self.validity()?.definitely_all_null() {
             return Ok(None);
         }
 
         match_each_native_ptype!(self.ptype(), |P| {
             let (top, count) = typed_top_value(
                 self.as_slice::<P>(),
-                self.as_ref().validity()?.execute_mask(
-                    self.as_ref().len(),
-                    &mut LEGACY_SESSION.create_execution_ctx(),
-                )?,
+                self.as_ref()
+                    .validity()?
+                    .execute_mask(self.as_ref().len(), ctx)?,
             );
             Ok(Some((top.into(), count)))
         })

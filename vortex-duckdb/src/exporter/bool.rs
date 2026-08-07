@@ -4,7 +4,6 @@
 use vortex::array::ExecutionCtx;
 use vortex::array::arrays::BoolArray;
 use vortex::array::arrays::bool::BoolArrayExt;
-use vortex::array::validity::Validity;
 use vortex::buffer::BitBuffer;
 use vortex::error::VortexResult;
 use vortex::mask::Mask;
@@ -26,7 +25,7 @@ pub(crate) fn new_exporter(
     let bits = array.to_bit_buffer();
 
     let validity = array.validity()?;
-    if matches!(validity, Validity::AllInvalid) {
+    if validity.definitely_all_null() {
         return Ok(all_invalid::new_exporter());
     }
     let validity = validity.to_array(len).execute::<Mask>(ctx)?;
@@ -47,13 +46,16 @@ impl ColumnExporter for BoolExporter {
     ) -> VortexResult<()> {
         // DuckDB uses byte bools, not bit bools.
         // maybe we can convert into these from a compressed array sometimes?.
-        unsafe { vector.as_slice_mut(len) }.copy_from_slice(
-            &self
-                .bit_buffer
-                .slice(offset..(offset + len))
-                .iter()
-                .collect::<Vec<bool>>(),
-        );
+        // Unpack the bits directly into the destination byte slice, avoiding the
+        // throwaway `Vec<bool>` allocation and the extra copy pass. The sliced
+        // iterator already accounts for the buffer's bit offset.
+        let dst = unsafe { vector.as_slice_mut(len) };
+        for (slot, bit) in dst
+            .iter_mut()
+            .zip(self.bit_buffer.slice(offset..(offset + len)).iter())
+        {
+            *slot = bit;
+        }
 
         Ok(())
     }

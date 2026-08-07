@@ -7,7 +7,6 @@ pub mod tracer;
 use std::sync::Arc;
 
 use datafusion::datasource::file_format::FileFormat;
-use datafusion::datasource::file_format::arrow::ArrowFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::provider::DefaultTableFactory;
@@ -45,10 +44,7 @@ pub fn get_session_context() -> SessionContext {
         .build_arc()
         .expect("could not build runtime environment");
 
-    let factory = VortexFormatFactory::new().with_options(VortexTableOptions {
-        projection_pushdown: true,
-        ..Default::default()
-    });
+    let factory = VortexFormatFactory::new().with_options(vortex_table_options());
 
     let mut session_state_builder = SessionStateBuilder::new()
         .with_config(SessionConfig::from_env().expect("shouldn't fail"))
@@ -112,13 +108,21 @@ pub fn make_object_store(
 pub fn format_to_df_format(format: Format) -> Arc<dyn FileFormat> {
     match format {
         Format::Csv => Arc::new(CsvFormat::default()) as _,
-        Format::Arrow => Arc::new(ArrowFormat),
         Format::Parquet => Arc::new(ParquetFormat::new()),
-        Format::OnDiskVortex | Format::VortexCompact => {
-            Arc::new(VortexFormat::new(SESSION.clone()))
-        }
+        Format::OnDiskVortex | Format::VortexCompact | Format::VortexSpatialNative => Arc::new(
+            VortexFormat::new_with_options(SESSION.clone(), vortex_table_options()),
+        ),
         Format::OnDiskDuckDB | Format::Lance => {
             unimplemented!("Format {format} cannot be turned into a DataFusion `FileFormat`")
         }
     }
+}
+
+fn vortex_table_options() -> VortexTableOptions {
+    let mut opts = VortexTableOptions::default();
+
+    opts.predicate_pushdown = true;
+    opts.projection_pushdown = true;
+
+    opts
 }

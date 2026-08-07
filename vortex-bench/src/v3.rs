@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! v3 wire-format records emitted by `--gh-json-v3`.
+//! Benchmark wire-format records emitted by `--ingest-jsonl`.
 //!
 //! Each record on the wire is one of five `kind`-discriminated shapes that
-//! map 1:1 to the v3 fact tables. The records here are **bare**: the
-//! ingest envelope (`run_meta` + `commit`) is added by
-//! `scripts/post-ingest.py` before POSTing to
-//! `bench.vortex.dev/api/ingest` — keeps the Rust emitter dependency-light
-//! and lets CI fill the commit fields from `${{ github.sha }}` plus
-//! `git show`.
+//! map 1:1 to the Postgres fact tables. The records here are **bare**;
+//! `scripts/post-ingest.py` fills the commit metadata from `${{ github.sha }}`
+//! plus `git show`, computes the internal `measurement_id`, and upserts them
+//! directly into the database.
 //!
-//! Wire-shape source of truth: [`vortex_bench_server::records`]. When
-//! changing a shape, change both sides in the same commit and run the
-//! server's snapshot tests.
+//! When changing a shape, update `benchmarks-website/CONTRACT.md`,
+//! `benchmarks-website/web/lib/schema-version.ts`, and
+//! `scripts/post-ingest.py` in the same logical change.
 //!
 //! ## Producer mapping
 //!
@@ -56,19 +54,6 @@
 //! For SQL query suites (everything that flows through `query_measurements`),
 //! the dim columns are populated as documented on
 //! [`benchmark_dataset_dims`].
-//!
-//! ## Historical-data side
-//!
-//! [`vortex_bench_migrate::classifier`] is the bug-for-bug port of v2's
-//! `getGroup` that recovers the same `(kind, dim tuple)` triple from the
-//! v2 S3 dump. It exists only for the one-shot migration; once cutover
-//! lands and the historical archive is loaded, both the migrator and its
-//! classifier go away. For new ingest, no classifier is needed — the
-//! emitter writes v3-shape records directly.
-//!
-//! [`vortex_bench_server::records`]: ../../../benchmarks-website/server/src/records.rs
-//! [`vortex_bench_migrate::classifier`]: ../../../benchmarks-website/migrate/src/classifier.rs
-
 use std::io::Write;
 use std::sync::LazyLock;
 
@@ -99,7 +84,7 @@ pub static ENV_TRIPLE: LazyLock<String> = LazyLock::new(|| {
 /// Wire-format kind discriminator. One value per fact table.
 ///
 /// Each variant flattens its inner record next to a `"kind"` field, matching the
-/// shape consumed by `/api/ingest`.
+/// shape consumed by `scripts/post-ingest.py`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum V3Record {
@@ -141,7 +126,7 @@ pub struct QueryMeasurementRecord {
     pub query_idx: u32,
     /// Storage backend the run targeted (`nvme` or `s3`).
     pub storage: String,
-    /// Query engine (`datafusion`, `duckdb`, `vortex`, `arrow`).
+    /// Query engine (`datafusion`, `duckdb`, `vortex`).
     pub engine: String,
     /// On-disk format (`parquet`, `vortex-file-compressed`, `lance`, ...).
     pub format: String,
@@ -288,12 +273,15 @@ fn canonical_tpc_scale_factor(scale_factor: &str) -> String {
 /// | `TpcH { scale_factor }`     | `tpch`         | `None`              | TPC SF as string (`"1"`, `"10"`, `"100"`, `"1000"`) | Run through `canonical_tpc_scale_factor` so `"1.0"` and `"1"` collapse. |
 /// | `TpcDS { scale_factor }`    | `tpcds`        | `None`              | TPC SF as string                                    | Same canonicalization as TPC-H. |
 /// | `ClickBench { flavor: _ }`  | `clickbench`   | `None`              | `None`                                              | Migrate path drops flavor; live emitter matches so historical and live merge. |
+/// | `ClickBenchSorted`          | `clickbench-sorted` | `None`          | `None`                                              | New live-only suite; keep separate from unsorted ClickBench history. |
 /// | `StatPopGen { n_rows: _ }`  | `statpopgen`   | `None`              | `None`                                              | Migrate path carries no SF for this suite; live drops it for the same reason. |
 /// | `PolarSignals { n_rows: _ }`| `polarsignals` | `None`              | `None`                                              | Same as StatPopGen. |
 /// | `Fineweb`                   | `fineweb`      | `None`              | `None`                                              | |
 /// | `GhArchive`                 | `gharchive`    | `None`              | `None`                                              | |
 /// | `Appian`                    | `appian`       | `None`              | `None`                                              | Static dataset; no scale factor. |
 /// | `PublicBi { name }`         | `public-bi`    | dataset name (e.g. `cms-provider`) | `None`               | Sub-dataset name lives in `dataset_variant`. |
+/// | `SpatialBench { scale_factor }` | `spatialbench` | `None`         | SF as string | Same canonicalization as TPC-H; no historical v2 records to merge with. |
+/// | `VortexQueries` | `vortex` | `None` | `None` | Own microbenchmarks |
 pub fn benchmark_dataset_dims(d: &BenchmarkDataset) -> (String, Option<String>, Option<String>) {
     match d {
         BenchmarkDataset::TpcH { scale_factor } => (
@@ -311,6 +299,7 @@ pub fn benchmark_dataset_dims(d: &BenchmarkDataset) -> (String, Option<String>, 
         // same to keep historical and live records in one `clickbench` group.
         // Flavor is fixed per CI matrix entry and recoverable from there.
         BenchmarkDataset::ClickBench { .. } => ("clickbench".to_string(), None, None),
+        BenchmarkDataset::ClickBenchSorted => ("clickbench-sorted".to_string(), None, None),
         BenchmarkDataset::PublicBi { name } => ("public-bi".to_string(), Some(name.clone()), None),
         // StatPopGen / PolarSignals: the migrate path (v2 → v3 backfill) does
         // not carry a per-record scale factor for these suites, so writing one
@@ -318,11 +307,17 @@ pub fn benchmark_dataset_dims(d: &BenchmarkDataset) -> (String, Option<String>, 
         // live). Drop it to keep live ingests merging into the migrated
         // group. The dataset-level `n_rows` is recoverable from the bench
         // matrix if ever needed.
+        BenchmarkDataset::SpatialBench { scale_factor } => (
+            "spatialbench".to_string(),
+            None,
+            Some(canonical_tpc_scale_factor(scale_factor)),
+        ),
         BenchmarkDataset::StatPopGen { .. } => ("statpopgen".to_string(), None, None),
         BenchmarkDataset::PolarSignals { .. } => ("polarsignals".to_string(), None, None),
         BenchmarkDataset::Fineweb => ("fineweb".to_string(), None, None),
         BenchmarkDataset::GhArchive => ("gharchive".to_string(), None, None),
         BenchmarkDataset::Appian => ("appian".to_string(), None, None),
+        BenchmarkDataset::VortexQueries => ("vortex".to_string(), None, None),
     }
 }
 
@@ -453,9 +448,7 @@ pub fn vector_search_record(
     rows_scanned: u64,
     bytes_scanned: u64,
 ) -> V3Record {
-    // Clamp at `i32::MAX`: server-side `iterations` is `i32` (see the
-    // same-named field on `vortex_bench_server::records::VectorSearchRun`),
-    // so saturating to `u32::MAX` would 400 the envelope.
+    // The Postgres `iterations` column is `INTEGER`, so clamp at `i32::MAX`.
     let iterations = u32::try_from(all_runs_ns.len()).unwrap_or(i32::MAX as u32);
     V3Record::VectorSearchRun(VectorSearchRunRecord {
         commit_sha: GIT_COMMIT_ID.clone(),
@@ -509,7 +502,6 @@ fn duration_as_ns(d: std::time::Duration) -> u64 {
 fn engine_label(engine: Engine) -> &'static str {
     match engine {
         Engine::Vortex => "vortex",
-        Engine::Arrow => "arrow",
         Engine::DataFusion => "datafusion",
         Engine::DuckDB => "duckdb",
     }
@@ -653,7 +645,7 @@ mod tests {
     fn snapshot_random_access_time() -> anyhow::Result<()> {
         let timing = TimingMeasurement {
             name: "random-access/taxi/uniform/parquet-tokio-local-disk".to_string(),
-            target: Target::new(Engine::Arrow, Format::Parquet),
+            target: Target::new(Engine::Vortex, Format::Parquet),
             storage: "nvme".to_string(),
             runs: vec![
                 Duration::from_nanos(800_000),
@@ -727,14 +719,24 @@ mod tests {
     }
 
     #[test]
+    fn clickbench_sorted_dims_are_distinct_from_clickbench() {
+        let (dataset, variant, scale_factor) =
+            benchmark_dataset_dims(&BenchmarkDataset::ClickBenchSorted);
+
+        assert_eq!(dataset, "clickbench-sorted");
+        assert_eq!(variant, None);
+        assert_eq!(scale_factor, None);
+    }
+
+    #[test]
     fn compression_records_lowercase_dataset_for_v2_history_match() {
-        // The v2 → v3 migrate classifier stores `dataset = series.to_lowercase()`
-        // for compress-bench records (see `benchmarks-website/migrate/src/classifier.rs`).
+        // The historical v2 backfill stores `dataset = series.to_lowercase()`
+        // for compress-bench records.
         // Datasets whose `Dataset::name()` returns mixed case
         // (`TPC-H l_comment chunked`, every PBI name like `Arade`/`CMSprovider`)
         // would otherwise emit live records that do not merge with their
-        // migrated history. Lowercasing inside the v3 helpers keeps the trait
-        // API simple for non-v3 callers while still matching migrate's shape.
+        // migrated history. Lowercasing inside these wire helpers keeps the trait
+        // API simple for other callers while still matching the historical shape.
         let timing = CompressionTimingMeasurement {
             name: "compress time/TPC-H l_comment chunked".to_string(),
             format: Format::OnDiskVortex,

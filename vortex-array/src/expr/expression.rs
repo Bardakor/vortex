@@ -12,13 +12,13 @@ use std::sync::Arc;
 use itertools::Itertools;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
-use vortex_session::VortexSession;
 
 use crate::dtype::DType;
-use crate::expr::StatsCatalog;
 use crate::expr::display::DisplayTreeExpr;
-use crate::expr::stats::Stat;
+use crate::expr::traversal::TraversalOrder;
+use crate::expr::traversal::pre_order_visit_down;
 use crate::scalar_fn::ScalarFnRef;
+use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::fns::root::Root;
 
 /// A node in a Vortex expression tree.
@@ -114,84 +114,12 @@ impl Expression {
         self.scalar_fn.validity(self)
     }
 
-    /// An expression over zone-statistics which implies all records in the zone evaluate to false.
-    ///
-    /// Given an expression, `e`, if `e.stat_falsification(..)` evaluates to true, it is guaranteed
-    /// that `e` evaluates to false on all records in the zone. However, the inverse is not
-    /// necessarily true: even if the falsification evaluates to false, `e` need not evaluate to
-    /// true on all records.
-    ///
-    /// The [`StatsCatalog`] can be used to constrain or rename stats used in the final expr.
-    ///
-    /// # Examples
-    ///
-    /// - An expression over one variable: `x > 0` is false for all records in a zone if the maximum
-    ///   value of the column `x` in that zone is less than or equal to zero: `max(x) <= 0`.
-    /// - An expression over two variables: `x > y` becomes `max(x) <= min(y)`.
-    /// - A conjunctive expression: `x > y AND z < x` becomes `max(x) <= min(y) OR min(z) >= max(x).
-    ///
-    /// Some expressions, in theory, have falsifications but this function does not support them
-    /// such as `x < (y < z)` or `x LIKE "needle%"`.
-    pub fn stat_falsification(&self, catalog: &dyn StatsCatalog) -> Option<Expression> {
-        self.scalar_fn().stat_falsification(self, catalog)
-    }
-
-    /// Returns an expression that proves this predicate is definitely false from stats.
-    ///
-    /// `scope` is the dtype of the row this expression evaluates over.
-    ///
-    /// If the returned expression evaluates to `true` for a stats scope, this expression is
-    /// guaranteed to be false for every row in that scope. `false` and `null` are unknown.
-    pub fn falsify(
-        &self,
-        scope: &DType,
-        session: &VortexSession,
-    ) -> VortexResult<Option<Expression>> {
-        crate::stats::rewrite::StatsRewriteCtx::new(session, scope).falsify(self)
-    }
-
-    /// Returns an expression that proves this predicate is definitely true from stats.
-    ///
-    /// `scope` is the dtype of the row this expression evaluates over.
-    ///
-    /// If the returned expression evaluates to `true` for a stats scope, this expression is
-    /// guaranteed to be true for every row in that scope. `false` and `null` are unknown.
-    pub fn satisfy(
-        &self,
-        scope: &DType,
-        session: &VortexSession,
-    ) -> VortexResult<Option<Expression>> {
-        crate::stats::rewrite::StatsRewriteCtx::new(session, scope).satisfy(self)
-    }
-
-    /// Returns an expression representing the zoned statistic for the given stat, if available.
-    ///
-    /// The [`StatsCatalog`] returns expressions that can be evaluated using the zone map as a
-    /// scope. Expressions can implement this function to propagate such statistics through the
-    /// expression tree. For example, the `a + 10` expression could propagate `min: min(a) + 10`.
-    ///
-    /// NOTE(gatesn): we currently cannot represent statistics over nested fields. Please file an
-    /// issue to discuss a solution to this.
-    pub fn stat_expression(&self, stat: Stat, catalog: &dyn StatsCatalog) -> Option<Expression> {
-        self.scalar_fn().stat_expression(self, stat, catalog)
-    }
-
-    /// Returns an expression representing the zoned maximum statistic, if available.
-    pub fn stat_min(&self, catalog: &dyn StatsCatalog) -> Option<Expression> {
-        self.stat_expression(Stat::Min, catalog)
-    }
-
-    /// Returns an expression representing the zoned maximum statistic, if available.
-    pub fn stat_max(&self, catalog: &dyn StatsCatalog) -> Option<Expression> {
-        self.stat_expression(Stat::Max, catalog)
-    }
-
     /// Format the expression as a compact string.
     ///
     /// Since this is a recursive formatter, it is exposed on the public Expression type.
     /// See fmt_data that is only implemented on the vtable trait.
     pub fn fmt_sql(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.scalar_fn().fmt_sql(self, f)
+        self.scalar_fn.fmt_sql(self, f)
     }
 
     /// Display the expression as a formatted tree structure.
@@ -248,6 +176,30 @@ impl Expression {
     /// ```
     pub fn display_tree(&self) -> impl Display {
         DisplayTreeExpr(self)
+    }
+
+    /// Returns true if this expression contains expression E inside.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use vortex_array::scalar_fn::fns::literal::Literal;
+    /// # use vortex_array::expr::{eq, lit, root};
+    /// let expression = &eq(root(), lit(3u64));
+    /// assert!(expression.contains::<Literal>().unwrap());
+    /// let expression = root();
+    /// assert!(!expression.contains::<Literal>().unwrap());
+    /// ```
+    pub fn contains<E: ScalarFnVTable>(&self) -> VortexResult<bool> {
+        let mut contains = false;
+        pre_order_visit_down(self, |node| {
+            if node.is::<E>() {
+                contains = true;
+                return Ok(TraversalOrder::Stop);
+            }
+            Ok(TraversalOrder::Continue)
+        })?;
+        Ok(contains)
     }
 }
 

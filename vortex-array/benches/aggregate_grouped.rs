@@ -4,29 +4,34 @@
 #![expect(clippy::cast_possible_truncation)]
 #![expect(clippy::unwrap_used)]
 
+use std::sync::LazyLock;
+
 use divan::Bencher;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
-use vortex_array::LEGACY_SESSION;
 use vortex_array::VortexSessionExecute;
 use vortex_array::aggregate_fn::AggregateFnVTable;
 use vortex_array::aggregate_fn::DynGroupedAccumulator;
-use vortex_array::aggregate_fn::EmptyOptions;
 use vortex_array::aggregate_fn::GroupIds;
 use vortex_array::aggregate_fn::GroupedAccumulator;
+use vortex_array::aggregate_fn::NumericalAggregateOpts;
 use vortex_array::aggregate_fn::fns::count::Count;
 use vortex_array::aggregate_fn::fns::sum::Sum;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
+use vortex_session::VortexSession;
 
 fn main() {
+    LazyLock::force(&SESSION);
     divan::main();
 }
+
+static SESSION: LazyLock<VortexSession> = LazyLock::new(vortex_array::array_session);
 
 const GROUP_COUNT: usize = 128;
 const GROUP_SIZE_SEED: u64 = 42;
@@ -137,15 +142,19 @@ fn varbinview_input() -> DenseGroupedInput {
 
 fn grouped_accumulator<V>(input: &DenseGroupedInput, vtable: V) -> ArrayRef
 where
-    V: AggregateFnVTable<Options = EmptyOptions> + Clone,
+    V: AggregateFnVTable<Options = NumericalAggregateOpts> + Clone,
 {
-    let mut acc =
-        GroupedAccumulator::try_new(vtable, EmptyOptions, input.values.dtype().clone()).unwrap();
+    let mut acc = GroupedAccumulator::try_new(
+        vtable,
+        NumericalAggregateOpts::default(),
+        input.values.dtype().clone(),
+    )
+    .unwrap();
     let num_groups = input.group_ids.num_groups();
     acc.accumulate(
         &input.values,
         &input.group_ids,
-        &mut LEGACY_SESSION.create_execution_ctx(),
+        &mut SESSION.create_execution_ctx(),
     )
     .unwrap();
     divan::black_box(acc.finish(num_groups).unwrap())

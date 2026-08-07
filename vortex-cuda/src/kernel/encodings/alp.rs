@@ -85,9 +85,7 @@ where
 
     // Allocate output rounded up to a full chunk: the fused kernel writes a
     // whole 1024-element chunk per block, and we slice off any padding below.
-    let output_slice = ctx.device_alloc::<A>(array_len.next_multiple_of(1024))?;
-    let output_buf = CudaDeviceBuffer::new(output_slice);
-    let output_view = output_buf.as_view::<A>();
+    let mut output_slice = ctx.device_alloc::<A>(array_len.next_multiple_of(1024))?;
 
     // Patch validity does not need to be scattered: the ALP encoder strips null
     // positions from the exception list, so patches only exist at valid
@@ -116,7 +114,7 @@ where
     let array_len_u64 = array_len as u64;
     ctx.launch_kernel_config(&cuda_function, config, array_len, |args| {
         args.arg(&input_view)
-            .arg(&output_view)
+            .arg(&mut output_slice)
             .arg(&f)
             .arg(&e)
             .arg(&array_len_u64)
@@ -127,6 +125,7 @@ where
     ctx.synchronize_stream()?;
     drop(device_patches);
 
+    let output_buf = CudaDeviceBuffer::new(output_slice);
     let output_handle = BufferHandle::new_device(output_buf.slice_typed::<A>(0..array_len));
     Ok(Canonical::Primitive(PrimitiveArray::from_buffer_handle(
         output_handle,
@@ -141,8 +140,7 @@ mod tests {
     use std::f64;
 
     use vortex::array::IntoArray;
-    use vortex::array::LEGACY_SESSION;
-    use vortex::array::VortexSessionExecute;
+    use vortex::array::array_session;
     use vortex::array::arrays::PrimitiveArray;
     use vortex::array::assert_arrays_eq;
     use vortex::array::patches::Patches;
@@ -153,11 +151,10 @@ mod tests {
     use vortex::encodings::alp::Exponents;
     use vortex::encodings::alp::alp_encode;
     use vortex::error::VortexExpect;
-    use vortex::session::VortexSession;
+    use vortex_array::VortexSessionExecute;
 
     use super::*;
     use crate::CanonicalCudaExt;
-    use crate::canonicalize_cpu;
     use crate::executor::CudaArrayExt;
     use crate::session::CudaSession;
 
@@ -171,7 +168,8 @@ mod tests {
     /// Patches must carry `chunk_offsets` — the fused kernel requires them.
     #[crate::test]
     async fn test_cuda_alp_decompression_f32() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         // For f32 with exponents (e=0, f=2): decoded = encoded * F10[2] * IF10[0]
@@ -197,17 +195,15 @@ mod tests {
             Some(patches),
         )?;
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = ALPExecutor
-            .execute(alp_array.into_array(), &mut cuda_ctx)
+            .execute(alp_array.clone().into_array(), &mut cuda_ctx)
             .await
             .vortex_expect("GPU decompression failed")
             .into_host()
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
 
         Ok(())
     }
@@ -218,7 +214,8 @@ mod tests {
     /// preserved through the standalone ALP GPU executor.
     #[crate::test]
     async fn test_cuda_alp_nullable_with_patches() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         // Values that will produce ALP exceptions at non-null positions.
@@ -238,12 +235,11 @@ mod tests {
         let alp_array = alp_encode(
             prim.as_view(),
             None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut array_session().create_execution_ctx(),
         )?;
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = alp_array
+            .clone()
             .into_array()
             .execute_cuda(&mut cuda_ctx)
             .await?
@@ -251,7 +247,7 @@ mod tests {
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
         Ok(())
     }
 
@@ -259,7 +255,8 @@ mod tests {
     /// elements are actually null.
     #[crate::test]
     async fn test_cuda_alp_all_valid_nullable() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         let values = PrimitiveArray::new(
@@ -269,12 +266,11 @@ mod tests {
         let alp_array = alp_encode(
             values.as_view(),
             None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut array_session().create_execution_ctx(),
         )?;
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = alp_array
+            .clone()
             .into_array()
             .execute_cuda(&mut cuda_ctx)
             .await?
@@ -282,7 +278,7 @@ mod tests {
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
         Ok(())
     }
 
@@ -292,7 +288,8 @@ mod tests {
     /// (zero patches) via the offset math rather than the NULL sentinel.
     #[crate::test]
     async fn test_cuda_alp_multi_chunk_sparse_patches() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         // 3072 values (3 chunks). Inject exceptions (values ALP can't encode
@@ -311,16 +308,15 @@ mod tests {
         let alp_array = alp_encode(
             prim.as_view(),
             None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut array_session().create_execution_ctx(),
         )?;
         assert!(
             alp_array.patches().is_some(),
             "expected patches from ALP exceptions"
         );
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = alp_array
+            .clone()
             .into_array()
             .execute_cuda(&mut cuda_ctx)
             .await?
@@ -328,7 +324,7 @@ mod tests {
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
         Ok(())
     }
 
@@ -337,7 +333,8 @@ mod tests {
     /// so this guards the fast-path for the (i64, f64) kernel variant.
     #[crate::test]
     async fn test_cuda_alp_f64_multi_chunk_with_patches() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         // 3072 values (3 chunks). Sprinkle exceptions into each chunk.
@@ -354,16 +351,15 @@ mod tests {
         let alp_array = alp_encode(
             prim.as_view(),
             None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut array_session().create_execution_ctx(),
         )?;
         assert!(
             alp_array.patches().is_some(),
             "expected patches from ALP exceptions"
         );
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = alp_array
+            .clone()
             .into_array()
             .execute_cuda(&mut cuda_ctx)
             .await?
@@ -371,7 +367,7 @@ mod tests {
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
         Ok(())
     }
 
@@ -381,7 +377,8 @@ mod tests {
     /// (existing tests have ≤ 6 patches per chunk).
     #[crate::test]
     async fn test_cuda_alp_dense_patches_single_chunk() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         // Build a 1024-element ALP array manually with exactly 40 patches
@@ -410,17 +407,15 @@ mod tests {
             Some(patches),
         )?;
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = ALPExecutor
-            .execute(alp_array.into_array(), &mut cuda_ctx)
+            .execute(alp_array.clone().into_array(), &mut cuda_ctx)
             .await
             .vortex_expect("GPU decompression failed")
             .into_host()
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
         Ok(())
     }
 
@@ -429,7 +424,8 @@ mod tests {
     /// loop. Includes a patch in the tail.
     #[crate::test]
     async fn test_cuda_alp_partial_tail_chunk() -> VortexResult<()> {
-        let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut ctx = array_session().create_execution_ctx();
+        let mut cuda_ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
             .vortex_expect("failed to create execution context");
 
         let values: Buffer<f64> = (0u32..1500)
@@ -439,16 +435,15 @@ mod tests {
         let alp_array = alp_encode(
             prim.as_view(),
             None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut array_session().create_execution_ctx(),
         )?;
         assert!(
             alp_array.patches().is_some(),
             "expected patches from ALP exceptions"
         );
 
-        let cpu_result = canonicalize_cpu(alp_array.clone())?.into_array();
-
         let gpu_result = alp_array
+            .clone()
             .into_array()
             .execute_cuda(&mut cuda_ctx)
             .await?
@@ -456,7 +451,7 @@ mod tests {
             .await?
             .into_array();
 
-        assert_arrays_eq!(cpu_result, gpu_result);
+        assert_arrays_eq!(alp_array, gpu_result, &mut ctx);
         Ok(())
     }
 }

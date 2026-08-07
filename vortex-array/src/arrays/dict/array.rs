@@ -4,6 +4,7 @@
 use std::fmt::Display;
 use std::fmt::Formatter;
 
+use num_traits::AsPrimitive;
 use smallvec::smallvec;
 use vortex_buffer::BitBuffer;
 use vortex_error::VortexExpect;
@@ -14,15 +15,13 @@ use vortex_mask::AllOr;
 
 use crate::ArrayRef;
 use crate::ArraySlots;
-use crate::LEGACY_SESSION;
-#[expect(deprecated)]
-use crate::ToCanonical as _;
-use crate::VortexSessionExecute;
+use crate::ExecutionCtx;
 use crate::array::Array;
 use crate::array::ArrayParts;
 use crate::array::TypedArrayRef;
 use crate::array_slots;
 use crate::arrays::Dict;
+use crate::arrays::PrimitiveArray;
 use crate::dtype::DType;
 use crate::dtype::PType;
 use crate::match_each_integer_ptype;
@@ -46,8 +45,10 @@ pub struct DictMetadata {
 #[array_slots(Dict)]
 pub struct DictSlots {
     /// The codes array mapping each element to a dictionary entry.
+    #[slot(0)]
     pub codes: ArrayRef,
     /// The dictionary values array containing the unique values.
+    #[slot(1)]
     pub values: ArrayRef,
 }
 
@@ -128,13 +129,13 @@ pub trait DictArrayExt: TypedArrayRef<Dict> + DictArraySlotsExt {
         self.all_values_referenced
     }
 
-    fn validate_all_values_referenced(&self) -> VortexResult<()> {
+    fn validate_all_values_referenced(&self, ctx: &mut ExecutionCtx) -> VortexResult<()> {
         if self.has_all_values_referenced() {
             if !self.codes().is_host() {
                 return Ok(());
             }
 
-            let referenced_mask = self.compute_referenced_values_mask(true)?;
+            let referenced_mask = self.compute_referenced_values_mask(true, ctx)?;
             let all_referenced = referenced_mask.true_count() == referenced_mask.len();
 
             vortex_ensure!(all_referenced, "value in dict not referenced");
@@ -143,13 +144,14 @@ pub trait DictArrayExt: TypedArrayRef<Dict> + DictArraySlotsExt {
         Ok(())
     }
 
-    fn compute_referenced_values_mask(&self, referenced: bool) -> VortexResult<BitBuffer> {
+    fn compute_referenced_values_mask(
+        &self,
+        referenced: bool,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<BitBuffer> {
         let codes = self.codes();
-        let codes_validity = codes
-            .validity()?
-            .execute_mask(codes.len(), &mut LEGACY_SESSION.create_execution_ctx())?;
-        #[expect(deprecated)]
-        let codes_primitive = self.codes().to_primitive();
+        let codes_validity = codes.validity()?.execute_mask(codes.len(), ctx)?;
+        let codes_primitive = codes.clone().execute::<PrimitiveArray>(ctx)?;
         let values_len = self.values().len();
 
         let init_value = !referenced;
@@ -159,13 +161,9 @@ pub trait DictArrayExt: TypedArrayRef<Dict> + DictArraySlotsExt {
         match codes_validity.bit_buffer() {
             AllOr::All => {
                 match_each_integer_ptype!(codes_primitive.ptype(), |P| {
-                    #[allow(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss,
-                        reason = "codes are non-negative indices; a negative signed code would wrap to a large usize and panic on the bounds-checked array index"
-                    )]
-                    for &idx in codes_primitive.as_slice::<P>() {
-                        values_vec[idx as usize] = referenced_value;
+                    for idx in codes_primitive.as_slice::<P>() {
+                        let idxu: usize = idx.as_();
+                        values_vec[idxu] = referenced_value;
                     }
                 });
             }
@@ -173,14 +171,9 @@ pub trait DictArrayExt: TypedArrayRef<Dict> + DictArraySlotsExt {
             AllOr::Some(mask) => {
                 match_each_integer_ptype!(codes_primitive.ptype(), |P| {
                     let codes = codes_primitive.as_slice::<P>();
-
-                    #[allow(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss,
-                        reason = "codes are non-negative indices; a negative signed code would wrap to a large usize and panic on the bounds-checked array index"
-                    )]
                     mask.set_indices().for_each(|idx| {
-                        values_vec[codes[idx] as usize] = referenced_value;
+                        let idxu: usize = codes[idx].as_();
+                        values_vec[idxu] = referenced_value;
                     });
                 });
             }
@@ -276,18 +269,9 @@ impl Array<Dict> {
             self.into_data()
                 .set_all_values_referenced(all_values_referenced)
         };
-        let array = unsafe {
+        unsafe {
             Array::from_parts_unchecked(ArrayParts::new(Dict, dtype, len, data).with_slots(slots))
-        };
-
-        #[cfg(debug_assertions)]
-        if all_values_referenced {
-            array
-                .validate_all_values_referenced()
-                .vortex_expect("validation should succeed when all values are referenced");
         }
-
-        array
     }
 }
 
@@ -307,14 +291,14 @@ mod test {
 
     use crate::ArrayRef;
     use crate::IntoArray;
-    use crate::LEGACY_SESSION;
-    #[expect(deprecated)]
-    use crate::ToCanonical as _;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::ChunkedArray;
     use crate::arrays::DictArray;
     use crate::arrays::PrimitiveArray;
+    use crate::arrays::VarBinViewArray;
     use crate::assert_arrays_eq;
+    use crate::builders::VarBinBuilder;
     use crate::builders::builder_with_capacity;
     use crate::dtype::DType;
     use crate::dtype::NativePType;
@@ -340,7 +324,7 @@ mod test {
             .unwrap()
             .execute_mask(
                 dict.as_ref().len(),
-                &mut LEGACY_SESSION.create_execution_ctx(),
+                &mut array_session().create_execution_ctx(),
             )
             .unwrap();
         let AllOr::Some(indices) = mask.indices() else {
@@ -366,7 +350,7 @@ mod test {
             .unwrap()
             .execute_mask(
                 dict.as_ref().len(),
-                &mut LEGACY_SESSION.create_execution_ctx(),
+                &mut array_session().create_execution_ctx(),
             )
             .unwrap();
         let AllOr::Some(indices) = mask.indices() else {
@@ -396,7 +380,7 @@ mod test {
             .unwrap()
             .execute_mask(
                 dict.as_ref().len(),
-                &mut LEGACY_SESSION.create_execution_ctx(),
+                &mut array_session().create_execution_ctx(),
             )
             .unwrap();
         let AllOr::Some(indices) = mask.indices() else {
@@ -422,7 +406,7 @@ mod test {
             .unwrap()
             .execute_mask(
                 dict.as_ref().len(),
-                &mut LEGACY_SESSION.create_execution_ctx(),
+                &mut array_session().create_execution_ctx(),
             )
             .unwrap();
         let AllOr::Some(indices) = mask.indices() else {
@@ -461,7 +445,23 @@ mod test {
     }
 
     #[test]
+    fn test_dict_utf8_append_to_varbin_builder() -> VortexResult<()> {
+        let values = VarBinViewArray::from_iter_str(["zero", "one", "two"]);
+        let dict = DictArray::try_new(buffer![2u8, 0, 2, 1].into_array(), values.into_array())?;
+        let expected = VarBinViewArray::from_iter_str(["two", "zero", "two", "one"]);
+        let mut builder = VarBinBuilder::<i32>::with_capacity(dict.dtype().clone(), dict.len());
+        let mut ctx = array_session().create_execution_ctx();
+
+        dict.into_array()
+            .append_to_builder(&mut builder, &mut ctx)?;
+
+        assert_arrays_eq!(builder.finish_into_varbin(), expected, &mut ctx);
+        Ok(())
+    }
+
+    #[test]
     fn test_dict_array_from_primitive_chunks() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let len = 2;
         let chunk_count = 2;
         let array = make_dict_primitive_chunks::<u64, u64>(len, 2, chunk_count);
@@ -470,13 +470,15 @@ mod test {
             &DType::Primitive(PType::U64, NonNullable),
             len * chunk_count,
         );
-        array.append_to_builder(builder.as_mut(), &mut LEGACY_SESSION.create_execution_ctx())?;
+        array.append_to_builder(
+            builder.as_mut(),
+            &mut array_session().create_execution_ctx(),
+        )?;
 
-        #[expect(deprecated)]
-        let into_prim = array.to_primitive();
-        let prim_into = builder.finish_into_canonical().into_primitive();
+        let into_prim = array.execute::<PrimitiveArray>(&mut ctx)?;
+        let prim_into = builder.finish_into_canonical(&mut ctx).into_primitive();
 
-        assert_arrays_eq!(into_prim, prim_into);
+        assert_arrays_eq!(into_prim, prim_into, &mut ctx);
         Ok(())
     }
 

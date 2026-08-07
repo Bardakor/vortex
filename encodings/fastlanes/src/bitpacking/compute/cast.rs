@@ -112,10 +112,11 @@ impl CastKernel for BitPacked {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use rstest::rstest;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
@@ -128,12 +129,19 @@ mod tests {
     use vortex_array::match_each_integer_ptype;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
+    use vortex_session::VortexSession;
 
     use crate::BitPackedArray;
     use crate::BitPackedData;
 
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
+
     fn bp(array: &ArrayRef, bit_width: u8) -> BitPackedArray {
-        BitPackedData::encode(array, bit_width, &mut LEGACY_SESSION.create_execution_ctx()).unwrap()
+        BitPackedData::encode(array, bit_width, &mut SESSION.create_execution_ctx()).unwrap()
     }
 
     #[test]
@@ -151,7 +159,8 @@ mod tests {
 
         assert_arrays_eq!(
             casted,
-            PrimitiveArray::from_iter([10u32, 20, 30, 40, 50, 60])
+            PrimitiveArray::from_iter([10u32, 20, 30, 40, 50, 60]),
+            &mut SESSION.create_execution_ctx()
         );
     }
 
@@ -213,7 +222,7 @@ mod tests {
                     let source = match_each_integer_ptype!(src, |S| { values::<S>(len) });
                     let source_ref = source.into_array();
                     let target = DType::Primitive(tgt, Nullability::NonNullable);
-                    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+                    let mut ctx = SESSION.create_execution_ctx();
 
                     // Reference: plain primitive cast of the same values.
                     let reference = source_ref
@@ -227,7 +236,7 @@ mod tests {
                     let casted = packed
                         .cast(target.clone())?
                         .execute::<PrimitiveArray>(&mut ctx)?;
-                    assert_arrays_eq!(casted, reference);
+                    assert_arrays_eq!(casted, reference, &mut ctx);
 
                     // Also exercise the sliced/offset path (offset > 0, trailer present).
                     if len >= 4 {
@@ -242,7 +251,7 @@ mod tests {
                             .slice(lo..hi)?
                             .cast(target.clone())?
                             .execute::<PrimitiveArray>(&mut ctx)?;
-                        assert_arrays_eq!(casted, reference);
+                        assert_arrays_eq!(casted, reference, &mut ctx);
                     }
                 }
             }
@@ -257,6 +266,6 @@ mod tests {
     #[case(bp(&buffer![0u32, 1000, 2000, 3000, 4000].into_array(), 12))]
     #[case(bp(&PrimitiveArray::from_option_iter([Some(1u32), None, Some(7), Some(15), None]).into_array(), 4))]
     fn test_cast_bitpacked_conformance(#[case] array: BitPackedArray) {
-        test_cast_conformance(&array.into_array());
+        test_cast_conformance(&array.into_array(), &mut SESSION.create_execution_ctx());
     }
 }

@@ -18,11 +18,15 @@ mod tests {
     use vortex_buffer::buffer;
 
     use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::ChunkedArray;
+    use crate::arrays::DecimalArray;
     use crate::arrays::PrimitiveArray;
     use crate::compute::conformance::binary_numeric::test_binary_numeric_array;
     use crate::compute::conformance::consistency::test_array_consistency;
     use crate::dtype::DType;
+    use crate::dtype::DecimalDType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
 
@@ -44,7 +48,7 @@ mod tests {
     ).unwrap())]
     // Many chunks
     #[case::many_small_chunks(ChunkedArray::try_new(
-        (0..10).map(|i| buffer![i as i64, i as i64 + 10, i as i64 + 20].into_array()).collect(),
+        (0..10).map(|i| buffer![i as i64, i as i64 + 10, i as i64 + 20].into_array()),
         DType::Primitive(PType::I64, Nullability::NonNullable),
     ).unwrap())]
     // Edge cases
@@ -79,7 +83,10 @@ mod tests {
     ).unwrap())]
 
     fn test_chunked_consistency(#[case] array: ChunkedArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[rstest]
@@ -127,7 +134,7 @@ mod tests {
         DType::Primitive(PType::I32, Nullability::NonNullable),
     ).unwrap())]
     #[case::chunked_many_small_chunks(ChunkedArray::try_new(
-        (0..10).map(|i| buffer![i * 10, i * 10 + 1].into_array()).collect(),
+        (0..10).map(|i| buffer![i * 10, i * 10 + 1].into_array()),
         DType::Primitive(PType::I32, Nullability::NonNullable),
     ).unwrap())]
     #[case::chunked_nullable(ChunkedArray::try_new(
@@ -153,7 +160,17 @@ mod tests {
         ],
         DType::Primitive(PType::I32, Nullability::NonNullable),
     ).unwrap())]
+    #[case::chunked_decimal(ChunkedArray::try_new(
+        vec![
+            DecimalArray::from_iter::<i64, _>([100, 250], DecimalDType::new(10, 2)).into_array(),
+            DecimalArray::from_iter::<i64, _>([300, 400, 500], DecimalDType::new(10, 2)).into_array(),
+        ],
+        DType::Decimal(DecimalDType::new(10, 2), Nullability::NonNullable),
+    ).unwrap())]
     fn test_chunked_binary_numeric(#[case] array: ChunkedArray) {
-        test_binary_numeric_array(array.into_array())
+        test_binary_numeric_array(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        )
     }
 }

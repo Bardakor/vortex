@@ -3,6 +3,7 @@
 
 mod kernel;
 
+use std::fmt::Display;
 use std::fmt::Formatter;
 
 pub use kernel::*;
@@ -24,6 +25,7 @@ use crate::builders::builder_with_capacity;
 use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
 use crate::expr::Expression;
+use crate::expr::display::ExprDisplay;
 use crate::scalar_fn::Arity;
 use crate::scalar_fn::ChildName;
 use crate::scalar_fn::EmptyOptions;
@@ -80,15 +82,15 @@ impl ScalarFnVTable for Zip {
     fn fmt_sql(
         &self,
         _options: &Self::Options,
-        expr: &Expression,
+        expr: &dyn ExprDisplay,
         f: &mut Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "zip(")?;
-        expr.child(0).fmt_sql(f)?;
+        Display::fmt(expr.display_child(0), f)?;
         write!(f, ", ")?;
-        expr.child(1).fmt_sql(f)?;
+        Display::fmt(expr.display_child(1), f)?;
         write!(f, ", ")?;
-        expr.child(2).fmt_sql(f)?;
+        Display::fmt(expr.display_child(2), f)?;
         write!(f, ")")
     }
 
@@ -155,8 +157,9 @@ impl ScalarFnVTable for Zip {
         Ok(None)
     }
 
-    fn is_null_sensitive(&self, _options: &Self::Options) -> bool {
-        true
+    fn is_strict(&self, _options: &Self::Options) -> bool {
+        // A null in an unselected branch does not force a null output.
+        false
     }
 
     fn is_fallible(&self, _options: &Self::Options) -> bool {
@@ -267,8 +270,6 @@ pub(crate) fn zip_validity(
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::cast::AsArray;
-    use arrow_select::zip::zip as arrow_zip;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
     use vortex_mask::Mask;
@@ -276,14 +277,14 @@ mod tests {
     use super::zip_impl;
     use crate::ArrayRef;
     use crate::IntoArray;
-    use crate::LEGACY_SESSION;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::ConstantArray;
     use crate::arrays::PrimitiveArray;
     use crate::arrays::Struct;
     use crate::arrays::StructArray;
     use crate::arrays::VarBinView;
-    use crate::arrow::ArrowSessionExt;
+    use crate::arrays::VarBinViewArray;
     use crate::assert_arrays_eq;
     use crate::builders::ArrayBuilder;
     use crate::builders::BufferGrowthStrategy;
@@ -317,6 +318,7 @@ mod tests {
 
     #[test]
     fn test_zip_basic() {
+        let mut ctx = array_session().create_execution_ctx();
         let mask = Mask::from_iter([true, false, false, true, false]);
         let if_true = buffer![10, 20, 30, 40, 50].into_array();
         let if_false = buffer![1, 2, 3, 4, 5].into_array();
@@ -324,11 +326,12 @@ mod tests {
         let result = mask.into_array().zip(if_true, if_false).unwrap();
         let expected = buffer![10, 2, 3, 40, 5].into_array();
 
-        assert_arrays_eq!(result, expected);
+        assert_arrays_eq!(result, expected, &mut ctx);
     }
 
     #[test]
     fn test_zip_all_true() {
+        let mut ctx = array_session().create_execution_ctx();
         let mask = Mask::new_true(4);
         let if_true = buffer![10, 20, 30, 40].into_array();
         let if_false =
@@ -338,12 +341,13 @@ mod tests {
         let expected =
             PrimitiveArray::from_option_iter([Some(10), Some(20), Some(30), Some(40)]).into_array();
 
-        assert_arrays_eq!(result, expected);
+        assert_arrays_eq!(result, expected, &mut ctx);
         assert_eq!(result.dtype(), if_false.dtype())
     }
 
     #[test]
     fn test_zip_all_false_widens_nullability() {
+        let mut ctx = array_session().create_execution_ctx();
         let mask = Mask::new_false(4);
         let if_true =
             PrimitiveArray::from_option_iter([Some(10), Some(20), Some(30), None]).into_array();
@@ -353,7 +357,7 @@ mod tests {
         let expected =
             PrimitiveArray::from_option_iter([Some(1), Some(2), Some(3), Some(4)]).into_array();
 
-        assert_arrays_eq!(result, expected);
+        assert_arrays_eq!(result, expected, &mut ctx);
         assert_eq!(result.dtype(), if_true.dtype());
     }
 
@@ -364,12 +368,13 @@ mod tests {
         let if_false =
             PrimitiveArray::from_option_iter([Some(1), Some(2), Some(3), None]).into_array();
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let result = zip_impl(&if_true, &if_false, &mask, &mut ctx)?;
         assert_arrays_eq!(
             result,
             PrimitiveArray::from_option_iter([Some(10i32), Some(20), Some(30), Some(40)])
-                .into_array()
+                .into_array(),
+            &mut ctx
         );
         assert_eq!(result.dtype(), if_false.dtype());
         Ok(())
@@ -382,11 +387,12 @@ mod tests {
             PrimitiveArray::from_option_iter([Some(10), Some(20), Some(30), None]).into_array();
         let if_false = buffer![1i32, 2, 3, 4].into_array();
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let result = zip_impl(&if_true, &if_false, &mask, &mut ctx)?;
         assert_arrays_eq!(
             result,
-            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4)]).into_array()
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4)]).into_array(),
+            &mut ctx
         );
         assert_eq!(result.dtype(), if_true.dtype());
         Ok(())
@@ -422,7 +428,7 @@ mod tests {
         let mask = Mask::from_indices(len, indices);
         let mask_array = mask.into_array();
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let result = mask_array
             .zip(const1.clone(), const2.clone())?
             .execute::<Columnar>(&mut ctx)?
@@ -482,37 +488,36 @@ mod tests {
         let mask = Mask::from_indices(200, (0..100).filter(|i| i % 3 != 0));
         let mask_array = mask.clone().into_array();
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let zipped = mask_array
-            .zip(if_true.clone(), if_false.clone())
+            .zip(if_true, if_false)
             .unwrap()
             .execute::<ArrayRef>(&mut ctx)
             .unwrap();
         let zipped = zipped.as_opt::<VarBinView>().unwrap();
         assert_eq!(zipped.data_buffers().len(), 2);
 
-        let mut arrow_ctx = LEGACY_SESSION.create_execution_ctx();
-        let expected = arrow_zip(
-            LEGACY_SESSION
-                .arrow()
-                .execute_arrow(mask.into_array(), None, &mut arrow_ctx)
-                .unwrap()
-                .as_boolean(),
-            &LEGACY_SESSION
-                .arrow()
-                .execute_arrow(if_true, None, &mut arrow_ctx)
-                .unwrap(),
-            &LEGACY_SESSION
-                .arrow()
-                .execute_arrow(if_false, None, &mut arrow_ctx)
-                .unwrap(),
-        )
-        .unwrap();
-
-        let actual = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(zipped.array().clone(), None, &mut arrow_ctx)
-            .unwrap();
-        assert_eq!(actual.as_ref(), expected.as_ref());
+        let true_value = |i: usize| {
+            if i.is_multiple_of(2) {
+                "Hello"
+            } else {
+                "Hello this is a long string that won't be inlined."
+            }
+        };
+        let false_value = |i: usize| {
+            if i.is_multiple_of(2) {
+                "Hello2"
+            } else {
+                "Hello2 this is a long string that won't be inlined."
+            }
+        };
+        let expected = VarBinViewArray::from_iter_str((0..200).map(|i| {
+            if mask.value(i) {
+                true_value(i)
+            } else {
+                false_value(i)
+            }
+        }));
+        assert_arrays_eq!(zipped.array().clone(), expected, &mut ctx);
     }
 }

@@ -3,19 +3,26 @@
 
 //! FSST (Fast Static Symbol Table) string compression.
 
+use std::sync::Arc;
+
+use vortex_array::ArrayId;
 use vortex_array::ArrayRef;
 use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
+use vortex_array::VTable;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::VarBin;
 use vortex_array::arrays::VarBinArray;
 use vortex_array::arrays::primitive::PrimitiveArrayExt;
-use vortex_array::arrays::varbin::VarBinArrayExt;
-use vortex_compressor::estimate::CompressionEstimate;
-use vortex_compressor::estimate::DeferredEstimate;
+use vortex_array::arrays::varbin::VarBinArraySlotsExt;
+use vortex_compressor::scheme::CompressionEstimate;
+use vortex_compressor::scheme::DeferredEstimate;
 use vortex_error::VortexResult;
 use vortex_fsst::FSST;
 use vortex_fsst::FSSTArrayExt;
+use vortex_fsst::FSSTArraySlotsExt;
+use vortex_fsst::FSSTSymbolTable;
 use vortex_fsst::fsst_compress;
 use vortex_fsst::fsst_train_compressor;
 
@@ -43,6 +50,10 @@ impl Scheme for FSSTScheme {
         canonical.dtype().is_utf8()
     }
 
+    fn produced_encodings(&self) -> Vec<ArrayId> {
+        vec![FSST.id(), VarBin.id()]
+    }
+
     /// Children: lengths=0, code_offsets=1.
     fn num_children(&self) -> usize {
         2
@@ -64,9 +75,9 @@ impl Scheme for FSSTScheme {
         compress_ctx: CompressorContext,
         exec_ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
-        let utf8 = data.array_as_varbinview().into_owned();
-        let compressor_fsst = fsst_train_compressor(&utf8);
-        let fsst = fsst_compress(&utf8, utf8.len(), utf8.dtype(), &compressor_fsst, exec_ctx);
+        let utf8 = data.array_as_varbinview().into_owned().into_array();
+        let compressor_fsst = fsst_train_compressor(&utf8, exec_ctx)?;
+        let fsst = fsst_compress(&utf8, &compressor_fsst, exec_ctx)?;
 
         let uncompressed_lengths_primitive = fsst
             .uncompressed_lengths()
@@ -101,10 +112,14 @@ impl Scheme for FSSTScheme {
             fsst.codes().validity()?,
         )?;
 
-        let fsst = FSST::try_new(
+        // Reuse the padded symbol table as-is; only the codes and lengths change here.
+        let fsst = FSST::try_new_with_symbol_table(
             fsst.dtype().clone(),
-            fsst.symbols().clone(),
-            fsst.symbol_lengths().clone(),
+            Arc::new(FSSTSymbolTable::new_padded(
+                fsst.padded_symbols().clone(),
+                fsst.padded_symbol_lengths().clone(),
+                fsst.n_symbols(),
+            )?),
             compressed_codes,
             compressed_original_lengths,
             exec_ctx,

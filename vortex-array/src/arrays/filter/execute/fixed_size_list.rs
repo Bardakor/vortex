@@ -11,6 +11,7 @@ use vortex_mask::MaskValues;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::filter::execute::filter_validity;
 use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
+use crate::arrays::fixed_size_list::FixedSizeListArraySlotsExt;
 
 /// Density threshold for choosing between indices and slices representation when expanding masks.
 ///
@@ -124,6 +125,8 @@ mod test {
     use vortex_mask::Mask;
 
     use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::FixedSizeListArray;
     use crate::arrays::PrimitiveArray;
     use crate::assert_arrays_eq;
@@ -135,7 +138,10 @@ mod test {
     fn test_filter_fixed_size_list_conformance() {
         let elements = PrimitiveArray::from_iter([1i32, 2, 3, 4, 5, 6, 7, 8, 9]);
         let array = FixedSizeListArray::new(elements.into_array(), 3, Validity::NonNullable, 3);
-        test_filter_conformance(&array.into_array());
+        test_filter_conformance(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[test]
@@ -144,11 +150,15 @@ mod test {
             PrimitiveArray::from_option_iter([Some(1i32), None, Some(3), Some(4), Some(5), None]);
         let validity = Validity::from_iter([true, false, true]);
         let array = FixedSizeListArray::new(elements.into_array(), 2, validity, 3);
-        test_filter_conformance(&array.into_array());
+        test_filter_conformance(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[test]
     fn filter_fixed_size_list_selects_correct_lists() {
+        let mut ctx = array_session().create_execution_ctx();
         let elements = PrimitiveArray::from_iter([10i32, 20, 30, 40, 50, 60]);
         let array = FixedSizeListArray::new(elements.into_array(), 2, Validity::NonNullable, 3);
 
@@ -160,11 +170,12 @@ mod test {
         let expected =
             FixedSizeListArray::new(expected_elements.into_array(), 2, Validity::NonNullable, 2);
 
-        assert_arrays_eq!(filtered, expected);
+        assert_arrays_eq!(filtered, expected, &mut ctx);
     }
 
     #[test]
     fn filter_degenerate_list_size_zero() {
+        let mut ctx = array_session().create_execution_ctx();
         let elements = PrimitiveArray::empty::<i32>(Nullability::NonNullable);
         let array = FixedSizeListArray::new(elements.into_array(), 0, Validity::NonNullable, 5);
 
@@ -175,11 +186,12 @@ mod test {
         let expected =
             FixedSizeListArray::new(expected_elements.into_array(), 0, Validity::NonNullable, 3);
 
-        assert_arrays_eq!(filtered, expected);
+        assert_arrays_eq!(filtered, expected, &mut ctx);
     }
 
     #[test]
     fn filter_nested_fixed_size_lists() {
+        let mut ctx = array_session().create_execution_ctx();
         // Inner lists of size 2, outer lists of size 2 (so 2 outer lists, each with 2 inner lists).
         let inner_elements = buffer![1i32, 2, 3, 4, 5, 6, 7, 8].into_array();
         let inner_fsl = FixedSizeListArray::new(inner_elements, 2, Validity::NonNullable, 4);
@@ -196,6 +208,6 @@ mod test {
         let expected_outer =
             FixedSizeListArray::new(expected_inner.into_array(), 2, Validity::NonNullable, 1);
 
-        assert_arrays_eq!(filtered, expected_outer);
+        assert_arrays_eq!(filtered, expected_outer, &mut ctx);
     }
 }

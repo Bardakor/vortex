@@ -3,12 +3,20 @@
 
 mod array;
 pub use array::StructArrayExt;
+pub use array::StructArraySlotsExt;
 pub use array::StructDataParts;
+pub use array::StructSlots;
+pub use array::StructSlotsView;
 pub use vtable::StructArray;
 pub(crate) mod compute;
 
 mod vtable;
 pub use vtable::Struct;
+
+pub(crate) fn initialize(session: &vortex_session::VortexSession) {
+    compute::cast::initialize(session);
+    vtable::initialize(session);
+}
 
 #[cfg(test)]
 mod tests;

@@ -12,7 +12,9 @@
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 import math
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from io import StringIO
@@ -42,6 +44,10 @@ import pandas as pd
 Z_SCORE_99 = 2.5758293035489004
 CONTROL_FORMAT = "parquet"
 FILE_SIZE_METRIC = "file_size"
+QUERY_TARGET_PATTERN = re.compile(r"_q(\d+)/([^:]+):(.+)$")
+FORMAT_DISPLAY_NAMES = {
+    "vortex": "vortex-file-compressed",
+}
 
 
 @dataclass
@@ -59,7 +65,7 @@ def extract_dataset_key(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize dataset metadata into a stable join key."""
 
     if "dataset" not in df.columns:
-        df["dataset_key"] = pd.NA
+        df["dataset_key"] = None
     else:
         df["dataset_key"] = df["dataset"].apply(dataset_key)
     return df
@@ -91,20 +97,75 @@ def dataset_key(value: Any) -> str | None:
     return None
 
 
-def benchmark_identity(row: Any) -> tuple[Any, Any, Any] | None:
-    """Return the timing-row identity used to find a matching baseline."""
+def normalize_format_name(value: Any) -> str | None:
+    """Map serialized format identifiers to the reporter's established labels."""
 
-    if row.get("metric") == FILE_SIZE_METRIC or row.get("file_size") is not None:
+    value = identity_value(value)
+    if value is None:
+        return None
+    value = str(value)
+    return FORMAT_DISPLAY_NAMES.get(value, value)
+
+
+def comparison_target(name: Any, target: Any = None) -> tuple[str, str, int | str | None]:
+    """Return the engine, display format, and optional SQL query number."""
+
+    target_engine = None
+    target_format = None
+    if isinstance(target, dict):
+        target_engine = identity_value(target.get("engine"))
+        target_format = normalize_format_name(target.get("format"))
+
+    match = QUERY_TARGET_PATTERN.search(name) if isinstance(name, str) else None
+    name_engine = match.group(2) if match is not None else None
+    name_format = match.group(3) if match is not None else None
+    query = int(match.group(1)) if match is not None else None
+
+    if match is None and isinstance(name, str):
+        random_access = re.match(
+            r"^(?P<prefix>random-access(?:/.*)?)/"
+            r"(?P<file_format>parquet|vortex|lance)-(?P<variant>.+)$",
+            name,
+        )
+        if random_access is not None:
+            file_format = random_access.group("file_format")
+            if file_format == "vortex":
+                file_format = "vortex-file-compressed"
+            query = (
+                None if file_format == "lance" else f"{random_access.group('prefix')}/{random_access.group('variant')}"
+            )
+            return "random-access", file_format, query
+
+    engine = str(target_engine or name_engine or "unknown")
+    file_format = str(target_format or normalize_format_name(name_format) or "unknown")
+    return engine, file_format, query
+
+
+def extract_target_fields(name: str, target: Any = None) -> pd.Series:
+    """Extract target metadata, using the benchmark name when needed."""
+
+    engine, file_format, query = comparison_target(name, target)
+    return pd.Series({"engine": engine, "file_format": file_format, "query": query})
+
+
+def benchmark_identity(row: Any) -> tuple[Any, Any, Any, str, str, Any] | None:
+    """Return the measurement identity used to find a matching baseline."""
+
+    if row.get("metric") == FILE_SIZE_METRIC or isinstance(row.get("file_size"), dict):
         return None
 
     name = row.get("name")
     if name is None:
         return None
 
+    engine, file_format, _query = comparison_target(name, row.get("target"))
     return (
         identity_value(name),
         identity_value(row.get("storage")),
         dataset_key(row.get("dataset")),
+        engine,
+        file_format,
+        identity_value(row.get("unit")),
     )
 
 
@@ -116,36 +177,69 @@ def benchmark_identity_rows(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["commit_id", "benchmark_identity"])
 
     timing_rows = timing_rows.copy()
-    if "storage" not in timing_rows.columns:
-        timing_rows["storage"] = pd.NA
     if "commit_id" not in timing_rows.columns:
         timing_rows["commit_id"] = pd.NA
 
-    timing_rows = extract_dataset_key(timing_rows)
-    timing_rows["benchmark_identity"] = [
-        tuple(identity_value(row[column]) for column in ("name", "storage", "dataset_key"))
-        for _, row in timing_rows.iterrows()
-    ]
+    timing_rows["benchmark_identity"] = [benchmark_identity(row) for _, row in timing_rows.iterrows()]
 
     return timing_rows[["commit_id", "benchmark_identity"]]
 
 
 def read_jsonl_rows_for_commit(path: str, commit_id: str) -> pd.DataFrame:
-    """Read only rows matching a commit from a JSONL benchmark history."""
+    """Read the latest copy of each row matching a history commit.
 
-    rows = []
+    Re-running a develop workflow appends a second result block for the same
+    commit. Keeping the last copy of each logical row prevents a many-to-one
+    merge from weighting that baseline multiple times.
+    """
+
+    rows_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
     with open(path, encoding="utf-8") as lines:
         for line in lines:
             if '"commit_id"' not in line or f'"{commit_id}"' not in line:
                 continue
             record = orjson.loads(line)
-            if record.get("commit_id") == commit_id:
-                rows.append(record)
-    return pd.DataFrame(rows)
+            if record.get("commit_id") != commit_id:
+                continue
+
+            file_size = record.get("file_size")
+            if isinstance(file_size, dict):
+                identity = (
+                    FILE_SIZE_METRIC,
+                    file_size.get("benchmark"),
+                    file_size.get("scale_factor"),
+                    file_size.get("format"),
+                    file_size.get("file"),
+                )
+            else:
+                identity = ("timing", benchmark_identity(record))
+            rows_by_identity[identity] = record
+    return pd.DataFrame(rows_by_identity.values())
 
 
-def read_latest_baseline_rows(path: str, pr: pd.DataFrame) -> pd.DataFrame:
-    """Read rows from the latest history commit matching the PR benchmark."""
+def git_tree_commit_ids() -> set[str]:
+    """Return every commit reachable from the checked-out branch head."""
+
+    commits = subprocess.run(
+        ["git", "rev-list", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return set(commits.splitlines())
+
+
+def read_latest_baseline_rows(
+    path: str,
+    pr: pd.DataFrame,
+    reachable_commit_ids: set[str],
+) -> pd.DataFrame:
+    """Read rows from the latest reachable commit matching the PR benchmark.
+
+    A benchmark can be new to the PR workflow and therefore have no baseline
+    yet. Return an empty frame with the PR schema in that case so the report
+    can show the measurements without comparison.
+    """
 
     pr_identities = set(benchmark_identity_rows(pr)["benchmark_identity"])
     if not pr_identities:
@@ -159,24 +253,33 @@ def read_latest_baseline_rows(path: str, pr: pd.DataFrame) -> pd.DataFrame:
             record = orjson.loads(line)
             if benchmark_identity(record) in pr_identities:
                 commit_id = record.get("commit_id")
-                if commit_id is not None:
+                if commit_id is not None and commit_id in reachable_commit_ids:
                     baseline_commit_id = commit_id
 
     if baseline_commit_id is None:
-        raise ValueError("No baseline rows found for the benchmark under test")
+        return pr.iloc[0:0].copy()
 
     return read_jsonl_rows_for_commit(path, baseline_commit_id)
 
 
-def select_latest_baseline_rows(base: pd.DataFrame, pr: pd.DataFrame) -> pd.DataFrame:
-    """Select rows from the latest baseline commit containing this benchmark.
+def select_latest_baseline_rows(
+    base: pd.DataFrame,
+    pr: pd.DataFrame,
+    reachable_commit_ids: set[str],
+) -> pd.DataFrame:
+    """Select rows from the latest reachable commit containing this benchmark.
 
     The persisted benchmark history is append-only. A row only appears after
-    that benchmark job uploaded results, so the newest commit with matching row
-    identities is the latest successful baseline for the benchmark under test.
+    that benchmark job uploaded results, so the newest reachable commit with
+    matching row identities is the latest successful baseline for the benchmark
+    under test.
     """
 
     if base.empty or "commit_id" not in base.columns:
+        return base
+
+    base = base[base["commit_id"].isin(reachable_commit_ids)].copy()
+    if base.empty:
         return base
 
     commit_ids = base["commit_id"].dropna().unique()
@@ -191,29 +294,34 @@ def select_latest_baseline_rows(base: pd.DataFrame, pr: pd.DataFrame) -> pd.Data
     matches = base_identities[base_identities["benchmark_identity"].isin(pr_identities)]
     matches = matches[matches["commit_id"].notna()]
     if matches.empty:
-        raise ValueError("No baseline rows found for the benchmark under test")
+        return base.iloc[0:0].copy()
 
     baseline_commit_id = matches["commit_id"].iloc[-1]
     return base[base["commit_id"] == baseline_commit_id].copy()
 
 
-def extract_target_fields(name: str) -> pd.Series:
-    """Parse query, engine, and format from the benchmark name."""
+def normalize_measurement_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Add canonical comparison keys to benchmark measurement rows."""
 
-    if not isinstance(name, str):
-        return pd.Series({"engine": "unknown", "file_format": "unknown", "query": pd.NA})
+    df = df.copy()
+    if "storage" not in df.columns:
+        df["storage"] = None
+    if "unit" not in df.columns:
+        df["unit"] = None
 
-    match = re.search(r"_q(\d+)/([^:]+):(.+)$", name)
-    if match is None:
-        return pd.Series({"engine": "unknown", "file_format": "unknown", "query": pd.NA})
+    df["storage"] = df["storage"].apply(identity_value)
+    df["unit"] = df["unit"].apply(identity_value)
+    df = extract_dataset_key(df)
 
-    return pd.Series(
-        {
-            "engine": match.group(2),
-            "file_format": match.group(3),
-            "query": int(match.group(1)),
-        }
+    targets = df["target"] if "target" in df.columns else pd.Series(None, index=df.index)
+    fields = [comparison_target(name, target) for name, target in zip(df["name"], targets)]
+    df[["engine", "file_format", "query"]] = pd.DataFrame(
+        fields,
+        columns=["engine", "file_format", "query"],
+        index=df.index,
     )
+    df["query"] = df["query"].astype(object)
+    return df
 
 
 def positive_samples(values: Any) -> np.ndarray:
@@ -373,7 +481,7 @@ def build_statistical_analysis(df: pd.DataFrame, threshold_pct: int) -> dict[str
         rows.append(
             {
                 "name": row["name"],
-                "query": int(row["query"]),
+                "query": row["query"],
                 "engine": row["engine"],
                 "file_format": row["file_format"],
                 "combo": f"{row['engine']}:{row['file_format']}",
@@ -393,7 +501,7 @@ def build_statistical_analysis(df: pd.DataFrame, threshold_pct: int) -> dict[str
         beta_log_ratio = float(group["log_ratio"].mean())
         query_rows.append(
             {
-                "query": int(query),
+                "query": query,
                 "beta_log_ratio": beta_log_ratio,
                 "beta_ratio": float(np.exp(beta_log_ratio)),
                 "beta_log_se": mean_with_standard_error(group, "log_ratio", "log_ratio_se"),
@@ -443,7 +551,7 @@ def build_statistical_analysis(df: pd.DataFrame, threshold_pct: int) -> dict[str
     }
 
 
-def calculate_geo_mean(df: pd.DataFrame) -> float:
+def calculate_geometric_mean(df: pd.DataFrame) -> float:
     """Geometric mean of positive ratios from a DataFrame ratio column."""
 
     valid_ratios = [r for r in df["ratio"] if r > 0 and not pd.isna(r)]
@@ -486,12 +594,24 @@ def format_performance(
     return f"{ratio:.3f}x {emoji}"
 
 
-def format_integer_value(value: float) -> str:
-    """Render numeric timing values for markdown tables."""
+def format_measurement_value(value: float) -> str:
+    """Render integral and fractional measurements for a Markdown table."""
 
     if pd.isna(value):
-        return ""
-    return str(int(value))
+        return "—"
+
+    value = float(value)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.9g}"
+
+
+def format_comparison_ratio(value: float) -> str:
+    """Render a PR/base ratio or identify an unmatched PR measurement."""
+
+    if pd.isna(value):
+        return "no baseline"
+    return f"{float(value):.2f}"
 
 
 def format_size(size_bytes: int) -> str:
@@ -520,12 +640,15 @@ def format_pct_change(pct: float) -> str:
     return f"{sign}{pct:.1f}%"
 
 
-def extract_file_size_data(df: pd.DataFrame) -> dict[tuple[str, str, str, str], int]:
-    """Extract file-size rows keyed by benchmark, scale factor, format, and file."""
+def extract_file_size_data(
+    df: pd.DataFrame,
+) -> tuple[dict[tuple[str, str, str, str], int], set[tuple[str, str, str, str]]]:
+    """Extract file-size rows and the identities explicitly ignored for being empty."""
 
     data = {}
+    ignored = set()
     if df.empty:
-        return data
+        return data, ignored
 
     for _, row in df.iterrows():
         metadata = row.get("file_size")
@@ -541,19 +664,26 @@ def extract_file_size_data(df: pd.DataFrame) -> dict[tuple[str, str, str, str], 
         value = row.get("value")
         if pd.isna(value):
             continue
-        data[key] = int(value)
+        size = int(value)
+        if size == 0:
+            ignored.add(key)
+            continue
+        data[key] = size
 
-    return data
+    return data, ignored
 
 
 def format_file_size_report(base_rows: pd.DataFrame, pr_rows: pd.DataFrame) -> str:
     """Render a shared-comment file-size comparison report."""
 
-    pr_data = extract_file_size_data(pr_rows)
+    pr_data, pr_ignored = extract_file_size_data(pr_rows)
+    base_data, base_ignored = extract_file_size_data(base_rows)
+    ignored = base_ignored | pr_ignored
+    pr_data = {key: value for key, value in pr_data.items() if key not in ignored}
     if not pr_data:
         return ""
 
-    base_data = extract_file_size_data(base_rows)
+    base_data = {key: value for key, value in base_data.items() if key not in ignored}
     pr_scopes = {(benchmark, scale_factor) for benchmark, scale_factor, _file_format, _file_name in pr_data}
     base_data = {key: value for key, value in base_data.items() if key[:2] in pr_scopes}
     if not base_data:
@@ -763,6 +893,27 @@ def format_within_engine_summary(analyses: dict[str, dict[str, Any]]) -> str | N
     return " · ".join(summaries)
 
 
+def format_title(benchmark_name: str, pr: pd.DataFrame) -> str:
+    """Render the comment title, linking the suite explainer doc emitted by the benchmark binary.
+
+    The doc path is a repo-relative markdown path carried on the PR result rows (the `doc`
+    field, populated from `Benchmark::doc_path` in Rust), so the benchmark code is the single
+    source of truth for where each suite is documented. The link pins the PR's own commit so
+    it resolves before the PR merges and stays valid afterwards.
+    """
+
+    title = f"# Benchmarks: {benchmark_name}" if benchmark_name else "# Benchmarks"
+    if "doc" in pr.columns:
+        docs = pr["doc"].dropna().unique()
+        if len(docs) > 0:
+            server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+            repository = os.environ.get("GITHUB_REPOSITORY", "vortex-data/vortex")
+            commits = pr["commit_id"].dropna().unique() if "commit_id" in pr.columns else []
+            ref = commits[0] if len(commits) > 0 else "develop"
+            title += f" [\N{OPEN BOOK}]({server_url}/{repository}/blob/{ref}/{docs[0]})"
+    return title
+
+
 def format_report_help() -> str:
     """Render explanatory markdown for the benchmark report headline fields."""
 
@@ -804,16 +955,28 @@ FILE_FORMAT_ORDER = {
     "arrow": 5,
 }
 
+UNIT_ORDER = {
+    "ns": 0,
+    "μs": 1,
+    "ms": 2,
+    "bytes": 3,
+    "MB": 4,
+    "%": 5,
+    "ratio": 6,
+}
 
-def group_sort_key(group_key: tuple[str, str]) -> tuple[int, int, str, str]:
-    """Keep output ordering stable and grouped by likely reader interest."""
 
-    engine, file_format = group_key
+def group_sort_key(group_key: tuple[str, str, str]) -> tuple[int, int, int, str, str, str]:
+    """Keep output ordering stable."""
+
+    engine, file_format, unit = group_key
     return (
         ENGINE_ORDER.get(engine, len(ENGINE_ORDER)),
         FILE_FORMAT_ORDER.get(file_format, len(FILE_FORMAT_ORDER)),
+        UNIT_ORDER.get(unit, len(UNIT_ORDER)),
         engine,
         file_format,
+        unit,
     )
 
 
@@ -823,44 +986,45 @@ def main() -> None:
     benchmark_name = sys.argv[3] if len(sys.argv) > 3 else ""
 
     pr = pd.read_json(sys.argv[2], lines=True)
-    base = read_latest_baseline_rows(sys.argv[1], pr)
+    title = format_title(benchmark_name, pr)
+    base = read_latest_baseline_rows(sys.argv[1], pr, git_tree_commit_ids())
 
-    base_commit_id = set(base["commit_id"].unique())
+    base_commit_ids = set(base["commit_id"].unique())
     pr_commit_id = set(pr["commit_id"].unique())
-    assert len(base_commit_id) == 1, base_commit_id
+    assert len(base_commit_ids) <= 1, base_commit_ids
     assert len(pr_commit_id) == 1, pr_commit_id
-    base_commit_id = next(iter(base_commit_id))
+    base_commit_id = next(iter(base_commit_ids), None)
     pr_commit_id = next(iter(pr_commit_id))
 
     base_file_sizes, base = split_file_size_rows(base)
     pr_file_sizes, pr = split_file_size_rows(pr)
 
-    if "storage" not in base:
-        base["storage"] = pd.NA
-    if "storage" not in pr:
-        pr["storage"] = pd.NA
+    base = normalize_measurement_rows(base)
+    pr = normalize_measurement_rows(pr)
 
-    base = extract_dataset_key(base)
-    pr = extract_dataset_key(pr)
-
-    df3 = pd.merge(base, pr, on=["name", "storage", "dataset_key"], how="right", suffixes=("_base", "_pr"))
+    comparison_keys = ["name", "storage", "dataset_key", "engine", "file_format", "unit", "query"]
+    df3 = pd.merge(base, pr, on=comparison_keys, how="right", suffixes=("_base", "_pr"))
+    df3["unit"] = df3["unit"].fillna("unit")
     df3["ratio"] = df3["value_pr"] / df3["value_base"]
-    df3[["engine", "file_format", "query"]] = df3["name"].apply(extract_target_fields)
 
     is_s3_benchmark = "s3" in benchmark_name.lower()
     threshold_pct = 30 if is_s3_benchmark else 10
     improvement_threshold = 1.0 - (threshold_pct / 100.0)
     regression_threshold = 1.0 + (threshold_pct / 100.0)
 
-    vortex_df = df3[df3["name"].str.contains("vortex", case=False, na=False)]
-    parquet_df = df3[df3["name"].str.contains("parquet", case=False, na=False)]
+    query_df = df3[df3["query"].notna()]
+    headline_df = query_df
+    if headline_df.empty and df3["unit"].nunique() == 1:
+        headline_df = df3
+    vortex_df = headline_df[headline_df["file_format"].str.startswith("vortex")]
+    parquet_df = headline_df[headline_df["file_format"].eq(CONTROL_FORMAT)]
 
-    vortex_geo_mean_ratio = calculate_geo_mean(vortex_df)
-    parquet_geo_mean_ratio = calculate_geo_mean(parquet_df)
+    vortex_geometric_mean_ratio = calculate_geometric_mean(vortex_df)
+    parquet_geometric_mean_ratio = calculate_geometric_mean(parquet_df)
 
-    statistical_analysis = build_statistical_analysis(df3, threshold_pct)
+    statistical_analysis = build_statistical_analysis(query_df, threshold_pct)
     verdict = build_verdict(statistical_analysis) if statistical_analysis is not None else None
-    engine_analyses = build_within_engine_statistical_analyses(df3, threshold_pct)
+    engine_analyses = build_within_engine_statistical_analyses(query_df, threshold_pct)
     engine_summary = format_within_engine_summary(engine_analyses)
 
     summary_fields: list[str] = []
@@ -873,7 +1037,7 @@ def main() -> None:
 
     if len(vortex_df) > 0:
         vortex_performance = format_performance(
-            vortex_geo_mean_ratio,
+            vortex_geometric_mean_ratio,
             improvement_threshold,
             regression_threshold,
             "vortex",
@@ -881,7 +1045,7 @@ def main() -> None:
         summary_fields.append(f"**Vortex (geomean)**: {vortex_performance}")
     if len(parquet_df) > 0:
         parquet_performance = format_performance(
-            parquet_geo_mean_ratio,
+            parquet_geometric_mean_ratio,
             improvement_threshold,
             regression_threshold,
             "parquet",
@@ -896,39 +1060,47 @@ def main() -> None:
                 shifts += f" · Median polish {format_ratio_change(float(np.exp(polish.overall)))}"
         summary_fields.append(f"**Shifts**: {shifts}")
 
-    print("<br>".join(summary_fields))
+    print(title)
     print("")
-    print(format_report_help())
-    print("")
+    if summary_fields:
+        print("<br>".join(summary_fields))
+        print("")
+    if base_commit_id is None:
+        print("_No baseline is available for this benchmark yet; PR measurements are shown without comparison._")
+        print("")
+    if verdict is not None or engine_summary is not None:
+        print(format_report_help())
+        print("")
     print("---")
     print("")
 
-    grouped_tables = df3.groupby(["engine", "file_format"], dropna=False, sort=False)
-    for engine, file_format in sorted(grouped_tables.groups.keys(), key=group_sort_key):
-        group_df = grouped_tables.get_group((engine, file_format)).sort_values("name")
+    grouped_tables = df3.groupby(["engine", "file_format", "unit"], dropna=False, sort=False)
+    base_label = str(base_commit_id)[:8] if base_commit_id is not None else "none"
+    for engine, file_format, unit in sorted(grouped_tables.groups.keys(), key=group_sort_key):
+        group_df = grouped_tables.get_group((engine, file_format, unit)).sort_values("name")
         group_performance = format_performance(
-            calculate_geo_mean(group_df),
+            calculate_geometric_mean(group_df),
             improvement_threshold,
             regression_threshold,
             "group",
         )
-        significant_improvements = (group_df["ratio"] < improvement_threshold).sum()
-        significant_regressions = (group_df["ratio"] > regression_threshold).sum()
-        unit = group_df["unit_base"].dropna().iloc[0] if group_df["unit_base"].notna().any() else "unit"
+        significant_improvements = (group_df["ratio"] <= improvement_threshold).sum()
+        significant_regressions = (group_df["ratio"] >= regression_threshold).sum()
         display_df = pd.DataFrame(
             {
                 "name": [
                     format_name_with_highlight(name, ratio, improvement_threshold, regression_threshold)
                     for name, ratio in zip(group_df["name"], group_df["ratio"])
                 ],
-                f"PR {pr_commit_id[:8]} ({unit})": group_df["value_pr"].map(format_integer_value),
-                f"base {base_commit_id[:8]} ({unit})": group_df["value_base"].map(format_integer_value),
-                "ratio (PR/base)": group_df["ratio"],
+                f"PR {pr_commit_id[:8]} ({unit})": group_df["value_pr"].map(format_measurement_value),
+                f"base {base_label} ({unit})": group_df["value_base"].map(format_measurement_value),
+                "ratio (PR/base)": group_df["ratio"].map(format_comparison_ratio),
             }
         )
         print("<details>")
         summary_text = (
-            f"{engine} / {file_format} ({group_performance}, {significant_improvements}↑ {significant_regressions}↓)"
+            f"{engine} / {file_format} / {unit} "
+            f"({group_performance}, {significant_improvements}↑ {significant_regressions}↓)"
         )
         print(f"<summary>{summary_text}</summary>")
         print("")
@@ -938,7 +1110,8 @@ def main() -> None:
             display_df.to_markdown(
                 index=False,
                 tablefmt="github",
-                floatfmt=".2f",
+                disable_numparse=True,
+                colalign=("left", "right", "right", "right"),
             )
         )
         print("")

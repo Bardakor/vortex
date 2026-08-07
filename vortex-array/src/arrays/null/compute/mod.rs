@@ -15,10 +15,8 @@ mod test {
     use vortex_mask::Mask;
 
     use crate::IntoArray;
-    use crate::LEGACY_SESSION;
-    #[expect(deprecated)]
-    use crate::ToCanonical as _;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::NullArray;
     use crate::compute::conformance::consistency::test_array_consistency;
     use crate::compute::conformance::filter::test_filter_conformance;
@@ -29,8 +27,11 @@ mod test {
     #[test]
     fn test_slice_nulls() {
         let nulls = NullArray::new(10);
-        #[expect(deprecated)]
-        let sliced = nulls.slice(0..4).unwrap().to_null();
+        let sliced = nulls
+            .slice(0..4)
+            .unwrap()
+            .execute::<NullArray>(&mut array_session().create_execution_ctx())
+            .unwrap();
 
         assert_eq!(sliced.len(), 4);
         let sliced_arr = sliced.as_array();
@@ -38,7 +39,10 @@ mod test {
             sliced_arr
                 .validity()
                 .unwrap()
-                .execute_mask(sliced_arr.len(), &mut LEGACY_SESSION.create_execution_ctx())
+                .execute_mask(
+                    sliced_arr.len(),
+                    &mut array_session().create_execution_ctx()
+                )
                 .unwrap(),
             Mask::AllFalse(4)
         ));
@@ -47,11 +51,11 @@ mod test {
     #[test]
     fn test_take_nulls() {
         let nulls = NullArray::new(10);
-        #[expect(deprecated)]
         let taken = nulls
             .take(buffer![0u64, 2, 4, 6, 8].into_array())
             .unwrap()
-            .to_null();
+            .execute::<NullArray>(&mut array_session().create_execution_ctx())
+            .unwrap();
 
         assert_eq!(taken.len(), 5);
         let taken_arr = taken.as_array();
@@ -59,7 +63,7 @@ mod test {
             taken_arr
                 .validity()
                 .unwrap()
-                .execute_mask(taken_arr.len(), &mut LEGACY_SESSION.create_execution_ctx())
+                .execute_mask(taken_arr.len(), &mut array_session().create_execution_ctx())
                 .unwrap(),
             Mask::AllFalse(5)
         ));
@@ -70,7 +74,7 @@ mod test {
         let nulls = NullArray::new(10);
 
         let scalar = nulls
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap();
         assert!(scalar.is_null());
         assert_eq!(scalar.dtype().clone(), DType::Null);
@@ -78,21 +82,42 @@ mod test {
 
     #[test]
     fn test_filter_null_array() {
-        test_filter_conformance(&NullArray::new(5).into_array());
-        test_filter_conformance(&NullArray::new(1).into_array());
-        test_filter_conformance(&NullArray::new(10).into_array());
+        test_filter_conformance(
+            &NullArray::new(5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_filter_conformance(
+            &NullArray::new(1).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_filter_conformance(
+            &NullArray::new(10).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[test]
     fn test_mask_null_array() {
-        test_mask_conformance(&NullArray::new(5).into_array());
+        test_mask_conformance(
+            &NullArray::new(5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[test]
     fn test_take_null_array_conformance() {
-        test_take_conformance(&NullArray::new(5).into_array());
-        test_take_conformance(&NullArray::new(1).into_array());
-        test_take_conformance(&NullArray::new(10).into_array());
+        test_take_conformance(
+            &NullArray::new(5).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_take_conformance(
+            &NullArray::new(1).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
+        test_take_conformance(
+            &NullArray::new(10).into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 
     #[rstest]
@@ -104,6 +129,9 @@ mod test {
     #[case::null_array_large(NullArray::new(1000))]
     #[case::null_array_empty(NullArray::new(0))]
     fn test_null_consistency(#[case] array: NullArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 }

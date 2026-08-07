@@ -9,18 +9,20 @@ pub use array::*;
 pub use iter::trimmed_ends_iter;
 
 mod array;
-#[cfg(feature = "arrow")]
-mod arrow;
 pub mod compress;
 mod compute;
 pub mod decompress_bool;
 mod iter;
 mod kernel;
-mod ops;
+pub mod ops;
 mod rules;
+#[cfg(test)]
+#[cfg(not(codspeed))]
+mod trace_tests;
 
 #[doc(hidden)]
 pub mod _benchmarking {
+    pub use compute::filter::filter_run_end_primitive;
     pub use compute::take::take_indices_unchecked;
 
     use super::*;
@@ -38,6 +40,7 @@ use vortex_session::VortexSession;
 /// Initialize run-end encoding in the given session.
 pub fn initialize(session: &VortexSession) {
     session.arrays().register(RunEnd);
+    kernel::initialize(session);
 
     // Register the RunEnd-specific aggregate kernels.
     session.aggregate_fns().register_aggregate_kernel(
@@ -59,11 +62,20 @@ pub fn initialize(session: &VortexSession) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use prost::Message;
     use vortex_array::dtype::PType;
     use vortex_array::test_harness::check_metadata;
+    use vortex_session::VortexSession;
 
     use crate::RunEndMetadata;
+
+    pub static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[cfg_attr(miri, ignore)]
     #[test]

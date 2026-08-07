@@ -3,18 +3,24 @@
 
 mod array;
 pub use array::VarBinArrayExt;
+pub use array::VarBinArraySlotsExt;
 pub use array::VarBinData;
 pub use array::VarBinDataParts;
+pub use array::VarBinSlots;
+pub use array::VarBinSlotsView;
 pub use vtable::VarBinArray;
 
 pub(crate) mod compute;
+pub use compute::take_varbin;
 
 mod vtable;
 pub use vtable::VarBin;
 
-pub mod builder;
+pub(crate) fn initialize(session: &vortex_session::VortexSession) {
+    vtable::initialize(session);
+}
 
-mod accessor;
+pub mod builder;
 
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;

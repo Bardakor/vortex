@@ -5,7 +5,6 @@ mod kernel;
 mod operations;
 mod validity;
 
-use kernel::PARENT_KERNELS;
 use prost::Message;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -25,10 +24,8 @@ use crate::array::ArrayParts;
 use crate::array::ArrayView;
 use crate::array::EmptyArrayData;
 use crate::array::VTable;
-use crate::arrays::variant::CORE_STORAGE_SLOT;
-use crate::arrays::variant::NUM_SLOTS;
-use crate::arrays::variant::SHREDDED_SLOT;
-use crate::arrays::variant::SLOT_NAMES;
+use crate::array::with_empty_buffers;
+use crate::arrays::variant::VariantSlots;
 use crate::arrays::variant::compute::rules::RULES;
 use crate::buffer::BufferHandle;
 use crate::dtype::DType;
@@ -42,6 +39,10 @@ use crate::serde::ArrayChildren;
 
 /// A [`Variant`]-encoded Vortex array.
 pub type VariantArray = Array<Variant>;
+
+pub(crate) fn initialize(session: &VortexSession) {
+    kernel::initialize(session);
+}
 
 #[derive(Clone, Debug)]
 pub struct Variant;
@@ -72,15 +73,16 @@ impl VTable for Variant {
         slots: &[Option<ArrayRef>],
     ) -> VortexResult<()> {
         vortex_ensure!(
-            slots.len() == NUM_SLOTS,
-            "VariantArray expects {NUM_SLOTS} slots, got {}",
+            slots.len() == VariantSlots::COUNT,
+            "VariantArray expects {} slots, got {}",
+            VariantSlots::COUNT,
             slots.len()
         );
         vortex_ensure!(
-            slots[CORE_STORAGE_SLOT].is_some(),
+            slots[VariantSlots::CORE_STORAGE].is_some(),
             "VariantArray core_storage slot must be present"
         );
-        let core_storage = slots[CORE_STORAGE_SLOT]
+        let core_storage = slots[VariantSlots::CORE_STORAGE]
             .as_ref()
             .vortex_expect("validated core_storage slot presence");
         vortex_ensure!(
@@ -99,7 +101,7 @@ impl VTable for Variant {
             core_storage.len(),
             len
         );
-        if let Some(shredded) = slots[SHREDDED_SLOT].as_ref() {
+        if let Some(shredded) = slots[VariantSlots::SHREDDED].as_ref() {
             vortex_ensure!(
                 shredded.len() == len,
                 "VariantArray shredded length {} does not match outer length {}",
@@ -122,11 +124,19 @@ impl VTable for Variant {
         None
     }
 
+    fn with_buffers(
+        &self,
+        array: ArrayView<'_, Self>,
+        buffers: &[BufferHandle],
+    ) -> VortexResult<ArrayParts<Self>> {
+        with_empty_buffers(self, array, buffers)
+    }
+
     fn serialize(
         array: ArrayView<'_, Self>,
         _session: &VortexSession,
     ) -> VortexResult<Option<Vec<u8>>> {
-        let shredded_dtype = array.slots()[SHREDDED_SLOT]
+        let shredded_dtype = array.slots()[VariantSlots::SHREDDED]
             .as_ref()
             .map(|shredded| shredded.dtype().try_into())
             .transpose()?;
@@ -140,7 +150,6 @@ impl VTable for Variant {
         dtype: &DType,
         len: usize,
         metadata: &[u8],
-
         buffers: &[BufferHandle],
         children: &dyn ArrayChildren,
         session: &VortexSession,
@@ -169,13 +178,18 @@ impl VTable for Variant {
             .map(|dtype| children.get(1, &dtype, len))
             .transpose()?;
         Ok(
-            ArrayParts::new(self.clone(), dtype.clone(), len, EmptyArrayData)
-                .with_slots(vec![Some(core_storage), shredded].into()),
+            ArrayParts::new(self.clone(), dtype.clone(), len, EmptyArrayData).with_slots(
+                VariantSlots {
+                    core_storage,
+                    shredded,
+                }
+                .into_slots(),
+            ),
         )
     }
 
     fn slot_name(_array: ArrayView<'_, Self>, idx: usize) -> String {
-        match SLOT_NAMES.get(idx) {
+        match VariantSlots::NAMES.get(idx) {
             Some(name) => (*name).to_string(),
             None => vortex_panic!("VariantArray slot_name index {idx} out of bounds"),
         }
@@ -191,15 +205,6 @@ impl VTable for Variant {
         child_idx: usize,
     ) -> VortexResult<Option<ArrayRef>> {
         RULES.evaluate(array, parent, child_idx)
-    }
-
-    fn execute_parent(
-        array: ArrayView<'_, Self>,
-        parent: &ArrayRef,
-        child_idx: usize,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_KERNELS.execute(array, parent, child_idx, ctx)
     }
 }
 

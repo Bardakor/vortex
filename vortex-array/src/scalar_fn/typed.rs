@@ -24,8 +24,7 @@ use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::dtype::DType;
 use crate::expr::Expression;
-use crate::expr::StatsCatalog;
-use crate::expr::stats::Stat;
+use crate::expr::display::ExprDisplay;
 use crate::scalar_fn::Arity;
 use crate::scalar_fn::ChildName;
 use crate::scalar_fn::ExecutionArgs;
@@ -91,11 +90,11 @@ pub(super) trait DynScalarFn: 'static + Send + Sync + super::sealed::Sealed {
     ) -> VortexResult<Option<ReduceNodeRef>>;
     fn arity(&self) -> Arity;
     fn child_name(&self, child_idx: usize) -> ChildName;
-    fn is_null_sensitive(&self) -> bool;
+    fn is_strict(&self) -> bool;
     fn is_fallible(&self) -> bool;
 
-    // Expression methods — take &Expression for tree traversal
-    fn fmt_sql(&self, expression: &Expression, f: &mut Formatter<'_>) -> fmt::Result;
+    // Expression methods — take expressions for tree traversal
+    fn fmt_sql(&self, expression: &dyn ExprDisplay, f: &mut Formatter<'_>) -> fmt::Result;
     fn simplify(
         &self,
         expression: &Expression,
@@ -103,17 +102,6 @@ pub(super) trait DynScalarFn: 'static + Send + Sync + super::sealed::Sealed {
     ) -> VortexResult<Option<Expression>>;
     fn simplify_untyped(&self, expression: &Expression) -> VortexResult<Option<Expression>>;
     fn validity(&self, expression: &Expression) -> VortexResult<Option<Expression>>;
-    fn stat_falsification(
-        &self,
-        expression: &Expression,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression>;
-    fn stat_expression(
-        &self,
-        expression: &Expression,
-        stat: Stat,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression>;
 
     // Options operations — self-contained
     fn options_serialize(&self) -> VortexResult<Option<Vec<u8>>>;
@@ -197,15 +185,15 @@ impl<V: ScalarFnVTable> DynScalarFn for TypedScalarFnInstance<V> {
         V::child_name(&self.vtable, &self.options, child_idx)
     }
 
-    fn is_null_sensitive(&self) -> bool {
-        V::is_null_sensitive(&self.vtable, &self.options)
+    fn is_strict(&self) -> bool {
+        V::is_strict(&self.vtable, &self.options)
     }
 
     fn is_fallible(&self) -> bool {
         V::is_fallible(&self.vtable, &self.options)
     }
 
-    fn fmt_sql(&self, expression: &Expression, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt_sql(&self, expression: &dyn ExprDisplay, f: &mut Formatter<'_>) -> fmt::Result {
         V::fmt_sql(&self.vtable, &self.options, expression, f)
     }
 
@@ -223,23 +211,6 @@ impl<V: ScalarFnVTable> DynScalarFn for TypedScalarFnInstance<V> {
 
     fn validity(&self, expression: &Expression) -> VortexResult<Option<Expression>> {
         V::validity(&self.vtable, &self.options, expression)
-    }
-
-    fn stat_falsification(
-        &self,
-        expression: &Expression,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression> {
-        V::stat_falsification(&self.vtable, &self.options, expression, catalog)
-    }
-
-    fn stat_expression(
-        &self,
-        expression: &Expression,
-        stat: Stat,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression> {
-        V::stat_expression(&self.vtable, &self.options, expression, stat, catalog)
     }
 
     fn options_serialize(&self) -> VortexResult<Option<Vec<u8>>> {

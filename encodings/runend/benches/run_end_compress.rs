@@ -7,25 +7,34 @@ use std::sync::LazyLock;
 
 use divan::Bencher;
 use itertools::repeat_n;
+use mimalloc::MiMalloc;
 use vortex_array::IntoArray;
 use vortex_array::RecursiveCanonical;
 use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::dtype::IntegerPType;
-use vortex_array::session::ArraySession;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_runend::RunEnd;
 use vortex_runend::compress::runend_encode;
 use vortex_session::VortexSession;
 
+// `runend_encode` allocates its output buffers inside the timed region, so route allocation
+// through vendored mimalloc to keep glibc malloc (which varies across runner images) out of
+// the measured trace.
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() {
     divan::main();
 }
 
-static SESSION: LazyLock<VortexSession> =
-    LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+    let session = vortex_array::array_session();
+    vortex_runend::initialize(&session);
+    session
+});
 
 const BENCH_ARGS: &[(usize, usize)] = &[
     (1000, 4),

@@ -88,14 +88,13 @@ use std::fmt::Debug;
 use datafusion_common::stats::Precision as DFPrecision;
 use vortex::expr::stats::Precision;
 
-mod convert;
+pub mod convert;
 mod persistent;
 pub mod v2;
 
 #[cfg(test)]
 mod tests;
 
-pub use convert::exprs::ExpressionConvertor;
 pub use persistent::*;
 
 /// Extension trait to convert our [`Precision`] to DataFusion's
@@ -142,11 +141,11 @@ mod common_tests {
     use url::Url;
     use vortex::VortexSessionDefault;
     use vortex::array::ArrayRef;
-    use vortex::array::arrow::FromArrowArray;
     use vortex::file::WriteOptionsSessionExt;
     use vortex::io::VortexWrite;
     use vortex::io::object_store::ObjectStoreWrite;
     use vortex::session::VortexSession;
+    use vortex_arrow::FromArrowArray;
 
     use crate::VortexFormatFactory;
     use crate::VortexTableOptions;
@@ -167,12 +166,18 @@ mod common_tests {
     impl TestSessionContext {
         /// Create a new test session context with the given projection pushdown setting.
         pub fn new(projection_pushdown: bool) -> Self {
-            let store = Arc::new(InMemory::new());
             let opts = VortexTableOptions {
                 projection_pushdown,
                 ..Default::default()
             };
             let factory = Arc::new(VortexFormatFactory::new().with_options(opts));
+
+            Self::new_with_factory(factory)
+        }
+
+        /// Create a new test session context with the given Vortex format factory.
+        pub fn new_with_factory(factory: Arc<VortexFormatFactory>) -> Self {
+            let store = Arc::new(InMemory::new());
             let mut session_state_builder = SessionStateBuilder::new()
                 .with_default_features()
                 .with_table_factory(

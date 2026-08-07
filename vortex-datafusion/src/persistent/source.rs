@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use std::fmt::Formatter;
-use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Weak;
 
@@ -29,7 +28,6 @@ use datafusion_physical_plan::filter_pushdown::PushedDownPredicate;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::ObjectStore;
 use object_store::path::Path;
-use vortex::error::VortexExpect;
 use vortex::file::VORTEX_FILE_EXTENSION;
 use vortex::layout::LayoutReader;
 use vortex::metrics::DefaultMetricsRegistry;
@@ -37,6 +35,7 @@ use vortex::metrics::MetricsRegistry;
 use vortex::session::VortexSession;
 use vortex_utils::aliases::dash_map::DashMap;
 
+use super::opener::NaturalSplits;
 use super::opener::VortexOpener;
 use crate::VortexTableOptions;
 use crate::convert::exprs::DefaultExpressionConvertor;
@@ -140,6 +139,13 @@ use crate::persistent::reader::VortexReaderFactory;
 /// - when enabled, the scan can evaluate a Vortex-native projection and leave
 ///   only unsupported expressions for DataFusion.
 ///
+/// Predicate handling depends on [`VortexTableOptions::predicate_pushdown`]:
+///
+/// - when disabled, `VortexSource` still keeps the full predicate for
+///   DataFusion file pruning, but reports filters as not pushed down so
+///   DataFusion evaluates them after the scan,
+/// - when enabled, supported filters are pushed into the Vortex scan.
+///
 /// # Observability
 ///
 /// `VortexSource` owns a Vortex metrics registry for the lifetime of a physical
@@ -170,6 +176,7 @@ use crate::persistent::reader::VortexReaderFactory;
 /// [`VortexAccessPlan`]: crate::VortexAccessPlan
 /// [`FileMetadataCache`]: datafusion_execution::cache::cache_manager::FileMetadataCache
 /// [`VortexTableOptions::projection_pushdown`]: crate::VortexTableOptions::projection_pushdown
+/// [`VortexTableOptions::predicate_pushdown`]: crate::VortexTableOptions::predicate_pushdown
 /// [`VortexMetricsFinder`]: crate::metrics::VortexMetricsFinder
 #[derive(Clone)]
 pub struct VortexSource {
@@ -182,20 +189,20 @@ pub struct VortexSource {
     /// Subset of predicates that can be pushed down into Vortex scan operations.
     /// These are expressions that Vortex can efficiently evaluate during scanning.
     pub(crate) vortex_predicate: Option<PhysicalExprRef>,
-    pub(crate) batch_size: Option<usize>,
-    _unused_df_metrics: ExecutionPlanMetricsSet,
+    /// DataFusion-native metrics exposed through `DataSourceExec`.
+    df_metrics: ExecutionPlanMetricsSet,
     /// Shared layout readers, the source only lives as long as one scan.
     ///
     /// Sharing the readers allows us to only read every layout once from the file, even across partitions.
     layout_readers: Arc<DashMap<Path, Weak<dyn LayoutReader>>>,
-    /// Shared full-file natural split ranges keyed by path.
-    natural_split_ranges: Arc<DashMap<Path, Arc<[Range<u64>]>>>,
+    /// Shared full-file natural splits keyed by path.
+    natural_splits: Arc<DashMap<Path, Arc<NaturalSplits>>>,
     expression_convertor: Arc<dyn ExpressionConvertor>,
     pub(crate) vortex_reader_factory: Option<Arc<dyn VortexReaderFactory>>,
     pub(crate) ordered: bool,
     vx_metrics_registry: Arc<dyn MetricsRegistry>,
     file_metadata_cache: Option<Arc<dyn FileMetadataCache>>,
-    /// Whether to enable expression pushdown into the underlying Vortex scan.
+    /// Options controlling scan planning and execution behavior.
     options: VortexTableOptions,
 }
 
@@ -212,6 +219,7 @@ impl VortexSource {
         let full_schema = table_schema.table_schema();
         let indices = (0..full_schema.fields().len()).collect::<Vec<_>>();
         let projection = ProjectionExprs::from_indices(&indices, full_schema);
+        let expression_convertor = Arc::new(DefaultExpressionConvertor::new(session.clone()));
 
         Self {
             session,
@@ -219,11 +227,10 @@ impl VortexSource {
             projection,
             full_predicate: None,
             vortex_predicate: None,
-            batch_size: None,
-            _unused_df_metrics: Default::default(),
+            df_metrics: Default::default(),
             layout_readers: Arc::new(DashMap::default()),
-            natural_split_ranges: Arc::new(DashMap::default()),
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            natural_splits: Arc::new(DashMap::default()),
+            expression_convertor,
             vortex_reader_factory: None,
             vx_metrics_registry: Arc::new(DefaultMetricsRegistry::default()),
             file_metadata_cache: None,
@@ -239,6 +246,15 @@ impl VortexSource {
     /// projection.
     pub fn with_projection_pushdown(mut self, enabled: bool) -> Self {
         self.options.projection_pushdown = enabled;
+        self
+    }
+
+    /// Enables or disables Vortex-native predicate evaluation.
+    ///
+    /// When disabled, DataFusion evaluates filters after the scan. The source
+    /// still records the full predicate for file pruning.
+    pub fn with_predicate_pushdown(mut self, enabled: bool) -> Self {
+        self.options.predicate_pushdown = enabled;
         self
     }
 
@@ -306,16 +322,17 @@ impl VortexSource {
         self
     }
 
+    /// Returns the predicate this source is going to push down
+    pub fn predicate(&self) -> Option<&Arc<dyn PhysicalExpr>> {
+        self.vortex_predicate.as_ref()
+    }
+
     fn create_vortex_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
         base_config: &FileScanConfig,
         partition: usize,
     ) -> DFResult<VortexOpener> {
-        let batch_size = self
-            .batch_size
-            .vortex_expect("batch_size must be supplied to VortexSource");
-
         let expr_adapter_factory = base_config
             .expr_adapter_factory
             .clone()
@@ -335,11 +352,11 @@ impl VortexSource {
             file_pruning_predicate: self.full_predicate.clone(),
             expr_adapter_factory,
             table_schema: self.table_schema.clone(),
-            batch_size,
             limit: base_config.limit.map(|l| l as u64),
             metrics_registry: Arc::clone(&self.vx_metrics_registry),
+            df_metrics: self.df_metrics.clone(),
             layout_readers: Arc::clone(&self.layout_readers),
-            natural_split_ranges: Arc::clone(&self.natural_split_ranges),
+            natural_splits: Arc::clone(&self.natural_splits),
             has_output_ordering: !base_config.output_ordering.is_empty() || self.ordered,
             expression_convertor: Arc::clone(&self.expression_convertor),
             file_metadata_cache: self.file_metadata_cache.clone(),
@@ -365,10 +382,9 @@ impl FileSource for VortexSource {
         )?))
     }
 
-    fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
-        let mut source = self.clone();
-        source.batch_size = Some(batch_size);
-        Arc::new(source)
+    fn with_batch_size(&self, _batch_size: usize) -> Arc<dyn FileSource> {
+        // DataSourceExec applies BatchSplitStream after the FileSource stream.
+        Arc::new(self.clone())
     }
 
     fn filter(&self) -> Option<Arc<dyn PhysicalExpr>> {
@@ -376,7 +392,7 @@ impl FileSource for VortexSource {
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
-        &self._unused_df_metrics
+        &self.df_metrics
     }
 
     fn file_type(&self) -> &str {
@@ -446,6 +462,14 @@ impl FileSource for VortexSource {
             )),
             None => Some(conjunction(filters.clone())),
         };
+
+        if !source.options.predicate_pushdown {
+            return Ok(FilterPushdownPropagation::with_parent_pushdown_result(vec![
+                PushedDown::No;
+                filters.len()
+            ])
+            .with_updated_node(Arc::new(source) as _));
+        }
 
         let supported_filters = filters
             .into_iter()
@@ -517,8 +541,15 @@ mod tests {
     use arrow_schema::DataType;
     use arrow_schema::Field;
     use arrow_schema::Schema;
+    use datafusion_common::ScalarValue;
+    use datafusion_common::config::ConfigOptions;
     use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
     use datafusion_execution::object_store::ObjectStoreUrl;
+    use datafusion_expr::Operator;
+    use datafusion_expr::ScalarUDF;
+    use datafusion_functions::string::octet_length::OctetLengthFunc;
+    use datafusion_physical_expr::ScalarFunctionExpr;
+    use datafusion_physical_expr::expressions as df_expr;
     use datafusion_physical_expr::expressions::Column;
     use object_store::memory::InMemory;
     use vortex::VortexSessionDefault;
@@ -578,6 +609,22 @@ mod tests {
         )
     }
 
+    fn octet_length_filter(schema: &Schema) -> PhysicalExprRef {
+        let name = Arc::new(Column::new("name", 0)) as PhysicalExprRef;
+        let octet_length = Arc::new(
+            ScalarFunctionExpr::try_new(
+                Arc::new(ScalarUDF::from(OctetLengthFunc::new())),
+                vec![name],
+                schema,
+                Arc::new(ConfigOptions::new()),
+            )
+            .unwrap(),
+        ) as PhysicalExprRef;
+        let one = Arc::new(df_expr::Literal::new(ScalarValue::Int32(Some(1)))) as PhysicalExprRef;
+
+        Arc::new(df_expr::BinaryExpr::new(octet_length, Operator::Gt, one)) as PhysicalExprRef
+    }
+
     fn assert_ordered_source(inner: Arc<dyn FileSource>) -> anyhow::Result<()> {
         let source = inner
             .downcast_ref::<VortexSource>()
@@ -613,12 +660,11 @@ mod tests {
             inner: DefaultExpressionConvertor::default(),
         }) as Arc<dyn ExpressionConvertor>;
 
-        let mut source = VortexSource::new(
+        let source = VortexSource::new(
             TableSchema::from_file_schema(file_schema),
             VortexSession::default(),
         )
         .with_expression_convertor(Arc::clone(&expression_convertor));
-        source.batch_size = Some(100);
 
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
@@ -636,6 +682,45 @@ mod tests {
             &opener.expression_convertor,
             &expression_convertor
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn try_pushdown_filters_accepts_octet_length() -> anyhow::Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let source = sort_test_source(Arc::clone(&schema));
+        let filter = octet_length_filter(&schema);
+
+        let result = source.try_pushdown_filters(vec![filter], &ConfigOptions::new())?;
+
+        assert!(matches!(result.filters.as_slice(), [PushedDown::Yes]));
+        let updated_source = result
+            .updated_node
+            .ok_or_else(|| anyhow::anyhow!("expected updated VortexSource"))?
+            .downcast_ref::<VortexSource>()
+            .ok_or_else(|| anyhow::anyhow!("expected VortexSource"))?
+            .clone();
+        assert!(updated_source.vortex_predicate.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn try_pushdown_filters_respects_disabled_predicate_pushdown() -> anyhow::Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let source = sort_test_source(Arc::clone(&schema)).with_predicate_pushdown(false);
+        let filter = octet_length_filter(&schema);
+
+        let result = source.try_pushdown_filters(vec![filter], &ConfigOptions::new())?;
+
+        assert!(matches!(result.filters.as_slice(), [PushedDown::No]));
+        let updated_source = result
+            .updated_node
+            .ok_or_else(|| anyhow::anyhow!("expected updated VortexSource"))?
+            .downcast_ref::<VortexSource>()
+            .ok_or_else(|| anyhow::anyhow!("expected VortexSource"))?
+            .clone();
+        assert!(updated_source.full_predicate.is_some());
+        assert!(updated_source.vortex_predicate.is_none());
         Ok(())
     }
 }

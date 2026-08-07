@@ -100,21 +100,33 @@ impl Scalar {
     ///
     /// See [`Scalar::zero_value`] for more details about "zero" values.
     ///
-    /// For non-nullable and nested types that may need null values in their children (as of right
-    /// now, that is _only_ `FixedSizeList` and `Struct`), this function will provide null default
-    /// children.
+    /// For non-nullable nested types, this function recursively creates valid default children.
+    /// For a union specifically:
+    ///
+    /// - A nullable union defaults to an **outer null**. It has no selected variant or type ID.
+    /// - A non-nullable union selects its first variant. That selected child may itself default to
+    ///   an **inner null** when its dtype is nullable; the enclosing union remains non-null and
+    ///   retains the first variant's type ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dtype` has no default value.
     pub fn default_value(dtype: &DType) -> Self {
-        let value = ScalarValue::default_value(dtype);
+        Self::try_default_value(dtype)
+            .unwrap_or_else(|| vortex_panic!("{dtype} has no default value"))
+    }
 
-        // SAFETY: We assume that `default_value` creates a valid `ScalarValue` for the `DType`.
-        unsafe { Self::new_unchecked(dtype.clone(), value) }
+    /// Returns a valid default scalar, or [`None`] if `dtype` has no default.
+    pub(crate) fn try_default_value(dtype: &DType) -> Option<Self> {
+        let value = ScalarValue::try_default_value(dtype)?;
+        Self::try_new(dtype.clone(), value).ok()
     }
 
     /// Returns a non-null zero / identity value for the given [`DType`].
     ///
     /// # Zero Values
     ///
-    /// Here is the list of zero values for each [`DType`] (when the [`DType`] is non-nullable):
+    /// Here is the list of non-null zero values for each [`DType`], regardless of its nullability:
     ///
     /// - `Null`: Does not have a "zero" value
     /// - `Bool`: `false`
@@ -123,15 +135,24 @@ impl Scalar {
     /// - `Utf8`: `""`
     /// - `Binary`: An empty buffer
     /// - `List`: An empty list
+    /// - `Map`: An empty map
     /// - `FixedSizeList`: A list (with correct size) of zero values, which is determined by the
     ///   element [`DType`]
     /// - `Struct`: A struct where each field has a zero value, which is determined by the field
     ///   [`DType`]
+    /// - `Union`: A non-null union selecting the first variant with a non-null child zero value
     /// - `Extension`: The zero value of the storage [`DType`]
+    /// # Panics
+    ///
+    /// Panics if the dtype has no non-null zero value, such as `Null`, or if a nested dtype needed
+    /// to construct the zero value has no non-null zero value.
+    ///
+    /// Unlike [`Scalar::default_value`], this never uses either an outer or inner null for a union:
+    /// even a nullable union's zero value is non-null and contains a non-null selected child.
     pub fn zero_value(dtype: &DType) -> Self {
         let value = ScalarValue::zero_value(dtype);
 
-        // SAFETY: We assume that `zero_value` creates a valid `ScalarValue` for the `DType`.
+        // SAFETY: `zero_value` creates a valid `ScalarValue` for the `DType`.
         unsafe { Self::new_unchecked(dtype.clone(), Some(value)) }
     }
 
@@ -175,8 +196,12 @@ impl Scalar {
 
     /// Returns `true` if the [`Scalar`] has a non-null zero value.
     ///
-    /// Returns `None` if the scalar is null, otherwise returns `Some(true)` if the value is zero
-    /// and `Some(false)` otherwise.
+    /// Returns `None` if the scalar is null or its zero-ness is undefined. Otherwise, returns
+    /// `Some(true)` if the value is zero and `Some(false)` if it is not.
+    ///
+    /// A union that selects a variant other than the first returns `Some(false)`. A union selecting
+    /// its first variant delegates to that child's [`Scalar::is_zero`], so an inner null child
+    /// returns `None` and a non-null zero child returns `Some(true)`.
     pub fn is_zero(&self) -> Option<bool> {
         let value = self.value()?;
 
@@ -188,11 +213,30 @@ impl Scalar {
             DType::Utf8(_) => value.as_utf8().is_empty(),
             DType::Binary(_) => value.as_binary().is_empty(),
             DType::List(..) => value.as_list().is_empty(),
-            // TODO(connor): This seems wrong...
-            DType::FixedSizeList(_, list_size, _) => value.as_list().len() == *list_size as usize,
-            // TODO(connor): This also seems wrong...
-            DType::Struct(struct_fields, _) => value.as_list().len() == struct_fields.nfields(),
-            DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
+            DType::Map(..) => self.as_map().is_empty(),
+            // A fixed-size list is zero only if it has the expected number of elements and every
+            // element is itself a non-null zero value.1
+            DType::FixedSizeList(_, list_size, _) => {
+                let list = self.as_list();
+                list.len() == *list_size as usize
+                    && (0..list.len())
+                        .all(|i| list.element(i).is_some_and(|e| e.is_zero() == Some(true)))
+            }
+            // A struct is zero only if every one of its fields is itself a non-null zero value.
+            DType::Struct(..) => self
+                .as_struct()
+                .fields_iter()
+                .is_some_and(|mut fields| fields.all(|f| f.is_zero() == Some(true))),
+            // Only the first variant of unions can be zero. Its child determines whether the
+            // zero-ness is true, false, or undefined.
+            DType::Union(..) => {
+                let union = self.as_union();
+                if union.child_index() != Some(0) {
+                    false
+                } else {
+                    union.child().and_then(|child| child.is_zero())?
+                }
+            }
             DType::Variant(_) => self.as_variant().is_zero()?,
             DType::Extension(_) => self.as_extension().to_storage_scalar().is_zero()?,
         };
@@ -256,12 +300,20 @@ impl Scalar {
                 .elements()
                 .map(|fields| fields.into_iter().map(|f| f.approx_nbytes()).sum::<usize>())
                 .unwrap_or_default(),
+            DType::Map(..) => self
+                .as_map()
+                .entries()
+                .map(|(key, value)| key.approx_nbytes() + value.approx_nbytes())
+                .sum(),
             DType::Struct(..) => self
                 .as_struct()
                 .fields_iter()
                 .map(|fields| fields.into_iter().map(|f| f.approx_nbytes()).sum::<usize>())
                 .unwrap_or_default(),
-            DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
+            DType::Union(..) => self
+                .as_union()
+                .child()
+                .map_or(0, |value| 1 + value.approx_nbytes()),
             DType::Variant(_) => self.as_variant().value().map_or(0, Scalar::approx_nbytes),
             DType::Extension(_) => self.as_extension().to_storage_scalar().approx_nbytes(),
         }
@@ -273,7 +325,7 @@ impl Scalar {
 /// values have equal hashes.
 impl Hash for Scalar {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.dtype.as_nonnullable().hash(state);
+        self.dtype.hash_ignore_nullability(state);
         self.value.hash(state);
     }
 }
@@ -368,6 +420,19 @@ fn partial_cmp_non_null_scalar_values(
         (ScalarValue::Tuple(lhs), ScalarValue::Tuple(rhs)) => {
             partial_cmp_tuple_values(dtype, lhs, rhs)
         }
+        (ScalarValue::Union(lhs), ScalarValue::Union(rhs)) => {
+            if lhs.type_id() != rhs.type_id() {
+                return None;
+            }
+
+            let DType::Union(variants, _) = dtype else {
+                return None;
+            };
+            let child_index = variants.tag_to_child_index(lhs.type_id())?;
+            let child_dtype = variants.variant_by_index(child_index)?;
+
+            partial_cmp_scalar_values(&child_dtype, lhs.child_value(), rhs.child_value())
+        }
         // Variant values can have a different dtype in each row, so it doesn't make sense to
         // compare them.
         (ScalarValue::Variant(_), ScalarValue::Variant(_)) => None,
@@ -386,6 +451,7 @@ fn partial_cmp_tuple_values(
             partial_cmp_list_values(element_dtype, lhs, rhs)
         }
         DType::Struct(fields, _) => partial_cmp_struct_values(fields, lhs, rhs),
+        DType::Map(..) => None,
         DType::Extension(ext_dtype) => {
             partial_cmp_tuple_values(ext_dtype.storage_dtype(), lhs, rhs)
         }
@@ -427,4 +493,158 @@ fn partial_cmp_struct_values(
     }
 
     Some(Ordering::Equal)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rstest::rstest;
+
+    use crate::dtype::DType;
+    use crate::dtype::Nullability;
+    use crate::dtype::PType;
+    use crate::dtype::StructFields;
+    use crate::scalar::Scalar;
+
+    fn i32_scalar(value: i32) -> Scalar {
+        Scalar::primitive::<i32>(value, Nullability::NonNullable)
+    }
+
+    fn nullable_i32(value: Option<i32>) -> Scalar {
+        match value {
+            Some(value) => Scalar::primitive::<i32>(value, Nullability::Nullable),
+            None => Scalar::null(DType::Primitive(PType::I32, Nullability::Nullable)),
+        }
+    }
+
+    fn ab_struct_dtype(nullability: Nullability) -> DType {
+        DType::Struct(
+            StructFields::new(
+                ["a", "b"].into(),
+                vec![
+                    DType::Primitive(PType::I32, Nullability::NonNullable),
+                    DType::Utf8(Nullability::NonNullable),
+                ],
+            ),
+            nullability,
+        )
+    }
+
+    #[rstest]
+    // A fixed-size list of all-zero elements is itself zero.
+    #[case(vec![0, 0], Some(true))]
+    #[case(vec![0], Some(true))]
+    // A single non-zero element makes the whole list non-zero. On `develop` these incorrectly
+    // returned `Some(true)` because only the element count was checked.
+    #[case(vec![0, 5], Some(false))]
+    #[case(vec![5, 0], Some(false))]
+    #[case(vec![1, 2], Some(false))]
+    fn fixed_size_list_is_zero(#[case] values: Vec<i32>, #[case] expected: Option<bool>) {
+        let element_dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let children: Vec<Scalar> = values.into_iter().map(i32_scalar).collect();
+        let scalar = Scalar::fixed_size_list(element_dtype, children, Nullability::NonNullable);
+        assert_eq!(scalar.is_zero(), expected);
+    }
+
+    #[test]
+    fn null_fixed_size_list_is_zero_is_none() {
+        let element_dtype = Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable));
+        let scalar = Scalar::null(DType::FixedSizeList(
+            element_dtype,
+            2,
+            Nullability::Nullable,
+        ));
+        assert_eq!(scalar.is_zero(), None);
+    }
+
+    #[test]
+    fn fixed_size_list_with_null_element_is_not_zero() {
+        // A non-null fixed-size list containing a null element is not a zero value. On `develop`
+        // this incorrectly returned `Some(true)`.
+        let element_dtype = DType::Primitive(PType::I32, Nullability::Nullable);
+        let children = vec![nullable_i32(Some(0)), nullable_i32(None)];
+        let scalar = Scalar::fixed_size_list(element_dtype, children, Nullability::NonNullable);
+        assert_eq!(scalar.is_zero(), Some(false));
+    }
+
+    #[test]
+    fn struct_with_all_zero_fields_is_zero() {
+        let scalar = Scalar::struct_(
+            ab_struct_dtype(Nullability::NonNullable),
+            vec![i32_scalar(0), Scalar::utf8("", Nullability::NonNullable)],
+        );
+        assert_eq!(scalar.is_zero(), Some(true));
+    }
+
+    #[rstest]
+    // A non-zero primitive field, a non-empty string field, or both, make the struct non-zero. On
+    // `develop` all of these incorrectly returned `Some(true)`.
+    #[case(5, "")]
+    #[case(0, "x")]
+    #[case(7, "y")]
+    fn struct_with_non_zero_field_is_not_zero(#[case] a: i32, #[case] b: &str) {
+        let scalar = Scalar::struct_(
+            ab_struct_dtype(Nullability::NonNullable),
+            vec![i32_scalar(a), Scalar::utf8(b, Nullability::NonNullable)],
+        );
+        assert_eq!(scalar.is_zero(), Some(false));
+    }
+
+    #[test]
+    fn null_struct_is_zero_is_none() {
+        let scalar = Scalar::null(ab_struct_dtype(Nullability::Nullable));
+        assert_eq!(scalar.is_zero(), None);
+    }
+
+    #[test]
+    fn struct_with_null_field_is_not_zero() {
+        // A non-null struct with a null field is not a zero value. On `develop` this incorrectly
+        // returned `Some(true)`.
+        let dtype = DType::Struct(
+            StructFields::new(
+                ["a", "b"].into(),
+                vec![
+                    DType::Primitive(PType::I32, Nullability::Nullable),
+                    DType::Primitive(PType::I32, Nullability::Nullable),
+                ],
+            ),
+            Nullability::NonNullable,
+        );
+        let scalar = Scalar::struct_(dtype, vec![nullable_i32(Some(0)), nullable_i32(None)]);
+        assert_eq!(scalar.is_zero(), Some(false));
+    }
+
+    #[test]
+    fn nested_struct_of_fixed_size_list_recurses() {
+        // Zero-checking must recurse through both structs and fixed-size lists. On `develop` the
+        // non-zero case incorrectly returned `Some(true)`.
+        let element_dtype = Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable));
+        let fsl_dtype =
+            DType::FixedSizeList(Arc::clone(&element_dtype), 2, Nullability::NonNullable);
+        let struct_dtype = DType::Struct(
+            StructFields::new(["fsl"].into(), vec![fsl_dtype]),
+            Nullability::NonNullable,
+        );
+
+        let all_zero = Scalar::struct_(
+            struct_dtype.clone(),
+            vec![Scalar::fixed_size_list(
+                Arc::clone(&element_dtype),
+                vec![i32_scalar(0), i32_scalar(0)],
+                Nullability::NonNullable,
+            )],
+        );
+        assert_eq!(all_zero.is_zero(), Some(true));
+
+        let with_non_zero = Scalar::struct_(
+            struct_dtype,
+            vec![Scalar::fixed_size_list(
+                element_dtype,
+                vec![i32_scalar(0), i32_scalar(9)],
+                Nullability::NonNullable,
+            )],
+        );
+        assert_eq!(with_non_zero.is_zero(), Some(false));
+    }
 }

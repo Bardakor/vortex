@@ -12,6 +12,7 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::NativeDType;
 use vortex_array::dtype::NativePType;
 use vortex_array::dtype::Nullability;
+use vortex_array::scalar::PValue;
 use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::fns::between::BetweenOptions;
 use vortex_array::scalar_fn::fns::between::BetweenReduce;
@@ -64,7 +65,7 @@ fn between_impl<T: NativePType + ALPFloat>(
 ) -> VortexResult<ArrayRef>
 where
     Scalar: From<T::ALPInt>,
-    <T as ALPFloat>::ALPInt: NativeDType + Debug,
+    <T as ALPFloat>::ALPInt: NativeDType + NativePType + Into<PValue> + Debug,
 {
     let exponents = array.exponents();
 
@@ -99,7 +100,7 @@ where
     )
 }
 
-fn encode_lower_bound<T: ALPFloat>(
+fn encode_lower_bound<T: ALPFloat + NativePType>(
     lower: T,
     exponents: Exponents,
     strict: StrictComparison,
@@ -116,7 +117,7 @@ fn encode_lower_bound<T: ALPFloat>(
     )
 }
 
-fn encode_upper_bound<T: ALPFloat>(
+fn encode_upper_bound<T: ALPFloat + NativePType>(
     upper: T,
     exponents: Exponents,
     strict: StrictComparison,
@@ -135,8 +136,9 @@ fn encode_upper_bound<T: ALPFloat>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::ConstantArray;
     use vortex_array::arrays::PrimitiveArray;
@@ -145,11 +147,18 @@ mod tests {
     use vortex_array::scalar::Scalar;
     use vortex_array::scalar_fn::fns::between::BetweenOptions;
     use vortex_array::scalar_fn::fns::between::StrictComparison;
+    use vortex_session::VortexSession;
 
     use crate::ALPArray;
     use crate::alp::array::ALPArrayExt;
     use crate::alp::compute::between::between_impl;
     use crate::alp_encode;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     fn assert_between(
         arr: &ALPArray,
@@ -163,7 +172,8 @@ mod tests {
         assert_arrays_eq!(
             res,
             ConstantArray::new(Scalar::bool(expected, res.dtype().nullability()), arr.len())
-                .into_array()
+                .into_array(),
+            &mut SESSION.create_execution_ctx()
         );
     }
 
@@ -171,12 +181,8 @@ mod tests {
     fn comparison_range() {
         let value = 0.0605_f32;
         let array = PrimitiveArray::from_iter([value; 1]);
-        let encoded = alp_encode(
-            array.as_view(),
-            None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
-        )
-        .unwrap();
+        let encoded =
+            alp_encode(array.as_view(), None, &mut SESSION.create_execution_ctx()).unwrap();
         assert!(encoded.patches().is_none());
 
         assert_between(
@@ -237,7 +243,7 @@ mod tests {
 
     #[test]
     fn non_finite_bounds_use_total_order() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let array = PrimitiveArray::from_iter([1.234f32; 10]);
         let encoded = alp_encode(array.as_view(), None, &mut ctx).unwrap();
         assert!(encoded.patches().is_none());

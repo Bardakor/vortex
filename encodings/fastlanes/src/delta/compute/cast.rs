@@ -12,6 +12,7 @@ use vortex_error::VortexResult;
 
 use crate::delta::Delta;
 use crate::delta::array::DeltaArrayExt;
+use crate::delta::array::DeltaArraySlotsExt;
 
 impl CastReduce for Delta {
     fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
@@ -51,14 +52,16 @@ mod tests {
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
-    use vortex_array::session::ArraySession;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
     use vortex_session::VortexSession;
 
     use crate::Delta;
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[test]
     fn test_cast_delta_unsigned_widening_wraps() {
@@ -77,7 +80,11 @@ mod tests {
             .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
             .unwrap();
 
-        assert_arrays_eq!(casted, PrimitiveArray::from_iter([200u32, 50, 75, 10, 255]));
+        assert_arrays_eq!(
+            casted,
+            PrimitiveArray::from_iter([200u32, 50, 75, 10, 255]),
+            &mut SESSION.create_execution_ctx()
+        );
     }
 
     #[test]
@@ -97,7 +104,8 @@ mod tests {
 
         assert_arrays_eq!(
             casted,
-            PrimitiveArray::from_iter([10f32, 20.0, 30.0, 40.0, 50.0])
+            PrimitiveArray::from_iter([10f32, 20.0, 30.0, 40.0, 50.0]),
+            &mut SESSION.create_execution_ctx()
         );
     }
 
@@ -117,7 +125,8 @@ mod tests {
         );
         assert_arrays_eq!(
             casted,
-            PrimitiveArray::from_option_iter([Some(10u32), Some(20), Some(5), Some(30), Some(15)])
+            PrimitiveArray::from_option_iter([Some(10u32), Some(20), Some(5), Some(30), Some(15)]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -136,7 +145,8 @@ mod tests {
 
         assert_arrays_eq!(
             casted,
-            PrimitiveArray::from_option_iter([Some(10u32), None, Some(30), Some(15), None])
+            PrimitiveArray::from_option_iter([Some(10u32), None, Some(30), Some(15), None]),
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }
@@ -179,7 +189,11 @@ mod tests {
         );
 
         // Verify by decoding
-        assert_arrays_eq!(casted, PrimitiveArray::from_iter([10u32, 20, 30, 40, 50]));
+        assert_arrays_eq!(
+            casted,
+            PrimitiveArray::from_iter([10u32, 20, 30, 40, 50]),
+            &mut SESSION.create_execution_ctx()
+        );
     }
 
     #[test]
@@ -231,6 +245,9 @@ mod tests {
         let delta_array =
             Delta::try_from_primitive_array(&primitive, &mut SESSION.create_execution_ctx())
                 .unwrap();
-        test_cast_conformance(&delta_array.into_array());
+        test_cast_conformance(
+            &delta_array.into_array(),
+            &mut SESSION.create_execution_ctx(),
+        );
     }
 }

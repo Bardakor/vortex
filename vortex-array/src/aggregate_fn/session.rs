@@ -4,12 +4,14 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use vortex_session::Ref;
+use vortex_session::ArcSwapMap;
 use vortex_session::SessionExt;
+use vortex_session::SessionGuard;
 use vortex_session::SessionVar;
 
 use crate::aggregate_fn::AggregateFnId;
 use crate::aggregate_fn::AggregateFnPluginRef;
+use crate::aggregate_fn::AggregateFnRef;
 use crate::aggregate_fn::AggregateFnVTable;
 use crate::aggregate_fn::fns::all_nan::AllNan;
 use crate::aggregate_fn::fns::all_non_distinct::AllNonDistinct;
@@ -34,7 +36,6 @@ use crate::aggregate_fn::fns::sum::Sum;
 use crate::aggregate_fn::fns::uncompressed_size_in_bytes::UncompressedSizeInBytes;
 use crate::aggregate_fn::kernels::DynAggregateKernel;
 use crate::aggregate_fn::kernels::DynGroupedAggregateKernel;
-use crate::arc_swap_map::ArcSwapMap;
 use crate::array::ArrayId;
 use crate::array::VTable;
 use crate::arrays::Chunked;
@@ -43,17 +44,18 @@ use crate::arrays::chunked::compute::aggregate::ChunkedArrayAggregate;
 use crate::arrays::dict::compute::is_constant::DictIsConstantKernel;
 use crate::arrays::dict::compute::is_sorted::DictIsSortedKernel;
 use crate::arrays::dict::compute::min_max::DictMinMaxKernel;
+use crate::dtype::DType;
 
 /// Session state for aggregate functions and encoding-specific aggregate kernels.
 ///
 /// The default session registers the built-in aggregate functions and kernels. Additional
 /// aggregate functions and kernels may be registered by extensions when they are added to a
 /// [`VortexSession`](vortex_session::VortexSession).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AggregateFnSession {
-    registry: ArcSwapMap<AggregateFnId, AggregateFnPluginRef>,
+    registry: AggregateFnRegistry,
 
-    kernels: ArcSwapMap<AggregateKernelKey, &'static dyn DynAggregateKernel>,
+    kernels: AggregateKernelRegistry,
     grouped_kernels: ArcSwapMap<GroupedAggregateKernelKey, &'static dyn DynGroupedAggregateKernel>,
 }
 
@@ -89,6 +91,11 @@ impl GroupedAggregateKernelKey {
         }
     }
 }
+
+/// Registry of aggregate function plugins, keyed by aggregate function id.
+type AggregateFnRegistry = ArcSwapMap<AggregateFnId, AggregateFnPluginRef>;
+/// Registry of aggregate kernels, keyed by encoding and optional aggregate function.
+type AggregateKernelRegistry = ArcSwapMap<AggregateKernelKey, &'static dyn DynAggregateKernel>;
 
 impl Default for AggregateFnSession {
     fn default() -> Self {
@@ -142,6 +149,22 @@ impl AggregateFnSession {
         let id = vtable.id();
         let pluginref = Arc::new(vtable) as AggregateFnPluginRef;
         self.registry.insert(id, pluginref);
+    }
+
+    /// The default per-chunk zone statistics for a column of `input_dtype`, collected from every
+    /// registered aggregate's `zone_stat_default`.
+    ///
+    /// Each call scans the whole plugin registry, so this is intended to be called once per
+    /// column when a zoned writer is opened, not per chunk or per row.
+    pub fn zone_stat_defaults(&self, input_dtype: &DType) -> Vec<AggregateFnRef> {
+        self.registry.read(|registry| {
+            let mut fns: Vec<AggregateFnRef> = registry
+                .values()
+                .filter_map(|plugin| plugin.zone_stat_default(input_dtype))
+                .collect();
+            fns.sort_by_key(|f| f.id());
+            fns
+        })
     }
 
     /// Returns the aggregate kernel registered for `array_id` and `agg_fn_id`, if any.
@@ -240,7 +263,7 @@ impl AggregateFnSession {
 /// Extension trait for accessing aggregate function session data.
 pub trait AggregateFnSessionExt: SessionExt {
     /// Returns the aggregate function session data.
-    fn aggregate_fns(&self) -> Ref<'_, AggregateFnSession> {
+    fn aggregate_fns(&self) -> SessionGuard<'_, AggregateFnSession> {
         self.get::<AggregateFnSession>()
     }
 }
@@ -251,6 +274,7 @@ mod tests {
     use std::any::Any;
 
     use vortex_error::VortexResult;
+    use vortex_session::registry::CachedId;
 
     use super::*;
     use crate::ArrayRef;
@@ -294,7 +318,8 @@ mod tests {
     #[test]
     fn grouped_kernel_lookup_prefers_exact_then_value_then_group_ids() {
         let session = AggregateFnSession::default();
-        let aggregate_id = AggregateFnId::new("test.grouped_lookup");
+        static AGGREGATE_ID: CachedId = CachedId::new("test.grouped_lookup");
+        let aggregate_id = *AGGREGATE_ID;
         let values_id = Primitive.id();
         let group_ids_id = Constant.id();
 

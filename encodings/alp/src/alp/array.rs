@@ -25,6 +25,7 @@ use vortex_array::array_slots;
 use vortex_array::arrays::Primitive;
 use vortex_array::buffer::BufferHandle;
 use vortex_array::dtype::DType;
+use vortex_array::dtype::NativePType;
 use vortex_array::dtype::PType;
 use vortex_array::patches::PatchSlotIndices;
 use vortex_array::patches::Patches;
@@ -48,7 +49,6 @@ use vortex_session::registry::CachedId;
 use crate::ALPFloat;
 use crate::alp::Exponents;
 use crate::alp::decompress::execute_decompress;
-use crate::alp::rules::PARENT_KERNELS;
 use crate::alp::rules::RULES;
 
 /// A [`ALP`]-encoded Vortex array.
@@ -101,6 +101,14 @@ impl VTable for ALP {
 
     fn buffer_name(_array: ArrayView<'_, Self>, _idx: usize) -> Option<String> {
         None
+    }
+
+    fn with_buffers(
+        &self,
+        array: ArrayView<'_, Self>,
+        buffers: &[BufferHandle],
+    ) -> VortexResult<ArrayParts<Self>> {
+        vortex_array::vtable::with_empty_buffers(self, array, buffers)
     }
 
     fn serialize(
@@ -188,26 +196,21 @@ impl VTable for ALP {
     ) -> VortexResult<Option<ArrayRef>> {
         RULES.evaluate(array, parent, child_idx)
     }
-
-    fn execute_parent(
-        array: ArrayView<'_, Self>,
-        parent: &ArrayRef,
-        child_idx: usize,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_KERNELS.execute(array, parent, child_idx, ctx)
-    }
 }
 
 #[array_slots(ALP)]
 pub struct ALPSlots {
     /// The ALP-encoded values array.
+    #[slot(0)]
     pub encoded: ArrayRef,
     /// The indices of exception values that could not be ALP-encoded.
+    #[slot(1)]
     pub patch_indices: Option<ArrayRef>,
     /// The exception values that could not be ALP-encoded.
+    #[slot(2)]
     pub patch_values: Option<ArrayRef>,
     /// Chunk offsets for the patch indices/values.
+    #[slot(3)]
     pub patch_chunk_offsets: Option<ArrayRef>,
 }
 
@@ -311,7 +314,10 @@ impl ALPData {
     }
 
     /// Validate that any patches provided are valid for the ALPArray.
-    fn validate_patches<T: ALPFloat>(patches: &Patches, encoded: &ArrayRef) -> VortexResult<()> {
+    fn validate_patches<T: ALPFloat + NativePType>(
+        patches: &Patches,
+        encoded: &ArrayRef,
+    ) -> VortexResult<()> {
         vortex_ensure!(
             patches.array_len() == encoded.len(),
             "patches array_len != encoded len: {} != {}",
@@ -481,11 +487,9 @@ mod tests {
     use rstest::rstest;
     use vortex_array::Canonical;
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
-    use vortex_array::session::ArraySession;
     use vortex_error::VortexExpect;
     use vortex_session::VortexSession;
 
@@ -493,8 +497,11 @@ mod tests {
     use crate::alp_encode;
     use crate::decompress_into_array;
 
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[rstest]
     #[case(0)]
@@ -519,10 +526,9 @@ mod tests {
                 .unwrap()
         };
         // Compare against the traditional array-based decompress path
-        let expected =
-            decompress_into_array(encoded, &mut LEGACY_SESSION.create_execution_ctx()).unwrap();
+        let expected = decompress_into_array(encoded, &mut SESSION.create_execution_ctx()).unwrap();
 
-        assert_arrays_eq!(result_canonical.into_array(), expected);
+        assert_arrays_eq!(result_canonical.into_array(), expected, &mut ctx);
     }
 
     #[rstest]
@@ -537,26 +543,19 @@ mod tests {
     #[case(2049)]
     fn test_execute_f64(#[case] size: usize) {
         let values = PrimitiveArray::from_iter((0..size).map(|i| i as f64));
-        let encoded = alp_encode(
-            values.as_view(),
-            None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
-        )
-        .unwrap();
+        let encoded =
+            alp_encode(values.as_view(), None, &mut SESSION.create_execution_ctx()).unwrap();
 
-        let result_canonical = {
-            let mut ctx = SESSION.create_execution_ctx();
-            encoded
-                .clone()
-                .into_array()
-                .execute::<Canonical>(&mut ctx)
-                .unwrap()
-        };
+        let mut ctx = SESSION.create_execution_ctx();
+        let result_canonical = encoded
+            .clone()
+            .into_array()
+            .execute::<Canonical>(&mut ctx)
+            .unwrap();
         // Compare against the traditional array-based decompress path
-        let expected =
-            decompress_into_array(encoded, &mut LEGACY_SESSION.create_execution_ctx()).unwrap();
+        let expected = decompress_into_array(encoded, &mut SESSION.create_execution_ctx()).unwrap();
 
-        assert_arrays_eq!(result_canonical.into_array(), expected);
+        assert_arrays_eq!(result_canonical.into_array(), expected, &mut ctx);
     }
 
     #[rstest]
@@ -576,27 +575,20 @@ mod tests {
             .collect();
 
         let array = PrimitiveArray::from_iter(values);
-        let encoded = alp_encode(
-            array.as_view(),
-            None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
-        )
-        .unwrap();
+        let encoded =
+            alp_encode(array.as_view(), None, &mut SESSION.create_execution_ctx()).unwrap();
         assert!(encoded.patches().unwrap().array_len() > 0);
 
-        let result_canonical = {
-            let mut ctx = SESSION.create_execution_ctx();
-            encoded
-                .clone()
-                .into_array()
-                .execute::<Canonical>(&mut ctx)
-                .unwrap()
-        };
+        let mut ctx = SESSION.create_execution_ctx();
+        let result_canonical = encoded
+            .clone()
+            .into_array()
+            .execute::<Canonical>(&mut ctx)
+            .unwrap();
         // Compare against the traditional array-based decompress path
-        let expected =
-            decompress_into_array(encoded, &mut LEGACY_SESSION.create_execution_ctx()).unwrap();
+        let expected = decompress_into_array(encoded, &mut SESSION.create_execution_ctx()).unwrap();
 
-        assert_arrays_eq!(result_canonical.into_array(), expected);
+        assert_arrays_eq!(result_canonical.into_array(), expected, &mut ctx);
     }
 
     #[rstest]
@@ -615,26 +607,19 @@ mod tests {
             .collect();
 
         let array = PrimitiveArray::from_option_iter(values);
-        let encoded = alp_encode(
-            array.as_view(),
-            None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
-        )
-        .unwrap();
+        let encoded =
+            alp_encode(array.as_view(), None, &mut SESSION.create_execution_ctx()).unwrap();
 
-        let result_canonical = {
-            let mut ctx = SESSION.create_execution_ctx();
-            encoded
-                .clone()
-                .into_array()
-                .execute::<Canonical>(&mut ctx)
-                .unwrap()
-        };
+        let mut ctx = SESSION.create_execution_ctx();
+        let result_canonical = encoded
+            .clone()
+            .into_array()
+            .execute::<Canonical>(&mut ctx)
+            .unwrap();
         // Compare against the traditional array-based decompress path
-        let expected =
-            decompress_into_array(encoded, &mut LEGACY_SESSION.create_execution_ctx()).unwrap();
+        let expected = decompress_into_array(encoded, &mut SESSION.create_execution_ctx()).unwrap();
 
-        assert_arrays_eq!(result_canonical.into_array(), expected);
+        assert_arrays_eq!(result_canonical.into_array(), expected, &mut ctx);
     }
 
     #[rstest]
@@ -655,27 +640,20 @@ mod tests {
             .collect();
 
         let array = PrimitiveArray::from_option_iter(values);
-        let encoded = alp_encode(
-            array.as_view(),
-            None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
-        )
-        .unwrap();
+        let encoded =
+            alp_encode(array.as_view(), None, &mut SESSION.create_execution_ctx()).unwrap();
         assert!(encoded.patches().unwrap().array_len() > 0);
 
-        let result_canonical = {
-            let mut ctx = SESSION.create_execution_ctx();
-            encoded
-                .clone()
-                .into_array()
-                .execute::<Canonical>(&mut ctx)
-                .unwrap()
-        };
+        let mut ctx = SESSION.create_execution_ctx();
+        let result_canonical = encoded
+            .clone()
+            .into_array()
+            .execute::<Canonical>(&mut ctx)
+            .unwrap();
         // Compare against the traditional array-based decompress path
-        let expected =
-            decompress_into_array(encoded, &mut LEGACY_SESSION.create_execution_ctx()).unwrap();
+        let expected = decompress_into_array(encoded, &mut SESSION.create_execution_ctx()).unwrap();
 
-        assert_arrays_eq!(result_canonical.into_array(), expected);
+        assert_arrays_eq!(result_canonical.into_array(), expected, &mut ctx);
     }
 
     #[rstest]
@@ -732,7 +710,7 @@ mod tests {
     #[case(1000, 200)]
     #[case(2048, 512)]
     fn test_sliced_to_primitive(#[case] size: usize, #[case] slice_start: usize) {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let values: Vec<Option<f64>> = (0..size)
             .map(|i| {
                 if i % 5 == 0 {
@@ -796,7 +774,7 @@ mod tests {
         let normally_encoded = alp_encode(
             original.as_view(),
             None,
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut SESSION.create_execution_ctx(),
         )
         .unwrap();
         assert!(
@@ -830,7 +808,7 @@ mod tests {
         // The legacy decompress_into_array path should work correctly.
         let result_legacy = decompress_into_array(
             alp_without_chunk_offsets.clone(),
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut SESSION.create_execution_ctx(),
         )
         .unwrap();
         let legacy_slice = result_legacy.as_slice::<f64>();

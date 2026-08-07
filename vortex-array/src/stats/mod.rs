@@ -11,6 +11,7 @@ pub use expr::all_nan;
 pub use expr::all_non_nan;
 pub use expr::all_non_null;
 pub use expr::all_null;
+pub use expr::bound;
 pub use expr::min_max;
 pub use expr::nan_count;
 pub use expr::null_count;
@@ -19,9 +20,10 @@ pub use expr::sum;
 pub use stats_set::*;
 
 mod array;
+pub mod bind;
 pub mod expr;
 pub mod flatbuffers;
-pub(crate) mod rewrite;
+pub mod rewrite;
 pub mod session;
 mod stats_set;
 

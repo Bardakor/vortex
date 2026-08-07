@@ -13,6 +13,9 @@ repository = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true
 
@@ -52,11 +55,6 @@ required-features = ["_test-harness"]
 
 [[bench]]
 name = "compute_between"
-harness = false
-required-features = ["_test-harness"]
-
-[[bench]]
-name = "bit_transpose"
 harness = false
 required-features = ["_test-harness"]
 

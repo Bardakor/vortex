@@ -12,6 +12,7 @@ use vortex_error::VortexResult;
 
 use crate::rle::RLE;
 use crate::rle::RLEArrayExt;
+use crate::rle::RLEArraySlotsExt;
 
 impl CastReduce for RLE {
     fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
@@ -49,7 +50,6 @@ mod tests {
     use vortex_array::Canonical;
     use vortex_array::ExecutionCtx;
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
@@ -58,7 +58,6 @@ mod tests {
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
-    use vortex_array::session::ArraySession;
     use vortex_array::validity::Validity;
     use vortex_buffer::Buffer;
     use vortex_session::VortexSession;
@@ -66,8 +65,11 @@ mod tests {
     use crate::RLEData;
     use crate::rle::RLEArray;
 
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     fn rle(primitive: &PrimitiveArray, ctx: &mut ExecutionCtx) -> RLEArray {
         RLEData::encode(primitive.as_view(), ctx).unwrap()
@@ -86,7 +88,11 @@ mod tests {
             .into_array()
             .cast(DType::Primitive(PType::U16, Nullability::NonNullable))
             .unwrap();
-        assert_arrays_eq!(casted, PrimitiveArray::from_iter([10u16, 20, 30, 40, 50]));
+        assert_arrays_eq!(
+            casted,
+            PrimitiveArray::from_iter([10u16, 20, 30, 40, 50]),
+            &mut ctx
+        );
     }
 
     #[test]
@@ -155,8 +161,8 @@ mod tests {
         )
     )]
     fn test_cast_rle_conformance(#[case] primitive: PrimitiveArray) {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let rle_array = rle(&primitive, &mut ctx);
-        test_cast_conformance(&rle_array.into_array());
+        test_cast_conformance(&rle_array.into_array(), &mut ctx);
     }
 }

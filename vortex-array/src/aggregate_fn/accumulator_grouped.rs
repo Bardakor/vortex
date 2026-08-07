@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use num_traits::ToPrimitive;
 use vortex_buffer::Buffer;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
+use vortex_mask::Mask;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -16,18 +19,167 @@ use crate::aggregate_fn::AggregateFnVTable;
 use crate::aggregate_fn::DynAccumulator;
 use crate::aggregate_fn::session::AggregateFnSessionExt;
 use crate::array::ArrayId;
+use crate::arrays::FixedSizeListArray;
+use crate::arrays::ListViewArray;
 use crate::arrays::PrimitiveArray;
+use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
+use crate::arrays::fixed_size_list::FixedSizeListArraySlotsExt;
+use crate::arrays::listview::ListViewArraySlotsExt;
 use crate::builders::builder_with_capacity;
+use crate::builtins::ArrayBuiltins;
 use crate::columnar::AnyColumnar;
 use crate::dtype::DType;
 use crate::dtype::Nullability;
 use crate::dtype::PType;
 use crate::executor::max_iterations;
+use crate::match_each_integer_ptype;
 use crate::scalar::Scalar;
 use crate::validity::Validity;
 
 /// Reference-counted type-erased grouped accumulator.
 pub type GroupedAccumulatorRef = Box<dyn DynGroupedAccumulator>;
+
+/// A canonical list representation used to adapt list-shaped groups to dense group IDs.
+pub enum GroupedArray {
+    /// Groups represented as a list-view array with per-group offsets and sizes.
+    ListView(ListViewArray),
+    /// Groups represented as a fixed-size list array.
+    FixedSizeList(FixedSizeListArray),
+}
+
+impl From<ListViewArray> for GroupedArray {
+    fn from(groups: ListViewArray) -> Self {
+        Self::ListView(groups)
+    }
+}
+
+impl From<FixedSizeListArray> for GroupedArray {
+    fn from(groups: FixedSizeListArray) -> Self {
+        Self::FixedSizeList(groups)
+    }
+}
+
+impl GroupedArray {
+    /// Return the inner element array shared by all groups.
+    pub fn elements(&self) -> &ArrayRef {
+        match self {
+            Self::ListView(groups) => groups.elements(),
+            Self::FixedSizeList(groups) => groups.elements(),
+        }
+    }
+
+    /// Return the physical element ranges for each group.
+    pub fn group_ranges(&self, ctx: &mut ExecutionCtx) -> VortexResult<GroupRanges> {
+        match self {
+            Self::ListView(groups) => list_view_group_ranges(groups, ctx),
+            Self::FixedSizeList(groups) => Ok(fixed_size_list_group_ranges(groups)),
+        }
+    }
+
+    /// Return the per-group validity mask.
+    pub fn group_validity(&self, ctx: &mut ExecutionCtx) -> VortexResult<Mask> {
+        match self {
+            Self::ListView(groups) => groups.validity()?.execute_mask(groups.len(), ctx),
+            Self::FixedSizeList(groups) => groups.validity()?.execute_mask(groups.len(), ctx),
+        }
+    }
+
+    /// Return the number of groups.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::ListView(groups) => groups.len(),
+            Self::FixedSizeList(groups) => groups.len(),
+        }
+    }
+
+    /// Return whether there are no groups.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Convert list-shaped groups into a values array and parallel dense group IDs.
+    ///
+    /// Null groups contribute no values. Contiguous, all-valid groups reuse the original element
+    /// array; arbitrary list views are gathered into group order.
+    pub fn dense_input(&self, ctx: &mut ExecutionCtx) -> VortexResult<(ArrayRef, GroupIds)> {
+        let num_groups = self.len();
+        validate_num_groups(num_groups)?;
+        let ranges = self.group_ranges(ctx)?;
+        let validity = self.group_validity(ctx)?;
+        let mut rows = Vec::new();
+        let mut ids = Vec::new();
+        let mut identity = true;
+
+        for (group, ((offset, size), valid)) in ranges.iter().zip(validity.iter()).enumerate() {
+            if !valid {
+                identity = false;
+                continue;
+            }
+            let group = u32::try_from(group)?;
+            for row in offset..offset + size {
+                identity &= row == rows.len();
+                rows.push(u64::try_from(row)?);
+                ids.push(group);
+            }
+        }
+
+        identity &= rows.len() == self.elements().len();
+        let values = if identity {
+            self.elements().clone()
+        } else {
+            self.elements()
+                .clone()
+                .take(Buffer::from_iter(rows).into_array())?
+        };
+        Ok((values, GroupIds::from_iter(ids, num_groups)?))
+    }
+}
+
+/// The physical element ranges of a canonical grouped list array.
+pub enum GroupRanges {
+    /// Explicit ranges extracted from a list-view array.
+    ListView {
+        /// The `(offset, size)` ranges.
+        ranges: Vec<(usize, usize)>,
+    },
+    /// Uniform ranges derived from a fixed-size list array.
+    FixedSizeList {
+        /// The number of groups.
+        len: usize,
+        /// The number of elements in each group.
+        size: usize,
+    },
+}
+
+impl GroupRanges {
+    /// Return the number of groups described by these ranges.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::ListView { ranges } => ranges.len(),
+            Self::FixedSizeList { len, .. } => *len,
+        }
+    }
+
+    /// Return whether no groups are described.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn range(&self, index: usize) -> (usize, usize) {
+        match self {
+            Self::ListView { ranges } => ranges[index],
+            Self::FixedSizeList { len, size } => {
+                assert!(index < *len, "group range index out of bounds");
+                (index * *size, *size)
+            }
+        }
+    }
+
+    /// Iterate over `(offset, size)` ranges.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        (0..self.len()).map(|index| self.range(index))
+    }
+}
 
 /// Encoded group ids parallel to a grouped aggregate input batch.
 ///
@@ -253,6 +405,37 @@ fn validate_group_ids(group_ids: &[u32], num_groups: usize) -> VortexResult<()> 
         );
     }
     Ok(())
+}
+
+fn list_view_group_ranges(
+    groups: &ListViewArray,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<GroupRanges> {
+    let offsets = groups.offsets();
+    let sizes = groups.sizes().cast(offsets.dtype().clone())?;
+    let ranges = match_each_integer_ptype!(offsets.dtype().as_ptype(), |O| {
+        let offsets = offsets.clone().execute::<Buffer<O>>(ctx)?;
+        let sizes = sizes.execute::<Buffer<O>>(ctx)?;
+        offsets
+            .as_ref()
+            .iter()
+            .zip(sizes.as_ref().iter())
+            .map(|(offset, size)| {
+                (
+                    offset.to_usize().vortex_expect("Offset value is not usize"),
+                    size.to_usize().vortex_expect("Size value is not usize"),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(GroupRanges::ListView { ranges })
+}
+
+fn fixed_size_list_group_ranges(groups: &FixedSizeListArray) -> GroupRanges {
+    GroupRanges::FixedSizeList {
+        len: groups.len(),
+        size: groups.list_size() as usize,
+    }
 }
 
 /// A trait object for type-erased grouped accumulators, used for dynamic dispatch when the

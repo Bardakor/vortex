@@ -20,9 +20,11 @@ use crate::arrays::DecimalArray;
 use crate::arrays::ExtensionArray;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::ListViewArray;
+use crate::arrays::MapArray;
 use crate::arrays::NullArray;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::StructArray;
+use crate::arrays::UnionArray;
 use crate::arrays::VarBinViewArray;
 use crate::arrays::VariantArray;
 use crate::arrays::varbinview::BinaryView;
@@ -126,6 +128,16 @@ pub(crate) fn constant_canonicalize(
             ))
         }
         DType::List(..) => Canonical::List(constant_canonical_list_array(scalar, array.len())),
+        DType::Map(map_dtype, nullability) => {
+            let entries_scalar = Scalar::try_new(
+                DType::List(Arc::new(map_dtype.entries_dtype()), *nullability),
+                scalar.value().cloned(),
+            )?;
+            Canonical::Map(MapArray::try_new(
+                map_dtype.clone(),
+                constant_canonical_list_array(&entries_scalar, array.len()),
+            )?)
+        }
         DType::FixedSizeList(element_dtype, list_size, _) => {
             let value = scalar.as_list();
 
@@ -164,7 +176,7 @@ pub(crate) fn constant_canonicalize(
                 StructArray::new_unchecked(fields, struct_dtype.clone(), array.len(), validity)
             })
         }
-        DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
+        DType::Union(..) => Canonical::Union(UnionArray::constant(scalar, array.len())?),
         DType::Variant(_) => Canonical::Variant(VariantArray::try_new(
             array.array().clone().into_array(),
             None,
@@ -350,7 +362,8 @@ mod tests {
     use crate::arrays::VarBinArray;
     use crate::arrays::VarBinViewArray;
     use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
-    use crate::arrays::listview::ListViewArrayExt;
+    use crate::arrays::fixed_size_list::FixedSizeListArraySlotsExt;
+    use crate::arrays::listview::ListViewArraySlotsExt;
     use crate::arrays::listview::ListViewRebuildMode;
     use crate::arrays::struct_::StructArrayExt;
     use crate::assert_arrays_eq;
@@ -361,12 +374,10 @@ mod tests {
     use crate::expr::stats::Stat;
     use crate::expr::stats::StatsProvider;
     use crate::scalar::Scalar;
-    use crate::session::ArraySession;
     use crate::validity::Validity;
 
     /// A shared session for these constant-array tests, used to create execution contexts.
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(crate::array_session);
 
     #[test]
     fn test_canonicalize_null() {
@@ -386,10 +397,11 @@ mod tests {
 
     #[test]
     fn test_canonicalize_const_str() {
+        let mut ctx = SESSION.create_execution_ctx();
         let const_array = ConstantArray::new("four".to_string(), 4);
 
         let expected = VarBinArray::from(vec!["four", "four", "four", "four"]);
-        assert_arrays_eq!(const_array, expected);
+        assert_arrays_eq!(const_array, expected, &mut ctx);
     }
 
     #[test]
@@ -452,21 +464,24 @@ mod tests {
                 .elements()
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)?,
-            PrimitiveArray::from_iter([1u64, 2, 1, 2])
+            PrimitiveArray::from_iter([1u64, 2, 1, 2]),
+            &mut ctx
         );
         assert_arrays_eq!(
             list_array
                 .offsets()
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)?,
-            PrimitiveArray::from_iter([0u64, 2])
+            PrimitiveArray::from_iter([0u64, 2]),
+            &mut ctx
         );
         assert_arrays_eq!(
             list_array
                 .sizes()
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)?,
-            PrimitiveArray::from_iter([2u64, 2])
+            PrimitiveArray::from_iter([2u64, 2]),
+            &mut ctx
         );
         Ok(())
     }
@@ -493,7 +508,8 @@ mod tests {
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)
                 .unwrap(),
-            PrimitiveArray::from_iter([0u64, 0])
+            PrimitiveArray::from_iter([0u64, 0]),
+            &mut ctx
         );
         assert_arrays_eq!(
             canonical_const
@@ -501,7 +517,8 @@ mod tests {
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)
                 .unwrap(),
-            PrimitiveArray::from_iter([0u64, 0])
+            PrimitiveArray::from_iter([0u64, 0]),
+            &mut ctx
         );
     }
 
@@ -526,7 +543,8 @@ mod tests {
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)
                 .unwrap(),
-            PrimitiveArray::from_iter([0u64, 0])
+            PrimitiveArray::from_iter([0u64, 0]),
+            &mut ctx
         );
         assert_arrays_eq!(
             canonical_const
@@ -534,7 +552,8 @@ mod tests {
                 .clone()
                 .execute::<PrimitiveArray>(&mut ctx)
                 .unwrap(),
-            PrimitiveArray::from_iter([0u64, 0])
+            PrimitiveArray::from_iter([0u64, 0]),
+            &mut ctx
         );
     }
 
@@ -595,7 +614,11 @@ mod tests {
         for i in 0..4 {
             let list = canonical.fixed_size_list_elements_at(i).unwrap();
             let list_primitive = list.execute::<PrimitiveArray>(&mut ctx).unwrap();
-            assert_arrays_eq!(list_primitive, PrimitiveArray::from_iter([10i32, 20, 30]));
+            assert_arrays_eq!(
+                list_primitive,
+                PrimitiveArray::from_iter([10i32, 20, 30]),
+                &mut ctx
+            );
         }
     }
 
@@ -627,7 +650,8 @@ mod tests {
             .unwrap();
         assert_arrays_eq!(
             elements,
-            PrimitiveArray::from_iter([1.5f64, 2.5, 1.5, 2.5, 1.5, 2.5])
+            PrimitiveArray::from_iter([1.5f64, 2.5, 1.5, 2.5, 1.5, 2.5]),
+            &mut ctx
         );
     }
 
@@ -740,7 +764,7 @@ mod tests {
             .clone()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
-        assert_arrays_eq!(elements, PrimitiveArray::from_iter([42i16]));
+        assert_arrays_eq!(elements, PrimitiveArray::from_iter([42i16]), &mut ctx);
     }
 
     #[test]

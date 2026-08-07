@@ -203,14 +203,20 @@ pub fn count_exceptions(bit_width: u8, bit_width_freq: &[usize]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::LazyLock;
 
     use vortex_array::Canonical;
     use vortex_array::IntoArray;
     use vortex_array::VortexSessionExecute;
+    use vortex_array::arrays::ListArray;
+    use vortex_array::arrays::ListViewArray;
     use vortex_array::assert_arrays_eq;
+    use vortex_array::builders::ListBuilder;
+    use vortex_array::builders::ListViewBuilder;
+    use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
-    use vortex_array::session::ArraySession;
+    use vortex_array::dtype::PType;
     use vortex_array::validity::Validity;
     use vortex_buffer::Buffer;
     use vortex_buffer::BufferMut;
@@ -226,8 +232,11 @@ mod tests {
         bitpack_encode(array, bit_width, None, &mut SESSION.create_execution_ctx()).unwrap()
     }
 
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     fn unpack(bitpacked: &BitPackedArray) -> VortexResult<PrimitiveArray> {
         unpack_array(bitpacked.as_view(), &mut SESSION.create_execution_ctx())
@@ -237,7 +246,7 @@ mod tests {
         let mut ctx = SESSION.create_execution_ctx();
         let values = PrimitiveArray::from_iter((0..n).map(|i| (i % 2047) as u16));
         let compressed = BitPackedData::encode(&values.clone().into_array(), 11, &mut ctx).unwrap();
-        assert_arrays_eq!(compressed, values);
+        assert_arrays_eq!(compressed, values, &mut ctx);
 
         values
             .as_slice::<u16>()
@@ -264,6 +273,64 @@ mod tests {
         compression_roundtrip(10_240);
     }
 
+    /// List builders bulk-append the source's elements into their internal elements builder.
+    /// Fixed-width builder appends assume the caller reserved capacity, so the list builders
+    /// must grow the elements builder themselves; encoded elements exercise that because
+    /// BitPacked's `append_to_builder` writes through `uninit_range`.
+    #[test]
+    fn test_list_append_grows_elements_builder() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+
+        let elements = encode(&PrimitiveArray::from_iter((0..3072u32).map(|i| i % 256)), 8);
+        let element_dtype: Arc<DType> = Arc::new(PType::U32.into());
+
+        // 48 lists of 64 elements each.
+        let offsets = Buffer::from_iter((0..=48u64).map(|i| i * 64)).into_array();
+        let list = ListArray::try_new(
+            elements.clone().into_array(),
+            offsets,
+            Validity::NonNullable,
+        )?;
+
+        let mut listview_builder = ListViewBuilder::<u64, u32>::with_capacity(
+            Arc::clone(&element_dtype),
+            Nullability::NonNullable,
+            0,
+            0,
+        );
+        list.clone()
+            .into_array()
+            .append_to_builder(&mut listview_builder, &mut ctx)?;
+        assert_arrays_eq!(listview_builder.finish(), list, &mut ctx);
+
+        let mut list_builder = ListBuilder::<u64>::with_capacity(
+            Arc::clone(&element_dtype),
+            Nullability::NonNullable,
+            0,
+            0,
+        );
+        list.clone()
+            .into_array()
+            .append_to_builder(&mut list_builder, &mut ctx)?;
+        assert_arrays_eq!(list_builder.finish(), list, &mut ctx);
+
+        // A `ListViewArray` source appended into a `ListBuilder` appends elements list by list.
+        let listview = ListViewArray::try_new(
+            elements.into_array(),
+            Buffer::from_iter((0..48u64).map(|i| i * 64)).into_array(),
+            Buffer::from_iter(std::iter::repeat_n(64u32, 48)).into_array(),
+            Validity::NonNullable,
+        )?;
+        let mut list_builder =
+            ListBuilder::<u64>::with_capacity(element_dtype, Nullability::NonNullable, 0, 0);
+        listview
+            .into_array()
+            .append_to_builder(&mut list_builder, &mut ctx)?;
+        assert_arrays_eq!(list_builder.finish(), list, &mut ctx);
+
+        Ok(())
+    }
+
     #[test]
     fn test_all_zeros() -> VortexResult<()> {
         let mut ctx = SESSION.create_execution_ctx();
@@ -272,7 +339,7 @@ mod tests {
             .execute::<PrimitiveArray>(&mut ctx)?;
         let bitpacked = encode(&zeros, 0);
         let actual = unpack(&bitpacked)?;
-        assert_arrays_eq!(actual, PrimitiveArray::from_iter([0u16, 0, 0, 0]));
+        assert_arrays_eq!(actual, PrimitiveArray::from_iter([0u16, 0, 0, 0]), &mut ctx);
         Ok(())
     }
 
@@ -284,7 +351,7 @@ mod tests {
             .execute::<PrimitiveArray>(&mut ctx)?;
         let bitpacked = encode(&zeros, 0);
         let actual = unpack(&bitpacked)?;
-        assert_arrays_eq!(actual, PrimitiveArray::from_iter([0u16, 1, 0, 1]));
+        assert_arrays_eq!(actual, PrimitiveArray::from_iter([0u16, 1, 0, 1]), &mut ctx);
         Ok(())
     }
 
@@ -296,7 +363,7 @@ mod tests {
             .execute::<PrimitiveArray>(&mut ctx)?;
         let bitpacked = encode(&zeros, 10);
         let actual = unpack(&bitpacked)?;
-        assert_arrays_eq!(actual, PrimitiveArray::from_iter(0u16..1024));
+        assert_arrays_eq!(actual, PrimitiveArray::from_iter(0u16..1024), &mut ctx);
         Ok(())
     }
 
@@ -311,7 +378,8 @@ mod tests {
         let actual = unpack(&bitpacked)?;
         assert_arrays_eq!(
             actual,
-            PrimitiveArray::from_iter((5u16..1029).chain(5u16..1029).chain(5u16..1029))
+            PrimitiveArray::from_iter((5u16..1029).chain(5u16..1029).chain(5u16..1029)),
+            &mut ctx
         );
         Ok(())
     }
@@ -325,7 +393,7 @@ mod tests {
         let bitpacked = encode(&zeros, 11);
         assert!(bitpacked.patches().is_none());
         let actual = unpack(&bitpacked)?;
-        assert_arrays_eq!(actual, PrimitiveArray::from_iter(0u16..1025));
+        assert_arrays_eq!(actual, PrimitiveArray::from_iter(0u16..1025), &mut ctx);
         Ok(())
     }
 
@@ -339,7 +407,7 @@ mod tests {
         assert_eq!(bitpacked.len(), 1025);
         assert!(bitpacked.patches().is_some());
         let actual = unpack(&bitpacked)?;
-        assert_arrays_eq!(actual, PrimitiveArray::from_iter(512u16..1537));
+        assert_arrays_eq!(actual, PrimitiveArray::from_iter(512u16..1537), &mut ctx);
         Ok(())
     }
 
@@ -354,7 +422,7 @@ mod tests {
         assert!(bitpacked.patches().is_some());
         let slice_ref = bitpacked.into_array().slice(1023..1025)?;
         let actual = slice_ref.execute::<Canonical>(&mut ctx)?.into_primitive();
-        assert_arrays_eq!(actual, PrimitiveArray::from_iter([1535u16, 1536]));
+        assert_arrays_eq!(actual, PrimitiveArray::from_iter([1535u16, 1536]), &mut ctx);
         Ok(())
     }
 
@@ -371,7 +439,8 @@ mod tests {
         let actual = slice_ref.execute::<Canonical>(&mut ctx)?.into_primitive();
         assert_arrays_eq!(
             actual,
-            PrimitiveArray::from_iter((1023u16..2049).map(|x| x + 512))
+            PrimitiveArray::from_iter((1023u16..2049).map(|x| x + 512)),
+            &mut ctx
         );
         Ok(())
     }
@@ -459,7 +528,11 @@ mod tests {
         let result = builder.finish_into_primitive();
 
         // Verify all values were correctly unpacked including patches.
-        assert_arrays_eq!(result, PrimitiveArray::from_iter(values));
+        assert_arrays_eq!(
+            result,
+            PrimitiveArray::from_iter(values),
+            &mut SESSION.create_execution_ctx()
+        );
         Ok(())
     }
 
@@ -654,7 +727,11 @@ mod tests {
         // Verify consistency with unpack_array.
         let zeros_array = unpack(&zeros_bp)?;
         assert_eq!(zeros_result.len(), zeros_array.len());
-        assert_arrays_eq!(zeros_result, zeros_array);
+        assert_arrays_eq!(
+            zeros_result,
+            zeros_array,
+            &mut SESSION.create_execution_ctx()
+        );
 
         // Maximum bit width for u16 (15 bits, since bitpacking requires bit_width < type bit width).
         let max_values = PrimitiveArray::from_iter([32767u16; 50]); // 2^15 - 1
@@ -681,7 +758,11 @@ mod tests {
         // Verify consistency.
         let boundary_unpacked = unpack(&boundary_bp)?;
         assert_eq!(boundary_result.len(), boundary_unpacked.len());
-        assert_arrays_eq!(boundary_result, boundary_unpacked);
+        assert_arrays_eq!(
+            boundary_result,
+            boundary_unpacked,
+            &mut SESSION.create_execution_ctx()
+        );
 
         // Single element.
         let single = PrimitiveArray::from_iter([42u8]);

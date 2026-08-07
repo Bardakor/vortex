@@ -11,6 +11,7 @@ use vortex_array::ArrayRef;
 use vortex_array::Canonical;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
+use vortex_array::array_session;
 use vortex_array::arrays::BoolArray;
 use vortex_array::arrays::StructArray;
 use vortex_array::expr::case_when;
@@ -22,14 +23,13 @@ use vortex_array::expr::lit;
 use vortex_array::expr::lt;
 use vortex_array::expr::nested_case_when;
 use vortex_array::expr::root;
-use vortex_array::session::ArraySession;
 use vortex_buffer::Buffer;
 use vortex_session::VortexSession;
 
-static SESSION: LazyLock<VortexSession> =
-    LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+static SESSION: LazyLock<VortexSession> = LazyLock::new(array_session);
 
 fn main() {
+    LazyLock::force(&SESSION);
     divan::main();
 }
 

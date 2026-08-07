@@ -10,11 +10,15 @@ mod filter;
 mod mask;
 mod take;
 
+pub use take::take_varbin;
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
 
     use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::VarBinArray;
     use crate::compute::conformance::consistency::test_array_consistency;
     use crate::dtype::DType;
@@ -60,6 +64,9 @@ mod tests {
         DType::Utf8(Nullability::NonNullable),
     ))]
     fn test_varbin_consistency(#[case] array: VarBinArray) {
-        test_array_consistency(&array.into_array());
+        test_array_consistency(
+            &array.into_array(),
+            &mut array_session().create_execution_ctx(),
+        );
     }
 }

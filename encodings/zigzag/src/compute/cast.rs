@@ -10,7 +10,7 @@ use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
 
 use crate::ZigZag;
-use crate::array::ZigZagArrayExt;
+use crate::array::ZigZagArraySlotsExt;
 impl CastReduce for ZigZag {
     fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
         if !dtype.is_signed_int() {
@@ -26,8 +26,11 @@ impl CastReduce for ZigZag {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use rstest::rstest;
     use vortex_array::IntoArray;
+    use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
     use vortex_array::builtins::ArrayBuiltins;
@@ -35,9 +38,16 @@ mod tests {
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
+    use vortex_session::VortexSession;
 
     use crate::ZigZagArray;
     use crate::zigzag_encode;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[test]
     fn test_cast_zigzag_i32_to_i64() {
@@ -61,7 +71,11 @@ mod tests {
             "Cast should preserve ZigZag encoding"
         );
 
-        assert_arrays_eq!(casted, PrimitiveArray::from_iter([-100i64, -1, 0, 1, 100]));
+        assert_arrays_eq!(
+            casted,
+            PrimitiveArray::from_iter([-100i64, -1, 0, 1, 100]),
+            &mut SESSION.create_execution_ctx()
+        );
     }
 
     #[test]
@@ -82,7 +96,8 @@ mod tests {
 
         assert_arrays_eq!(
             casted,
-            PrimitiveArray::from_iter([100i16, -50, 0, 25, -100])
+            PrimitiveArray::from_iter([100i16, -50, 0, 25, -100]),
+            &mut SESSION.create_execution_ctx()
         );
 
         // Test i16 to i64 (widening)
@@ -101,7 +116,8 @@ mod tests {
 
         assert_arrays_eq!(
             casted64,
-            PrimitiveArray::from_iter([1000i64, -500, 0, 250, -1000])
+            PrimitiveArray::from_iter([1000i64, -500, 0, 250, -1000]),
+            &mut SESSION.create_execution_ctx()
         );
     }
 
@@ -127,6 +143,6 @@ mod tests {
     #[case(zigzag_encode(PrimitiveArray::from_option_iter([Some(-5i16), None, Some(0), Some(5), None]).as_view()).unwrap())]
     #[case(zigzag_encode(PrimitiveArray::from_iter([i32::MIN, -1, 0, 1, i32::MAX]).as_view()).unwrap())]
     fn test_cast_zigzag_conformance(#[case] array: ZigZagArray) {
-        test_cast_conformance(&array.into_array());
+        test_cast_conformance(&array.into_array(), &mut SESSION.create_execution_ctx());
     }
 }

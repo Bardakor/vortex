@@ -3,10 +3,16 @@
 
 mod array;
 pub use array::FoRArrayExt;
+pub use array::FoRArraySlotsExt;
 pub use array::FoRData;
+pub use array::FoRSlots;
 
 pub(crate) mod compute;
 
 mod vtable;
 pub use vtable::FoR;
 pub use vtable::FoRArray;
+
+pub(crate) fn initialize(session: &vortex_session::VortexSession) {
+    vtable::initialize(session);
+}

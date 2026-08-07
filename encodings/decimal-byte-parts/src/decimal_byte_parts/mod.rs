@@ -21,7 +21,7 @@ use vortex_array::EqMode;
 use vortex_array::ExecutionCtx;
 use vortex_array::ExecutionResult;
 use vortex_array::IntoArray;
-use vortex_array::TypedArrayRef;
+use vortex_array::array_slots;
 use vortex_array::arrays::DecimalArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::buffer::BufferHandle;
@@ -46,7 +46,6 @@ use vortex_error::vortex_panic;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
 
-use crate::decimal_byte_parts::compute::kernel::PARENT_KERNELS;
 use crate::decimal_byte_parts::rules::PARENT_RULES;
 
 /// A [`DecimalByteParts`]-encoded Vortex array.
@@ -91,9 +90,7 @@ impl VTable for DecimalByteParts {
         let Some(decimal_dtype) = dtype.as_decimal_opt() else {
             vortex_bail!("expected decimal dtype, got {}", dtype)
         };
-        let msp = slots[MSP_SLOT]
-            .as_ref()
-            .vortex_expect("DecimalBytePartsArray msp slot");
+        let msp = DecimalBytePartsSlotsView::from_slots(slots).msp;
         DecimalBytePartsData::validate(msp, *decimal_dtype, dtype, len)
     }
 
@@ -107,6 +104,14 @@ impl VTable for DecimalByteParts {
 
     fn buffer_name(_array: ArrayView<'_, Self>, idx: usize) -> Option<String> {
         vortex_panic!("DecimalBytePartsArray buffer_name index {idx} out of bounds")
+    }
+
+    fn with_buffers(
+        &self,
+        array: ArrayView<'_, Self>,
+        buffers: &[BufferHandle],
+    ) -> VortexResult<ArrayParts<Self>> {
+        vortex_array::vtable::with_empty_buffers(self, array, buffers)
     }
 
     fn serialize(
@@ -151,7 +156,7 @@ impl VTable for DecimalByteParts {
     }
 
     fn slot_name(_array: ArrayView<'_, Self>, idx: usize) -> String {
-        SLOT_NAMES[idx].to_string()
+        DecimalBytePartsSlots::NAMES[idx].to_string()
     }
 
     fn reduce_parent(
@@ -165,21 +170,14 @@ impl VTable for DecimalByteParts {
     fn execute(array: Array<Self>, ctx: &mut ExecutionCtx) -> VortexResult<ExecutionResult> {
         to_canonical_decimal(&array, ctx).map(ExecutionResult::done)
     }
-
-    fn execute_parent(
-        array: ArrayView<'_, Self>,
-        parent: &ArrayRef,
-        child_idx: usize,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_KERNELS.execute(array, parent, child_idx, ctx)
-    }
 }
 
-/// The most significant parts of the decimal values.
-pub(super) const MSP_SLOT: usize = 0;
-pub(super) const NUM_SLOTS: usize = 1;
-pub(super) const SLOT_NAMES: [&str; NUM_SLOTS] = ["msp"];
+#[array_slots(DecimalByteParts)]
+pub struct DecimalBytePartsSlots {
+    /// The most significant parts of the decimal values.
+    #[slot(0)]
+    pub msp: ArrayRef,
+}
 
 /// This array encodes decimals as between 1-4 columns of primitive typed children.
 /// The most significant part (msp) sorting the most significant decimal bits.
@@ -203,16 +201,6 @@ impl Display for DecimalBytePartsData {
 pub struct DecimalBytePartsDataParts {
     pub msp: ArrayRef,
 }
-
-pub trait DecimalBytePartsArrayExt: TypedArrayRef<DecimalByteParts> {
-    fn msp(&self) -> &ArrayRef {
-        self.as_ref().slots()[MSP_SLOT]
-            .as_ref()
-            .vortex_expect("DecimalBytePartsArray msp slot")
-    }
-}
-
-impl<T: TypedArrayRef<DecimalByteParts>> DecimalBytePartsArrayExt for T {}
 
 impl DecimalBytePartsData {
     pub fn validate(
@@ -330,8 +318,8 @@ impl ValidityChild<DecimalByteParts> for DecimalByteParts {
 #[cfg(test)]
 mod tests {
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
+    use vortex_array::array_session;
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::dtype::DType;
@@ -363,7 +351,7 @@ mod tests {
         assert_eq!(
             Scalar::null(dtype.clone()),
             array
-                .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+                .execute_scalar(0, &mut array_session().create_execution_ctx())
                 .unwrap()
         );
         assert_eq!(
@@ -373,13 +361,13 @@ mod tests {
             )
             .unwrap(),
             array
-                .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+                .execute_scalar(1, &mut array_session().create_execution_ctx())
                 .unwrap()
         );
         assert_eq!(
             Scalar::try_new(dtype, Some(ScalarValue::Decimal(DecimalValue::I64(400)))).unwrap(),
             array
-                .execute_scalar(2, &mut LEGACY_SESSION.create_execution_ctx())
+                .execute_scalar(2, &mut array_session().create_execution_ctx())
                 .unwrap()
         );
     }

@@ -6,6 +6,7 @@ mod decimal;
 mod extension;
 mod fixed_size_list;
 mod list;
+mod map;
 pub mod primitive;
 mod struct_;
 mod varbin;
@@ -13,13 +14,14 @@ mod varbin;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
-use vortex_mask::Mask;
+use vortex_session::registry::CachedId;
 
 use self::bool::check_bool_constant;
 use self::decimal::check_decimal_constant;
 use self::extension::check_extension_constant;
 use self::fixed_size_list::check_fixed_size_list_constant;
 use self::list::check_listview_constant;
+use self::map::check_map_constant;
 use self::primitive::check_primitive_constant;
 use self::struct_::check_struct_constant;
 use self::varbin::check_varbinview_constant;
@@ -50,7 +52,6 @@ use crate::scalar_fn::fns::operators::Operator;
 /// Check if two arrays of the same length have equal values at every position (null-safe).
 ///
 /// Two positions are considered equal if they are both null, or both non-null with the same value.
-///
 // TODO(ngates): move this function out when we have any/all aggregate functions.
 fn arrays_value_equal(a: &ArrayRef, b: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
     debug_assert_eq!(a.len(), b.len());
@@ -74,7 +75,7 @@ fn arrays_value_equal(a: &ArrayRef, b: &ArrayRef, ctx: &mut ExecutionCtx) -> Vor
     // Compare values element-wise. Result is null where both inputs are null,
     // true/false where both are valid.
     let eq_result = a.binary(b.clone(), Operator::Eq)?;
-    let eq_result = eq_result.execute::<Mask>(ctx)?;
+    let eq_result = eq_result.null_as_false().execute(ctx)?;
 
     Ok(eq_result.true_count() == valid_count)
 }
@@ -260,7 +261,8 @@ impl AggregateFnVTable for IsConstant {
     type Partial = IsConstantPartial;
 
     fn id(&self) -> AggregateFnId {
-        AggregateFnId::new("vortex.is_constant")
+        static ID: CachedId = CachedId::new("vortex.is_constant");
+        *ID
     }
 
     fn serialize(&self, _options: &Self::Options) -> VortexResult<Option<Vec<u8>>> {
@@ -402,8 +404,12 @@ impl AggregateFnVTable for IsConstant {
                     Canonical::Struct(s) => check_struct_constant(s, ctx)?,
                     Canonical::Extension(e) => check_extension_constant(e, ctx)?,
                     Canonical::List(l) => check_listview_constant(l, ctx)?,
+                    Canonical::Map(m) => check_map_constant(m, ctx)?,
                     Canonical::FixedSizeList(f) => check_fixed_size_list_constant(f, ctx)?,
                     Canonical::Null(_) => true,
+                    Canonical::Union(_) => {
+                        todo!("TODO(connor)[Union]: implement IsConstant for Union arrays")
+                    }
                     Canonical::Variant(_) => {
                         vortex_bail!("Variant arrays don't support IsConstant")
                     }
@@ -441,27 +447,67 @@ mod tests {
     use vortex_error::VortexResult;
 
     use crate::IntoArray as _;
-    use crate::LEGACY_SESSION;
     use crate::VortexSessionExecute;
     use crate::aggregate_fn::fns::is_constant::is_constant;
+    use crate::array_session;
     use crate::arrays::BoolArray;
     use crate::arrays::ChunkedArray;
     use crate::arrays::DecimalArray;
     use crate::arrays::ListArray;
     use crate::arrays::PrimitiveArray;
     use crate::arrays::StructArray;
+    use crate::builders::MapBuilder;
     use crate::dtype::DType;
     use crate::dtype::DecimalDType;
     use crate::dtype::FieldNames;
+    use crate::dtype::MapDType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
     use crate::expr::stats::Stat;
+    use crate::scalar::Scalar;
     use crate::validity::Validity;
+
+    type MapEntryFixture<'a> = (i32, Option<&'a str>);
+    type MapRowFixture<'a> = Option<Vec<MapEntryFixture<'a>>>;
+
+    fn map_array_from_rows(rows: &[MapRowFixture<'_>]) -> VortexResult<crate::ArrayRef> {
+        let map_dtype = MapDType::try_new(
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+            DType::Utf8(Nullability::Nullable),
+            false,
+        )?;
+        let dtype = DType::Map(map_dtype.clone(), Nullability::Nullable);
+        let mut builder =
+            MapBuilder::<u64, u64>::with_capacity(map_dtype, Nullability::Nullable, rows.len());
+
+        for row in rows {
+            let scalar = match row {
+                Some(entries) => {
+                    let entries = entries
+                        .iter()
+                        .map(|(key, value)| {
+                            let key = Scalar::primitive(*key, Nullability::NonNullable);
+                            let value = value.map_or_else(
+                                || Scalar::null(DType::Utf8(Nullability::Nullable)),
+                                |value| Scalar::utf8(value, Nullability::Nullable),
+                            );
+                            (key, value)
+                        })
+                        .collect::<Vec<_>>();
+                    Scalar::try_map(dtype.clone(), entries)?
+                }
+                None => Scalar::null(dtype.clone()),
+            };
+            builder.append_value(scalar.as_map())?;
+        }
+
+        Ok(builder.finish_into_map().into_array())
+    }
 
     // Tests migrated from compute/is_constant.rs
     #[test]
     fn is_constant_min_max_no_nan() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let arr = buffer![0, 1].into_array();
         arr.statistics()
@@ -480,7 +526,7 @@ mod tests {
 
     #[test]
     fn is_constant_min_max_with_nan() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let arr = PrimitiveArray::from_iter([0.0, 0.0, f32::NAN]).into_array();
         arr.statistics()
@@ -507,7 +553,7 @@ mod tests {
     }, false)]
     fn test_bool_is_constant(#[case] input: Vec<bool>, #[case] expected: bool) -> VortexResult<()> {
         let array = BoolArray::from_iter(input);
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         assert_eq!(is_constant(&array.into_array(), &mut ctx)?, expected);
         Ok(())
     }
@@ -527,7 +573,7 @@ mod tests {
         )?
         .into_array();
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         assert!(is_constant(&chunked, &mut ctx)?);
         Ok(())
     }
@@ -535,7 +581,7 @@ mod tests {
     // Tests migrated from arrays/decimal/compute/is_constant.rs
     #[test]
     fn test_decimal_is_constant() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let array = DecimalArray::new(
             buffer![0i128, 1i128, 2i128],
@@ -556,7 +602,7 @@ mod tests {
     // Tests migrated from arrays/list/compute/is_constant.rs
     #[test]
     fn test_is_constant_nested_list() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let xs = ListArray::try_new(
             buffer![0i32, 1, 0, 1].into_array(),
@@ -614,7 +660,7 @@ mod tests {
             Validity::NonNullable,
         )?;
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         assert_eq!(is_constant(&list_array.into_array(), &mut ctx)?, expected);
         Ok(())
     }
@@ -632,7 +678,7 @@ mod tests {
             Validity::NonNullable,
         )?;
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         // Both outer lists contain [[1], [2]], so should be constant
         assert!(is_constant(&outer_list.into_array(), &mut ctx)?);
         Ok(())
@@ -677,8 +723,30 @@ mod tests {
             Validity::NonNullable,
         )?;
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         assert_eq!(is_constant(&list_array.into_array(), &mut ctx)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_is_constant() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
+
+        let identical = map_array_from_rows(&[
+            Some(vec![(1, Some("one")), (2, None)]),
+            Some(vec![(1, Some("one")), (2, None)]),
+        ])?;
+        assert!(is_constant(&identical, &mut ctx)?);
+
+        let different = map_array_from_rows(&[
+            Some(vec![(1, Some("one")), (2, None)]),
+            Some(vec![(1, Some("one")), (3, None)]),
+        ])?;
+        assert!(!is_constant(&different, &mut ctx)?);
+
+        let all_null = map_array_from_rows(&[None, None])?;
+        assert!(is_constant(&all_null, &mut ctx)?);
+
         Ok(())
     }
 }

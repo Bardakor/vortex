@@ -33,9 +33,10 @@ use pyo3::pyclass;
 use pyo3::pymethods;
 use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
-use vortex::array::arrow::ArrowSessionExt;
 use vortex::dtype::DType;
-use vortex::dtype::arrow::FromArrowType;
+use vortex_arrow::ArrowSessionExt;
+use vortex_arrow::ToArrowType;
+use vortex_arrow::TryFromArrowType;
 
 use crate::arrow::FromPyArrow;
 use crate::arrow::ToPyArrow;
@@ -133,6 +134,9 @@ impl PyDType {
             DType::Binary(..) => Self::with_subclass(py, dtype, PyBinaryDType),
             DType::List(..) => Self::with_subclass(py, dtype, PyListDType),
             DType::FixedSizeList(..) => Self::with_subclass(py, dtype, PyFixedSizeListDType),
+            DType::Map(..) => Err(PyValueError::new_err(
+                "Map dtypes are not supported in Python",
+            )),
             DType::Struct(..) => Self::with_subclass(py, dtype, PyStructDType),
             DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
             DType::Variant(_) => Err(PyValueError::new_err(
@@ -190,18 +194,22 @@ impl PyDType {
         self.0.python_repr().to_string()
     }
 
+    /// Return whether this data type allows null values.
+    fn is_nullable(&self) -> bool {
+        self.0.is_nullable()
+    }
+
     /// Construct a Vortex data type from an Arrow data type.
     #[classmethod]
     #[pyo3(signature = (arrow_dtype, *, non_nullable = false))]
     fn from_arrow<'py>(
-        cls: &'py Bound<'py, PyType>,
+        cls: &Bound<'py, PyType>,
         #[pyo3(from_py_with = import_arrow_dtype)] arrow_dtype: DataType,
         non_nullable: bool,
     ) -> PyResult<Bound<'py, PyDType>> {
-        Self::init(
-            cls.py(),
-            DType::from_arrow(&Field::new("_", arrow_dtype, !non_nullable)),
-        )
+        let dtype = DType::try_from_arrow(&Field::new("_", arrow_dtype, !non_nullable))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Self::init(cls.py(), dtype)
     }
 }
 

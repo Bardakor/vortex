@@ -4,8 +4,11 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
+use num_traits::AsPrimitive;
 use num_traits::NumCast;
 use vortex_array::ArrayRef;
+use vortex_array::ArrayView;
+use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::arrays::BoolArray;
@@ -22,6 +25,7 @@ use vortex_array::arrays::VarBinView;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::fixed_size_list::FixedSizeListArrayExt;
 use vortex_array::arrays::listview::ListViewArrayExt;
+use vortex_array::arrays::listview::ListViewArraySlotsExt;
 use vortex_array::arrays::primitive::PrimitiveArrayExt;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::varbinview::build_views::BinaryView;
@@ -30,6 +34,8 @@ use vortex_array::builders::ArrayBuilder;
 use vortex_array::builders::DecimalBuilder;
 use vortex_array::builders::FixedSizeListBuilder;
 use vortex_array::builders::ListViewBuilder;
+use vortex_array::builders::VarBinBuilder;
+use vortex_array::builders::VarBinViewBuilder;
 use vortex_array::builders::builder_with_capacity;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::DecimalDType;
@@ -38,12 +44,13 @@ use vortex_array::dtype::IntegerPType;
 use vortex_array::dtype::NativeDecimalType;
 use vortex_array::dtype::NativePType;
 use vortex_array::dtype::Nullability;
+use vortex_array::dtype::OffsetBuilderPType;
 use vortex_array::dtype::StructFields;
 use vortex_array::match_each_decimal_value_type;
 use vortex_array::match_each_integer_ptype;
 use vortex_array::match_each_native_ptype;
 use vortex_array::match_each_unsigned_integer_ptype;
-use vortex_array::match_smallest_offset_type;
+use vortex_array::match_smallest_list_offset_type;
 use vortex_array::patches::Patches;
 use vortex_array::scalar::DecimalScalar;
 use vortex_array::scalar::ListScalar;
@@ -60,10 +67,197 @@ use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_ensure;
+use vortex_mask::Mask;
 
 use crate::ConstantArray;
 use crate::Sparse;
+use crate::SparseExt;
 use crate::SparseParts;
+
+/// The pieces every string decode of a sparse array starts from: the offset-resolved patch
+/// indices and canonical patch values, plus the fill value's bytes (`None` for a null fill).
+struct SparseStringParts {
+    len: usize,
+    patches: Patches,
+    indices: PrimitiveArray,
+    values: VarBinViewArray,
+    fill: Option<ByteBuffer>,
+}
+
+impl SparseStringParts {
+    fn new(array: ArrayView<'_, Sparse>, ctx: &mut ExecutionCtx) -> VortexResult<Self> {
+        let patches = array.resolved_patches()?;
+        let indices = patches.indices().clone().execute::<PrimitiveArray>(ctx)?;
+        let values = patches
+            .values()
+            .clone()
+            .execute::<Canonical>(ctx)?
+            .into_varbinview();
+        let fill_scalar = array.data().fill_scalar();
+        let fill = match array.dtype() {
+            DType::Utf8(_) => fill_scalar
+                .as_utf8()
+                .value()
+                .cloned()
+                .map(BufferString::into_inner),
+            DType::Binary(_) => fill_scalar.as_binary().value().cloned(),
+            dtype => vortex_bail!("Sparse string decode of non-string dtype {dtype}"),
+        };
+        Ok(Self {
+            len: array.len(),
+            patches,
+            indices,
+            values,
+            fill,
+        })
+    }
+}
+
+/// Scatters the patch views over the fill value straight into `builder`.
+///
+/// The canonical route materializes the same scattered views buffer, wraps it in an array, and
+/// then `append_varbinview_array` walks all `len` views a second time to rebase their buffer
+/// indices onto the builder's. Scattering into the builder instead adopts the patch buffers once
+/// and costs one bulk view fill plus one view write per patch, with no byte copy.
+pub(super) fn append_sparse_to_varbinview(
+    array: ArrayView<'_, Sparse>,
+    builder: &mut VarBinViewBuilder,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<()> {
+    let parts = SparseStringParts::new(array, ctx)?;
+    let validity = sparse_validity(
+        &parts.patches,
+        array.data().fill_scalar(),
+        array.dtype().nullability(),
+        parts.len,
+        ctx,
+    )?
+    .execute_mask(parts.len, ctx)?;
+
+    let mut buffers = parts
+        .values
+        .data_buffers()
+        .iter()
+        .map(|buffer| buffer.as_host().clone())
+        .collect::<Vec<_>>();
+    // A fill value short enough to inline lives in its view; only a longer one needs its bytes
+    // adopted as a (tiny) data buffer.
+    let fill_view = match &parts.fill {
+        Some(bytes) if bytes.len() > BinaryView::MAX_INLINED_SIZE => {
+            buffers.push(bytes.clone());
+            BinaryView::make_view(
+                bytes.as_slice(),
+                u32::try_from(buffers.len() - 1).vortex_expect("too many buffers"),
+                0,
+            )
+        }
+        Some(bytes) => BinaryView::make_view(bytes.as_slice(), 0, 0),
+        None => BinaryView::make_view(&[], 0, 0),
+    };
+
+    let views = parts.values.views();
+    match_each_integer_ptype!(parts.indices.ptype(), |I| {
+        let indices = parts.indices.as_slice::<I>();
+        builder.append_views_scattered(
+            buffers,
+            parts.len,
+            fill_view,
+            indices
+                .iter()
+                .zip(views.iter())
+                .map(|(row, view)| (AsPrimitive::<usize>::as_(*row), *view)),
+            &validity,
+        );
+    });
+    Ok(())
+}
+
+/// Walks the rows in order, appending fill runs between the patches, straight into `builder`.
+///
+/// The canonical route materializes the scattered views array first; the fill-value copies per
+/// row are inherent to the offsets layout either way, so appending directly just skips that
+/// intermediate.
+pub(super) fn append_sparse_to_varbin<O: OffsetBuilderPType>(
+    array: ArrayView<'_, Sparse>,
+    builder: &mut VarBinBuilder<O>,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<()>
+where
+    usize: AsPrimitive<O>,
+{
+    let parts = SparseStringParts::new(array, ctx)?;
+    let patch_validity = parts
+        .values
+        .validity()?
+        .execute_mask(parts.values.len(), ctx)?;
+
+    let views = parts.values.views();
+    let buffers = parts
+        .values
+        .data_buffers()
+        .iter()
+        .map(|buffer| buffer.as_host().as_slice())
+        .collect::<Vec<_>>();
+
+    match_each_integer_ptype!(parts.indices.ptype(), |I| {
+        append_patch_walk_to_varbin(
+            builder,
+            parts.indices.as_slice::<I>(),
+            parts.len,
+            views,
+            &buffers,
+            &patch_validity,
+            parts.fill.as_ref(),
+        )
+    })
+}
+
+/// The typed patch walk behind [`append_sparse_to_varbin`].
+fn append_patch_walk_to_varbin<O: OffsetBuilderPType, I: NativePType + AsPrimitive<usize>>(
+    builder: &mut VarBinBuilder<O>,
+    indices: &[I],
+    len: usize,
+    views: &[BinaryView],
+    buffers: &[&[u8]],
+    patch_validity: &Mask,
+    fill: Option<&ByteBuffer>,
+) -> VortexResult<()>
+where
+    usize: AsPrimitive<O>,
+{
+    let fill_run = |builder: &mut VarBinBuilder<O>, n: usize| -> VortexResult<()> {
+        match fill {
+            Some(bytes) => builder.append_n_values(bytes, n),
+            None => {
+                builder.push_nulls(n);
+                Ok(())
+            }
+        }
+    };
+
+    let mut previous = 0usize;
+    for (patch, row) in indices.iter().enumerate() {
+        let row = AsPrimitive::<usize>::as_(*row);
+        // The canonical decode scatters the patches in order, so of duplicate indices the
+        // last one wins; skip a patch that the next one lands on top of.
+        if patch + 1 < indices.len() && AsPrimitive::<usize>::as_(indices[patch + 1]) == row {
+            continue;
+        }
+        vortex_ensure!(
+            previous <= row && row < len,
+            "Sparse patch indices must be ascending within the array length {len}"
+        );
+        fill_run(builder, row - previous)?;
+        if patch_validity.value(patch) {
+            builder.append_value(views[patch].bytes(buffers));
+        } else {
+            builder.push_null();
+        }
+        previous = row + 1;
+    }
+    fill_run(builder, len - previous)
+}
 
 fn sparse_validity(
     patches: &Patches,
@@ -151,6 +345,7 @@ pub(super) fn execute_sparse(parts: SparseParts, ctx: &mut ExecutionCtx) -> Vort
         DType::FixedSizeList(.., nullability) => {
             execute_sparse_fixed_size_list(&patches, &fill_value, len, *nullability, ctx)?
         }
+        DType::Map(..) => vortex_bail!("Sparse canonicalization does not support Map arrays yet"),
         DType::Struct(struct_fields, ..) => execute_sparse_struct(
             struct_fields,
             fill_value.as_struct(),
@@ -174,7 +369,7 @@ fn execute_sparse_lists(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     // Patch indices are non-negative; reinterpret to unsigned so this dispatches over 4 widths
-    // instead of 8. `O` is already unsigned (from `match_smallest_offset_type`).
+    // instead of 8. `O` is already unsigned (from `match_smallest_list_offset_type`).
     let indices = resolved.indices().as_::<Primitive>().into_owned();
     let indices = indices.reinterpret_cast(indices.ptype().to_unsigned());
     let values = resolved.values().as_::<ListView>().into_owned();
@@ -184,7 +379,7 @@ fn execute_sparse_lists(
     let total_canonical_values = values.elements().len() + fill_list.len() * n_filled;
 
     Ok(match_each_unsigned_integer_ptype!(indices.ptype(), |I| {
-        match_smallest_offset_type!(total_canonical_values, |O| {
+        match_smallest_list_offset_type!(total_canonical_values, |O| {
             execute_sparse_lists_inner::<I, O>(
                 indices.as_slice(),
                 values,
@@ -200,7 +395,7 @@ fn execute_sparse_lists(
 }
 
 #[expect(clippy::too_many_arguments)]
-fn execute_sparse_lists_inner<I: IntegerPType, O: IntegerPType>(
+fn execute_sparse_lists_inner<I: IntegerPType, O: OffsetBuilderPType>(
     patch_indices: &[I],
     patch_values: ListViewArray,
     fill_scalar: ListScalar,
@@ -239,6 +434,7 @@ fn execute_sparse_lists_inner<I: IntegerPType, O: IntegerPType>(
             &mut builder,
             fill_elements.as_ref(),
             sparse_idx - next_index,
+            ctx,
         );
 
         if patch_valid {
@@ -246,7 +442,7 @@ fn execute_sparse_lists_inner<I: IntegerPType, O: IntegerPType>(
                 .list_elements_at(patch_idx)
                 .vortex_expect("list_elements_at");
             builder
-                .append_array_as_list(&patch_list)
+                .append_array_as_list(&patch_list, ctx)
                 .vortex_expect("Failed to append sparse value");
         } else {
             builder.append_null();
@@ -255,7 +451,7 @@ fn execute_sparse_lists_inner<I: IntegerPType, O: IntegerPType>(
         next_index = sparse_idx + 1;
     }
 
-    append_list_fill(&mut builder, fill_elements.as_ref(), len - next_index);
+    append_list_fill(&mut builder, fill_elements.as_ref(), len - next_index, ctx);
 
     builder.finish()
 }
@@ -328,6 +524,7 @@ fn execute_sparse_fixed_size_list_inner<I: IntegerPType>(
             &mut builder,
             fill_elements.as_ref(),
             sparse_idx - next_index,
+            ctx,
         );
 
         // Append the patch value, handling null patches by appending defaults.
@@ -336,7 +533,7 @@ fn execute_sparse_fixed_size_list_inner<I: IntegerPType>(
                 .fixed_size_list_elements_at(patch_idx)
                 .vortex_expect("fixed_size_list_elements_at");
             builder
-                .append_array_as_list(&patch_list)
+                .append_array_as_list(&patch_list, ctx)
                 .vortex_expect("Failed to append sparse fixed-size-list value");
         } else {
             builder.append_null();
@@ -346,7 +543,12 @@ fn execute_sparse_fixed_size_list_inner<I: IntegerPType>(
     }
 
     // Fill remaining positions after last patch.
-    append_fixed_size_list_fill(&mut builder, fill_elements.as_ref(), array_len - next_index);
+    append_fixed_size_list_fill(
+        &mut builder,
+        fill_elements.as_ref(),
+        array_len - next_index,
+        ctx,
+    );
 
     builder.finish_into_fixed_size_list()
 }
@@ -363,15 +565,16 @@ fn list_scalar_elements_array(list: ListScalar) -> Option<ArrayRef> {
     })
 }
 
-fn append_list_fill<O: IntegerPType, S: IntegerPType>(
+fn append_list_fill<O: OffsetBuilderPType, S: OffsetBuilderPType>(
     builder: &mut ListViewBuilder<O, S>,
     fill_elements: Option<&ArrayRef>,
     count: usize,
+    ctx: &mut ExecutionCtx,
 ) {
     if let Some(fill_elements) = fill_elements {
         for _ in 0..count {
             builder
-                .append_array_as_list(fill_elements)
+                .append_array_as_list(fill_elements, ctx)
                 .vortex_expect("Failed to append sparse fill value");
         }
     } else {
@@ -383,11 +586,12 @@ fn append_fixed_size_list_fill(
     builder: &mut FixedSizeListBuilder,
     fill_elements: Option<&ArrayRef>,
     count: usize,
+    ctx: &mut ExecutionCtx,
 ) {
     if let Some(fill_elements) = fill_elements {
         for _ in 0..count {
             builder
-                .append_array_as_list(fill_elements)
+                .append_array_as_list(fill_elements, ctx)
                 .vortex_expect("Failed to append sparse fixed-size-list fill value");
         }
     } else {
@@ -465,7 +669,6 @@ fn execute_sparse_struct(
         ),
     };
     let patch_values_as_struct = unresolved_patches.values().as_::<Struct>().into_owned();
-    let columns_patch_values = patch_values_as_struct.unmasked_fields();
     let names = patch_values_as_struct.names();
     let validity = top_level_fill_validity.patch(
         len,
@@ -484,8 +687,8 @@ fn execute_sparse_struct(
 
     Ok(StructArray::try_from_iter_with_validity(
         names.iter().zip_eq(
-            columns_patch_values
-                .iter()
+            patch_values_as_struct
+                .iter_unmasked_fields()
                 .cloned()
                 .zip_eq(fill_values)
                 .map(|(patch_values, fill_value)| unsafe {
@@ -560,16 +763,20 @@ fn execute_varbin_inner<I: IntegerPType>(
     let n_patch_buffers = values.data_buffers().len();
     let mut buffers = values.data_buffers().to_vec();
 
-    let fill = if let Some(buffer) = &fill_value {
-        buffers.push(BufferHandle::new_host(buffer.clone()));
-        BinaryView::make_view(
-            buffer.as_ref(),
-            u32::try_from(n_patch_buffers).vortex_expect("too many buffers"),
-            0,
-        )
-    } else {
+    let fill = match &fill_value {
+        // A fill value short enough to inline lives in its view; pushing its buffer would leave
+        // that buffer entirely unreferenced.
+        Some(buffer) if buffer.len() > BinaryView::MAX_INLINED_SIZE => {
+            buffers.push(BufferHandle::new_host(buffer.clone()));
+            BinaryView::make_view(
+                buffer.as_ref(),
+                u32::try_from(n_patch_buffers).vortex_expect("too many buffers"),
+                0,
+            )
+        }
+        Some(buffer) => BinaryView::make_view(buffer.as_ref(), 0, 0),
         // any <=12 character value will do
-        BinaryView::make_view(&[], 0, 0)
+        None => BinaryView::make_view(&[], 0, 0),
     };
 
     let mut views = buffer_mut![fill; len];
@@ -588,11 +795,11 @@ fn execute_varbin_inner<I: IntegerPType>(
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
+    use std::sync::LazyLock;
 
     use rstest::rstest;
     use vortex_array::Canonical;
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::DecimalArray;
@@ -604,8 +811,10 @@ mod test {
     use vortex_array::arrays::VarBinArray;
     use vortex_array::arrays::VarBinViewArray;
     use vortex_array::arrays::listview::ListViewArrayExt;
-    use vortex_array::arrow::ArrowSessionExt;
+    use vortex_array::arrays::listview::ListViewArraySlotsExt;
     use vortex_array::assert_arrays_eq;
+    use vortex_array::builders::VarBinBuilder;
+    use vortex_array::builders::VarBinViewBuilder;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::DecimalDType;
     use vortex_array::dtype::FieldNames;
@@ -616,21 +825,29 @@ mod test {
     use vortex_array::scalar::DecimalValue;
     use vortex_array::scalar::Scalar;
     use vortex_array::validity::Validity;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_buffer::ByteBuffer;
     use vortex_buffer::buffer;
     use vortex_buffer::buffer_mut;
     use vortex_error::VortexExpect;
     use vortex_error::VortexResult;
     use vortex_mask::Mask;
+    use vortex_session::VortexSession;
 
     use crate::Sparse;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+        let session = vortex_array::array_session();
+        crate::initialize(&session);
+        session
+    });
 
     #[rstest]
     #[case(Some(true))]
     #[case(Some(false))]
     #[case(None)]
     fn test_sparse_bool(#[case] fill_value: Option<bool>) {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let indices = buffer![0u64, 1, 7].into_array();
         let values = BoolArray::from_iter([Some(true), None, Some(false)]).into_array();
         let sparse_bools = Sparse::try_new(indices, values, 10, Scalar::from(fill_value)).unwrap();
@@ -653,7 +870,7 @@ mod test {
             fill_value,
         ]);
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[rstest]
@@ -661,7 +878,7 @@ mod test {
     #[case(Some(-1i32))]
     #[case(None)]
     fn test_sparse_primitive(#[case] fill_value: Option<i32>) {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let indices = buffer![0u64, 1, 7].into_array();
         let values = PrimitiveArray::from_option_iter([Some(0i32), None, Some(1)]).into_array();
         let sparse_ints = Sparse::try_new(indices, values, 10, Scalar::from(fill_value)).unwrap();
@@ -685,12 +902,12 @@ mod test {
             fill_value,
         ]);
 
-        assert_arrays_eq!(&flat_ints, &expected);
+        assert_arrays_eq!(&flat_ints, &expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_struct_valid_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let field_names = FieldNames::from_iter(["a", "b"]);
         let field_types = vec![
             DType::Primitive(PType::I32, Nullable),
@@ -760,12 +977,12 @@ mod test {
             .clone()
             .execute::<StructArray>(&mut ctx)
             .unwrap();
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_struct_invalid_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let field_names = FieldNames::from_iter(["a", "b"]);
         let field_types = vec![
             DType::Primitive(PType::I32, Nullable),
@@ -832,12 +1049,12 @@ mod test {
             .clone()
             .execute::<StructArray>(&mut ctx)
             .unwrap();
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_decimal() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let indices = buffer![0u32, 1u32, 7u32, 8u32].into_array();
         let decimal_dtype = DecimalDType::new(3, 2);
         let patch_values = DecimalArray::new(
@@ -850,7 +1067,7 @@ mod test {
         let fill_scalar = Scalar::decimal(DecimalValue::I32(123), decimal_dtype, Nullable);
         let sparse_struct = Sparse::try_new(indices, patch_values, len, fill_scalar).unwrap();
 
-        let expected = LEGACY_SESSION
+        let expected = SESSION
             .arrow()
             .execute_arrow(
                 DecimalArray::new(
@@ -865,7 +1082,7 @@ mod test {
             )
             .unwrap();
 
-        let actual = LEGACY_SESSION
+        let actual = SESSION
             .arrow()
             .execute_arrow(
                 sparse_struct
@@ -885,7 +1102,7 @@ mod test {
 
     #[test]
     fn test_sparse_utf8_varbinview_non_null_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let strings = <VarBinViewArray as FromIterator<_>>::from_iter([
             Some("hello"),
             Some("goodbye"),
@@ -927,12 +1144,12 @@ mod test {
         ])
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_utf8_varbinview_null_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let strings = <VarBinViewArray as FromIterator<_>>::from_iter([
             Some("hello"),
             Some("goodbye"),
@@ -974,12 +1191,12 @@ mod test {
         ])
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_utf8_varbinview_non_nullable() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let strings =
             VarBinViewArray::from_iter_str(["hello", "goodbye", "hello", "bonjour", "你好"])
                 .into_array();
@@ -1003,12 +1220,12 @@ mod test {
         ])
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_utf8_varbin_null_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let strings = <VarBinArray as FromIterator<_>>::from_iter([
             Some("hello"),
             Some("goodbye"),
@@ -1050,12 +1267,12 @@ mod test {
         ])
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_binary_varbinview_non_null_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let binaries = VarBinViewArray::from_iter_nullable_bin([
             Some(b"hello" as &[u8]),
             Some(b"goodbye"),
@@ -1097,12 +1314,12 @@ mod test {
         ])
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_sparse_list_null_fill() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         // Use ListViewArray consistently
         let elements = buffer![1i32, 2, 1, 2].into_array();
         // Create ListView with offsets and sizes
@@ -1160,7 +1377,7 @@ mod test {
 
     #[test]
     fn test_sparse_list_null_fill_sliced_sparse_values() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         // Create ListViewArray with 8 elements forming 8 single-element lists
         let elements = buffer![1i32, 2, 1, 2, 1, 2, 1, 2].into_array();
         let offsets = buffer![0u32, 1, 2, 3, 4, 5, 6, 7].into_array();
@@ -1216,7 +1433,7 @@ mod test {
 
     #[test]
     fn test_sparse_list_non_null_fill() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         // Create ListViewArray with 4 single-element lists
         let elements = buffer![1i32, 2, 1, 2].into_array();
         let offsets = buffer![0u32, 1, 2, 3].into_array();
@@ -1288,7 +1505,7 @@ mod test {
 
     #[test]
     fn test_sparse_binary_varbin_null_fill() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let strings = <VarBinArray as FromIterator<_>>::from_iter([
             Some(b"hello" as &[u8]),
             Some(b"goodbye"),
@@ -1330,7 +1547,7 @@ mod test {
         ])
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
@@ -1348,7 +1565,7 @@ mod test {
         let sparse = Sparse::try_new(indices, fsl, 5, fill_value)?.into_array();
 
         let actual = sparse
-            .execute::<Canonical>(&mut LEGACY_SESSION.create_execution_ctx())?
+            .execute::<Canonical>(&mut SESSION.create_execution_ctx())?
             .into_array();
 
         // Expected: [1,2,3], null, [4,5,6], [7,8,9], null.
@@ -1362,14 +1579,15 @@ mod test {
         )?
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
     #[test]
     fn test_sparse_fixed_size_list_non_null_fill() -> VortexResult<()> {
         let elements = buffer![1i32, 2, 3, 4, 5, 6].into_array();
-        let fsl = FixedSizeListArray::try_new(elements, 2, Validity::AllValid, 3)?.into_array();
+        // Non-nullable values to match the non-nullable fill below.
+        let fsl = FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 3)?.into_array();
 
         let indices = buffer![0u8, 2u8, 4u8].into_array();
         let fill_value = Scalar::fixed_size_list(
@@ -1383,7 +1601,7 @@ mod test {
         let sparse = Sparse::try_new(indices, fsl, 6, fill_value)?.into_array();
 
         let actual = sparse
-            .execute::<Canonical>(&mut LEGACY_SESSION.create_execution_ctx())?
+            .execute::<Canonical>(&mut SESSION.create_execution_ctx())?
             .into_array();
 
         // Expected: [1,2], [99,88], [3,4], [99,88], [5,6], [99,88].
@@ -1391,7 +1609,7 @@ mod test {
         let expected = FixedSizeListArray::try_new(expected_elements, 2, Validity::NonNullable, 6)?
             .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -1419,7 +1637,7 @@ mod test {
         let sparse = Sparse::try_new(indices, fsl, 6, fill_value)?.into_array();
 
         let actual = sparse
-            .execute::<Canonical>(&mut LEGACY_SESSION.create_execution_ctx())?
+            .execute::<Canonical>(&mut SESSION.create_execution_ctx())?
             .into_array();
 
         // Expected validity: [true, true, true, false, true, true].
@@ -1435,7 +1653,7 @@ mod test {
         )?
         .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -1446,7 +1664,8 @@ mod test {
 
         // Create patch values: only 3 distinct lists out of 100 total positions.
         let elements = buffer![10i32, 11, 20, 21, 30, 31].into_array();
-        let fsl = FixedSizeListArray::try_new(elements, 2, Validity::AllValid, 3)?.into_array();
+        // Non-nullable values to match the non-nullable fill below.
+        let fsl = FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 3)?.into_array();
 
         // Patches at positions 5, 50, and 95 out of 100.
         let indices = buffer![5u32, 50, 95].into_array();
@@ -1464,7 +1683,7 @@ mod test {
         let sparse = Sparse::try_new(indices, fsl, 100, fill_value)?.into_array();
 
         let actual = sparse
-            .execute::<Canonical>(&mut LEGACY_SESSION.create_execution_ctx())?
+            .execute::<Canonical>(&mut SESSION.create_execution_ctx())?
             .into_array();
 
         // Build expected: 97 copies of [99,99] with patches at positions 5, 50, 95.
@@ -1496,7 +1715,7 @@ mod test {
             FixedSizeListArray::try_new(expected_elements, 2, Validity::NonNullable, 100)?
                 .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
@@ -1504,7 +1723,8 @@ mod test {
     fn test_sparse_fixed_size_list_single_element() -> VortexResult<()> {
         // Test with a single element FSL array.
         let elements = buffer![42i32, 43].into_array();
-        let fsl = FixedSizeListArray::try_new(elements, 2, Validity::AllValid, 1)?.into_array();
+        // Non-nullable values to match the non-nullable fill below.
+        let fsl = FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 1)?.into_array();
 
         let indices = buffer![0u32].into_array();
         let fill_value = Scalar::fixed_size_list(
@@ -1518,7 +1738,7 @@ mod test {
         let sparse = Sparse::try_new(indices, fsl, 1, fill_value)?.into_array();
 
         let actual = sparse
-            .execute::<Canonical>(&mut LEGACY_SESSION.create_execution_ctx())?
+            .execute::<Canonical>(&mut SESSION.create_execution_ctx())?
             .into_array();
 
         // Expected: just [42, 43].
@@ -1526,13 +1746,13 @@ mod test {
         let expected = FixedSizeListArray::try_new(expected_elements, 2, Validity::NonNullable, 1)?
             .into_array();
 
-        assert_arrays_eq!(actual, expected);
+        assert_arrays_eq!(actual, expected, &mut SESSION.create_execution_ctx());
         Ok(())
     }
 
     #[test]
     fn test_sparse_list_grows_offset_type() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let elements = buffer![1i32, 2, 1, 2].into_array();
         let offsets = buffer![0u8, 1, 2, 3, 4].into_array();
         let lists = ListArray::try_new(elements, offsets, Validity::AllValid)?.into_array();
@@ -1546,29 +1766,28 @@ mod test {
         expected_elements.extend(buffer![42i32; 252]);
         let expected = ListArray::try_new(
             expected_elements.freeze().into_array(),
-            buffer![0u16, 1, 2, 3, 4, 256].into_array(),
+            buffer![0u32, 1, 2, 3, 4, 256].into_array(),
             Validity::AllValid,
         )?
         .into_array();
 
+        // The canonical offsets outgrow the source's u8 offsets; u32 is the smallest offset type
+        // a list builder can produce (see `OffsetBuilderPType`).
         let actual_listview = actual.clone().execute::<ListViewArray>(&mut ctx)?;
         assert_eq!(
             actual_listview.offsets().dtype(),
-            &DType::Primitive(PType::U16, NonNullable)
+            &DType::Primitive(PType::U32, NonNullable)
         );
-        assert_arrays_eq!(&actual, &expected);
+        assert_arrays_eq!(&actual, &expected, &mut ctx);
 
         // Note that the preferred arrow list representation is `List` (not `ListView`).
-        let arrow_dtype = LEGACY_SESSION
-            .arrow()
-            .to_arrow_field("", expected.dtype())?;
-        let actual = LEGACY_SESSION
+        let arrow_dtype = SESSION.arrow().to_arrow_field("", expected.dtype())?;
+        let actual = SESSION
             .arrow()
             .execute_arrow(actual, Some(&arrow_dtype), &mut ctx)?;
-        let expected =
-            LEGACY_SESSION
-                .arrow()
-                .execute_arrow(expected, Some(&arrow_dtype), &mut ctx)?;
+        let expected = SESSION
+            .arrow()
+            .execute_arrow(expected, Some(&arrow_dtype), &mut ctx)?;
 
         assert_eq!(actual.data_type(), expected.data_type());
         Ok(())
@@ -1576,7 +1795,7 @@ mod test {
 
     #[test]
     fn test_sparse_listview_null_fill_with_gaps() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         // This test specifically catches the bug where the old implementation
         // incorrectly tracked `last_valid_offset` as the START of the last list
         // instead of properly handling ListView's offset/size pairs.
@@ -1658,7 +1877,7 @@ mod test {
 
     #[test]
     fn test_sparse_listview_sliced_values_null_fill() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         // This test uses sliced ListView values to ensure proper handling
         // of non-zero starting offsets in the source data.
 
@@ -1738,6 +1957,70 @@ mod test {
         // The bug in the old implementation would have incorrectly used
         // offsets[sparse_index] for filling nulls, which would be wrong
         // when dealing with sliced arrays that have non-zero starting offsets.
+        Ok(())
+    }
+
+    /// Appending a sparse string array to either variable-binary builder must match its
+    /// canonical decode exactly — across long, short (inlinable), and null fill values, null
+    /// patch values, and a sliced array whose patch indices carry an offset.
+    #[rstest]
+    #[case::long_fill(Some("a fill value that is too long to inline"))]
+    #[case::short_fill(Some("123"))]
+    #[case::null_fill(None)]
+    fn test_sparse_append_to_string_builders(#[case] fill: Option<&str>) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let long = "a patch value that is far too long to inline";
+        let strings =
+            <VarBinViewArray as FromIterator<_>>::from_iter([Some(long), None, Some("tiny")])
+                .into_array();
+        let fill_scalar = match fill {
+            Some(value) => Scalar::from(value.to_owned()).into_nullable(),
+            None => Scalar::null(DType::Utf8(Nullable)),
+        };
+        let array = Sparse::try_new(buffer![1u16, 4, 8].into_array(), strings, 10, fill_scalar)?
+            .into_array();
+
+        for candidate in [array.clone(), array.slice(1..9)?] {
+            let expected = candidate.clone().execute::<VarBinViewArray>(&mut ctx)?;
+
+            let mut view_builder = VarBinViewBuilder::with_capacity(candidate.dtype().clone(), 4);
+            candidate.append_to_builder(&mut view_builder, &mut ctx)?;
+            assert_arrays_eq!(view_builder.finish_into_varbinview(), expected, &mut ctx);
+
+            let mut varbin_builder = VarBinBuilder::<i32>::new(candidate.dtype().clone());
+            candidate.append_to_builder(&mut varbin_builder, &mut ctx)?;
+            assert_arrays_eq!(varbin_builder.finish_into_varbin(), expected, &mut ctx);
+        }
+        Ok(())
+    }
+
+    /// A fill value short enough to inline lives in its views; the canonical decode must not
+    /// retain a data buffer nothing references.
+    #[test]
+    fn test_sparse_short_fill_pushes_no_buffer() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let strings = VarBinViewArray::from_iter_str(["hello", "goodbye"]);
+        assert!(strings.data_buffers().is_empty());
+
+        let array = Sparse::try_new(
+            buffer![1u16, 3].into_array(),
+            strings.into_array(),
+            6,
+            Scalar::from("123".to_owned()),
+        )?;
+
+        let actual = array
+            .as_array()
+            .clone()
+            .execute::<VarBinViewArray>(&mut ctx)?;
+        assert!(
+            actual.data_buffers().is_empty(),
+            "an inlinable fill value must not push an unreferenced buffer"
+        );
+
+        let expected =
+            VarBinViewArray::from_iter_str(["123", "hello", "123", "goodbye", "123", "123"]);
+        assert_arrays_eq!(actual, expected, &mut ctx);
         Ok(())
     }
 }

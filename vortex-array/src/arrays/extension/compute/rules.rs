@@ -11,6 +11,7 @@ use crate::arrays::ConstantArray;
 use crate::arrays::Extension;
 use crate::arrays::ExtensionArray;
 use crate::arrays::Filter;
+use crate::arrays::dict::TakeReduceAdaptor;
 use crate::arrays::extension::ExtensionArrayExt;
 use crate::arrays::filter::FilterReduceAdaptor;
 use crate::arrays::slice::SliceReduceAdaptor;
@@ -50,6 +51,7 @@ pub(crate) const PARENT_RULES: ParentRuleSet<Extension> = ParentRuleSet::new(&[
     ParentRuleSet::lift(&FilterReduceAdaptor(Extension)),
     ParentRuleSet::lift(&MaskReduceAdaptor(Extension)),
     ParentRuleSet::lift(&SliceReduceAdaptor(Extension)),
+    ParentRuleSet::lift(&TakeReduceAdaptor(Extension)),
 ]);
 
 /// Push filter operations into the storage array of an extension array.
@@ -87,8 +89,7 @@ mod tests {
 
     use crate::EmptyMetadata;
     use crate::IntoArray;
-    #[expect(deprecated)]
-    use crate::ToCanonical as _;
+    use crate::VortexSessionExecute;
     use crate::arrays::Constant;
     use crate::arrays::ConstantArray;
     use crate::arrays::Extension;
@@ -111,10 +112,8 @@ mod tests {
     use crate::scalar::ScalarValue;
     use crate::scalar_fn::fns::binary::Binary;
     use crate::scalar_fn::fns::operators::Operator;
-    use crate::session::ArraySession;
 
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(crate::array_session);
 
     #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
     struct TestExt;
@@ -122,6 +121,7 @@ mod tests {
         type Metadata = EmptyMetadata;
         type NativeValue<'a> = &'a str;
 
+        #[expect(clippy::disallowed_methods, reason = "test-only id")]
         fn id(&self) -> ExtId {
             ExtId::new("test_ext")
         }
@@ -180,8 +180,11 @@ mod tests {
         assert_eq!(ext_result.ext_dtype(), &ext_dtype);
 
         // Check the storage values
-        #[expect(deprecated)]
-        let storage_prim = ext_result.storage_array().to_primitive();
+        let storage_prim = ext_result
+            .storage_array()
+            .clone()
+            .execute::<PrimitiveArray>(&mut SESSION.create_execution_ctx())
+            .unwrap();
         let storage_result: &[i64] = &storage_prim.to_buffer::<i64>();
         assert_eq!(storage_result, &[1, 3, 5]);
     }
@@ -208,8 +211,11 @@ mod tests {
         assert_eq!(ext_result.len(), 3);
 
         // Check values: should be [Some(1), None, None]
-        #[expect(deprecated)]
-        let canonical = ext_result.storage_array().to_primitive();
+        let canonical = ext_result
+            .storage_array()
+            .clone()
+            .execute::<PrimitiveArray>(&mut SESSION.create_execution_ctx())
+            .unwrap();
         assert_eq!(canonical.len(), 3);
     }
 
@@ -246,6 +252,7 @@ mod tests {
             type Metadata = EmptyMetadata;
             type NativeValue<'a> = &'a str;
 
+            #[expect(clippy::disallowed_methods, reason = "test-only id")]
             fn id(&self) -> ExtId {
                 ExtId::new("test_ext_2")
             }

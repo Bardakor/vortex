@@ -5,23 +5,19 @@ use std::any::Any;
 use std::mem;
 
 use vortex_buffer::BitBufferMut;
-use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_mask::Mask;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
-use crate::LEGACY_SESSION;
-use crate::VortexSessionExecute;
 use crate::arrays::BoolArray;
 use crate::arrays::bool::BoolArrayExt;
 use crate::builders::ArrayBuilder;
 use crate::builders::DEFAULT_BUILDER_CAPACITY;
 use crate::builders::LazyBitBufferBuilder;
 use crate::canonical::Canonical;
-#[expect(deprecated)]
-use crate::canonical::ToCanonical as _;
 use crate::dtype::DType;
 use crate::dtype::Nullability;
 use crate::scalar::Scalar;
@@ -71,6 +67,17 @@ impl BoolBuilder {
             self.nulls.finish_with_nullability(self.dtype.nullability()),
         )
     }
+
+    pub(crate) fn append_bool_array(
+        &mut self,
+        array: &BoolArray,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<()> {
+        self.inner.append_buffer(&array.to_bit_buffer());
+        self.nulls
+            .append_validity_mask(&BoolArrayExt::validity(array).execute_mask(array.len(), ctx)?);
+        Ok(())
+    }
 }
 
 impl ArrayBuilder for BoolBuilder {
@@ -115,24 +122,6 @@ impl ArrayBuilder for BoolBuilder {
         Ok(())
     }
 
-    unsafe fn extend_from_array_unchecked(&mut self, array: &ArrayRef) {
-        #[expect(deprecated)]
-        let bool_array = array.to_bool();
-
-        self.inner.append_buffer(&bool_array.to_bit_buffer());
-        self.nulls.append_validity_mask(
-            &bool_array
-                .as_ref()
-                .validity()
-                .vortex_expect("validity_mask")
-                .execute_mask(
-                    bool_array.as_ref().len(),
-                    &mut LEGACY_SESSION.create_execution_ctx(),
-                )
-                .vortex_expect("Failed to compute validity mask"),
-        );
-    }
-
     fn reserve_exact(&mut self, additional: usize) {
         self.inner.reserve(additional);
         self.nulls.reserve_exact(additional);
@@ -146,7 +135,7 @@ impl ArrayBuilder for BoolBuilder {
         self.finish_into_bool().into_array()
     }
 
-    fn finish_into_canonical(&mut self) -> Canonical {
+    fn finish_into_canonical(&mut self, _ctx: &mut ExecutionCtx) -> Canonical {
         Canonical::Bool(self.finish_into_bool())
     }
 }
@@ -160,8 +149,8 @@ mod tests {
 
     use crate::ArrayRef;
     use crate::IntoArray;
-    use crate::LEGACY_SESSION;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::ChunkedArray;
     use crate::arrays::bool::BoolArrayExt;
     use crate::assert_arrays_eq;
@@ -169,8 +158,6 @@ mod tests {
     use crate::builders::BoolBuilder;
     use crate::builders::bool::BoolArray;
     use crate::builders::builder_with_capacity;
-    #[expect(deprecated)]
-    use crate::canonical::ToCanonical as _;
     use crate::dtype::DType;
     use crate::dtype::Nullability;
     use crate::scalar::Scalar;
@@ -198,16 +185,14 @@ mod tests {
         let chunk_count = 10;
         let chunk = make_opt_bool_chunks(len, chunk_count);
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let mut builder = builder_with_capacity(chunk.dtype(), len * chunk_count);
         chunk
             .clone()
             .append_to_builder(builder.as_mut(), &mut ctx)?;
 
-        #[expect(deprecated)]
-        let canon_into = builder.finish().to_bool();
-        #[expect(deprecated)]
-        let into_canon = chunk.to_bool();
+        let canon_into = builder.finish().execute::<BoolArray>(&mut ctx)?;
+        let into_canon = chunk.clone().execute::<BoolArray>(&mut ctx)?;
 
         assert!(canon_into.validity()?.mask_eq(
             &into_canon.validity()?,
@@ -220,6 +205,7 @@ mod tests {
 
     #[test]
     fn test_append_scalar() {
+        let mut ctx = array_session().create_execution_ctx();
         let mut builder = BoolBuilder::with_capacity(Nullability::Nullable, 10);
 
         // Test appending true value.
@@ -236,7 +222,7 @@ mod tests {
 
         let array = builder.finish_into_bool();
         let expected = BoolArray::from_iter([Some(true), Some(false), None]);
-        assert_arrays_eq!(&array, &expected);
+        assert_arrays_eq!(&array, &expected, &mut ctx);
 
         // Test wrong dtype error.
         let mut builder = BoolBuilder::with_capacity(Nullability::NonNullable, 10);

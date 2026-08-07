@@ -13,16 +13,16 @@ use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::extension::ExtensionArrayExt;
-use vortex_array::arrow::ArrowExport;
-use vortex_array::arrow::ArrowExportVTable;
-use vortex_array::arrow::ArrowImport;
-use vortex_array::arrow::ArrowImportVTable;
-use vortex_array::arrow::ArrowSession;
-use vortex_array::arrow::ArrowSessionExt;
-use vortex_array::arrow::FromArrowArray;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::extension::ExtDType;
 use vortex_array::dtype::extension::ExtVTable;
+use vortex_arrow::ArrowExport;
+use vortex_arrow::ArrowExportVTable;
+use vortex_arrow::ArrowImport;
+use vortex_arrow::ArrowImportVTable;
+use vortex_arrow::ArrowSession;
+use vortex_arrow::ArrowSessionExt;
+use vortex_arrow::FromArrowArray;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_session::registry::CachedId;
@@ -156,12 +156,11 @@ mod tests {
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::ExtensionArray;
     use vortex_array::arrays::VarBinArray;
-    use vortex_array::arrow::ArrowSessionExt;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::extension::ExtDType;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_error::VortexExpect;
     use vortex_error::VortexResult;
-    use vortex_session::VortexSession;
 
     use crate::Json;
     use crate::initialize;
@@ -169,7 +168,7 @@ mod tests {
     /// Export a JSON extension array to Arrow's canonical JSON extension.
     #[test]
     fn exports_json_extension_array_as_arrow_json() -> VortexResult<()> {
-        let session = VortexSession::empty();
+        let session = vortex_array::array_session();
         initialize(&session);
 
         let storage = VarBinArray::from_iter(
@@ -207,7 +206,7 @@ mod tests {
     /// Import Arrow's canonical JSON extension as a Vortex JSON extension array.
     #[test]
     fn imports_arrow_json_extension_array_as_vortex_json() -> VortexResult<()> {
-        let session = VortexSession::empty();
+        let session = vortex_array::array_session();
         initialize(&session);
 
         let mut field = Field::new("data", DataType::Utf8, false);

@@ -8,6 +8,7 @@ import pyarrow as pa
 
 from vortex.type_aliases import IntoProjection
 
+from . import CosStore, HfStore
 from .arrays import Array
 from .dataset import VortexDataset
 from .dtype import DType
@@ -46,6 +47,7 @@ class VortexFile:
         expr: Expr | None = None,
         limit: int | None = None,
         batch_size: int | None = None,
+        schema: pa.Schema | None = None,
     ) -> pa.RecordBatchReader: ...
     def to_dataset(self) -> VortexDataset: ...
     def to_polars(self) -> pl.LazyFrame: ...
@@ -54,6 +56,6 @@ class VortexFile:
 def open(
     path: str,
     *,
-    store: ObjectStore | None = None,
+    store: ObjectStore | CosStore | HfStore | None = None,
     without_segment_cache: bool = False,
 ) -> VortexFile: ...

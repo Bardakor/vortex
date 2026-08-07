@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+mod aggregate_pushdown;
 mod bind_input;
-mod client_context;
-mod config;
 mod connection;
 mod data;
 mod data_chunk;
 mod database;
 mod ddb_string;
 mod expr;
-mod file_system;
+mod function;
 mod logical_type;
 mod macro_;
 mod query_result;
 mod reusable_dict;
-mod scalar_function;
 mod selection_vector;
 mod string_map;
 mod table_filter;
@@ -27,20 +25,18 @@ mod vector_buffer;
 use std::ffi::c_void;
 use std::ptr;
 
+pub use aggregate_pushdown::*;
 pub use bind_input::*;
-pub use client_context::*;
-pub use config::*;
 pub use connection::*;
 pub use data::*;
 pub use data_chunk::*;
 pub use database::*;
 pub use ddb_string::*;
 pub use expr::*;
-pub use file_system::*;
+pub use function::*;
 pub use logical_type::*;
 pub use query_result::*;
 pub use reusable_dict::*;
-pub use scalar_function::*;
 pub use selection_vector::*;
 pub use string_map::*;
 pub use table_filter::*;

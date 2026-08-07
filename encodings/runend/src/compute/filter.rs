@@ -5,6 +5,7 @@ use std::cmp::min;
 use std::ops::AddAssign;
 
 use num_traits::AsPrimitive;
+use num_traits::NumCast;
 use vortex_array::ArrayRef;
 use vortex_array::ArrayView;
 use vortex_array::ExecutionCtx;
@@ -22,6 +23,7 @@ use vortex_mask::Mask;
 
 use crate::RunEnd;
 use crate::array::RunEndArrayExt;
+use crate::array::RunEndArraySlotsExt;
 use crate::compute::take::take_indices_unchecked;
 const FILTER_TAKE_THRESHOLD: f64 = 0.1;
 
@@ -74,7 +76,7 @@ impl FilterKernel for RunEnd {
 }
 
 // Code adapted from apache arrow-rs https://github.com/apache/arrow-rs/blob/b1f5c250ebb6c1252b4e7c51d15b8e77f4c361fa/arrow-select/src/filter.rs#L425
-fn filter_run_end_primitive<R: NativePType + AddAssign + From<bool> + AsPrimitive<u64>>(
+pub fn filter_run_end_primitive<R: NativePType + AddAssign + From<bool> + AsPrimitive<u64>>(
     run_ends: &[R],
     offset: u64,
     length: u64,
@@ -87,16 +89,21 @@ fn filter_run_end_primitive<R: NativePType + AddAssign + From<bool> + AsPrimitiv
     let mut count = R::zero();
 
     let new_mask: Mask = BitBuffer::collect_bool(run_ends.len(), |i| {
-        let mut keep = false;
         let end = min(run_ends[i].as_() - offset, length);
 
-        // Safety: predicate must be the same length as the array the ends have been taken from
-        for pred in (start..end).map(|i| unsafe {
-            mask.value_unchecked(i.try_into().vortex_expect("index must fit in usize"))
-        }) {
-            count += <R as From<bool>>::from(pred);
-            keep |= pred
-        }
+        // SIMD popcount of the predicate bits in this run. The range matches the
+        // bit-by-bit `value_unchecked` read it replaces, so `end <= mask.len()`.
+        let start_usize = start
+            .try_into()
+            .vortex_expect("run start index must fit in usize");
+        let end_usize = end
+            .try_into()
+            .vortex_expect("run end index must fit in usize");
+        let run_trues = mask.count_range(start_usize, end_usize);
+        count += <R as NumCast>::from(run_trues)
+            .vortex_expect("run popcount must fit in run-end native type");
+        let keep = run_trues > 0;
+
         // this is to avoid branching
         new_run_ends[j] = count;
         j += keep as usize;
@@ -116,7 +123,6 @@ fn filter_run_end_primitive<R: NativePType + AddAssign + From<bool> + AsPrimitiv
 #[cfg(test)]
 mod tests {
     use vortex_array::IntoArray;
-    use vortex_array::LEGACY_SESSION;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
@@ -125,11 +131,12 @@ mod tests {
 
     use crate::RunEnd;
     use crate::RunEndArray;
+    use crate::tests::SESSION;
 
     fn ree_array() -> RunEndArray {
         RunEnd::encode(
             PrimitiveArray::from_iter([1, 1, 1, 4, 4, 4, 2, 2, 5, 5, 5, 5]).into_array(),
-            &mut LEGACY_SESSION.create_execution_ctx(),
+            &mut SESSION.create_execution_ctx(),
         )
         .unwrap()
     }
@@ -139,14 +146,15 @@ mod tests {
         let arr = ree_array().slice(2..7)?;
         let filtered = arr.filter(Mask::from_iter([true, false, false, true, true]))?;
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         assert_arrays_eq!(
             filtered,
             RunEnd::new(
                 PrimitiveArray::from_iter([1u8, 2, 3]).into_array(),
                 PrimitiveArray::from_iter([1i32, 4, 2]).into_array(),
                 &mut ctx,
-            )
+            ),
+            &mut ctx
         );
         Ok(())
     }
@@ -157,7 +165,7 @@ mod tests {
     /// Filter unwrap one layer at a time so RunEnd's FilterKernel can fire.
     #[test]
     fn filter_sliced_run_end_preserves_encoding() -> VortexResult<()> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
 
         // 4 runs of 32 each = 128 rows. Large enough that FilterKernel takes
         // the run-preserving path (true_count >= 25).
@@ -186,7 +194,7 @@ mod tests {
             .chain(std::iter::repeat_n(30, 16))
             .chain(std::iter::repeat_n(40, 16))
             .collect();
-        assert_arrays_eq!(executed, PrimitiveArray::from_iter(expected));
+        assert_arrays_eq!(executed, PrimitiveArray::from_iter(expected), &mut ctx);
 
         Ok(())
     }

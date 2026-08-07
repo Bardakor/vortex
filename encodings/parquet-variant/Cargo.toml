@@ -25,13 +25,16 @@ parquet-variant = { workspace = true }
 parquet-variant-compute = { workspace = true }
 prost = { workspace = true }
 vortex-array = { workspace = true }
+vortex-arrow = { workspace = true }
 vortex-buffer = { workspace = true }
 vortex-error = { workspace = true }
+vortex-json = { workspace = true }
 vortex-mask = { workspace = true }
-vortex-proto = { workspace = true }
+vortex-proto = { workspace = true, features = ["expr"] }
 vortex-session = { workspace = true }
 
 [dev-dependencies]
+vortex-edition = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 vortex-array = { workspace = true, features = ["_test-harness"] }

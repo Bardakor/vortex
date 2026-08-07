@@ -17,9 +17,9 @@ use crate::copy::copy_to_finalize;
 use crate::copy::copy_to_initialize_global;
 use crate::copy::copy_to_sink;
 use crate::cpp;
+use crate::duckdb::AggregatePushdownInput;
 use crate::duckdb::BindInput;
 use crate::duckdb::BindResult;
-use crate::duckdb::ClientContext;
 use crate::duckdb::Data;
 use crate::duckdb::DataChunk;
 use crate::duckdb::DuckdbStringMap;
@@ -39,6 +39,8 @@ use crate::table_function::get_partition_data;
 use crate::table_function::init_global;
 use crate::table_function::init_local;
 use crate::table_function::pushdown_complex_filter;
+use crate::table_function::pushdown_projection_aggregates;
+use crate::table_function::pushdown_projection_expression;
 use crate::table_function::scan;
 use crate::table_function::statistics;
 use crate::table_function::table_scan_progress;
@@ -46,7 +48,7 @@ use crate::table_function::to_string;
 
 #[unsafe(no_mangle)]
 unsafe extern "C-unwind" fn duckdb_table_function_to_string(
-    bind_data: *mut c_void,
+    bind_data: *const c_void,
     map: cpp::duckdb_vx_string_map,
 ) {
     let bind_data = unsafe { bind_data.cast::<TableFunctionBind>().as_ref() }
@@ -112,6 +114,35 @@ unsafe extern "C-unwind" fn duckdb_table_function_pushdown_complex_filter(
 }
 
 #[unsafe(no_mangle)]
+unsafe extern "C-unwind" fn duckdb_table_function_pushdown_projection_expression(
+    bind_data: *mut c_void,
+    expr: cpp::duckdb_vx_expr,
+    column_id: usize,
+    error_out: *mut cpp::duckdb_vx_error,
+) -> bool {
+    let bind_data = unsafe { bind_data.cast::<TableFunctionBind>().as_mut() }
+        .vortex_expect("bind_data null pointer");
+    let expr = unsafe { Expression::borrow(expr) };
+    try_or(error_out, || {
+        pushdown_projection_expression(bind_data, expr, column_id)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn duckdb_table_function_pushdown_projection_aggregates(
+    bind_data: *mut c_void,
+    input: cpp::duckdb_vx_agg_input,
+    error_out: *mut cpp::duckdb_vx_error,
+) -> bool {
+    let bind_data = unsafe { bind_data.cast::<TableFunctionBind>().as_mut() }
+        .vortex_expect("bind_data null pointer");
+    let input = unsafe { AggregatePushdownInput::borrow(input) };
+    try_or(error_out, || {
+        pushdown_projection_aggregates(bind_data, input)
+    })
+}
+
+#[unsafe(no_mangle)]
 unsafe extern "C-unwind" fn duckdb_table_function_scan(
     global_init_data: *mut c_void,
     local_init_data: *mut c_void,
@@ -147,7 +178,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_pushdown_expression(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_cardinality(
-    bind_data: *mut c_void,
+    bind_data: *const c_void,
     node_stats_out: *mut cpp::duckdb_vx_node_statistics,
 ) {
     let bind_data = unsafe { bind_data.cast::<TableFunctionBind>().as_ref() }
@@ -157,6 +188,12 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_cardinality(
 
     match cardinality(bind_data) {
         Cardinality::Unknown => {}
+        Cardinality::Exact(c) => {
+            node_stats.has_estimated_cardinality = true;
+            node_stats.estimated_cardinality = c as _;
+            node_stats.has_max_cardinality = true;
+            node_stats.max_cardinality = c as _;
+        }
         Cardinality::Estimate(c) => {
             node_stats.has_estimated_cardinality = true;
             node_stats.estimated_cardinality = c as _;
@@ -186,28 +223,29 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_init_global(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_init_local(
+    bind_data: *const c_void,
     global_init_data: *mut c_void,
 ) -> cpp::duckdb_vx_data {
+    let bind_data = unsafe { bind_data.cast::<TableFunctionBind>().as_ref() }
+        .vortex_expect("bind_data null pointer");
     let global_init_data = unsafe { global_init_data.cast::<TableFunctionGlobal>().as_ref() }
         .vortex_expect("global_init_data null pointer");
 
-    let init_data = init_local(global_init_data);
+    let init_data = init_local(bind_data, global_init_data);
     Data::from(Box::new(init_data)).as_ptr()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_bind(
-    ctx: cpp::duckdb_client_context,
     bind_input: cpp::duckdb_vx_tfunc_bind_input,
     bind_result: cpp::duckdb_vx_tfunc_bind_result,
     error_out: *mut cpp::duckdb_vx_error,
 ) -> cpp::duckdb_vx_data {
-    let client_context = unsafe { ClientContext::borrow(ctx) };
     let bind_input = unsafe { BindInput::own(bind_input) };
     let mut bind_result = unsafe { BindResult::own(bind_result) };
 
     try_or_null(error_out, || {
-        let bind_data = bind(client_context, &bind_input, &mut bind_result)?;
+        let bind_data = bind(&bind_input, &mut bind_result)?;
         Ok(Data::from(Box::new(bind_data)).as_ptr())
     })
 }
@@ -254,7 +292,6 @@ pub unsafe extern "C-unwind" fn duckdb_copy_function_copy_to_bind(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_copy_function_copy_to_initialize_global(
-    client_context: cpp::duckdb_client_context,
     bind_data: *const c_void,
     file_path: *const c_char,
     error_out: *mut cpp::duckdb_vx_error,
@@ -264,9 +301,8 @@ pub unsafe extern "C-unwind" fn duckdb_copy_function_copy_to_initialize_global(
         .into_owned();
     let bind_data = unsafe { bind_data.cast::<CopyFunctionBind>().as_ref() }
         .vortex_expect("bind_data null pointer");
-    let ctx = unsafe { ClientContext::borrow(client_context) };
     try_or_null(error_out, || {
-        let bind_data = copy_to_initialize_global(ctx, bind_data, file_path)?;
+        let bind_data = copy_to_initialize_global(bind_data, file_path)?;
         Ok(Data::from(Box::new(bind_data)).as_ptr())
     })
 }

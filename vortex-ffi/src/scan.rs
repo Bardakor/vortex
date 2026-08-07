@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
-#![allow(non_camel_case_types)]
-#![deny(missing_docs)]
 
 use core::slice;
 use std::ffi::c_int;
@@ -18,7 +16,6 @@ use futures::StreamExt;
 use vortex::array::ArrayRef;
 use vortex::array::ExecutionCtx;
 use vortex::array::VortexSessionExecute;
-use vortex::array::arrow::ArrowSessionExt;
 use vortex::array::expr::stats::Precision;
 use vortex::array::stream::SendableArrayStream;
 use vortex::buffer::Buffer;
@@ -28,14 +25,19 @@ use vortex::error::vortex_ensure;
 use vortex::expr::root;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::scan::arrow::RecordBatchIteratorAdapter;
+use vortex::scan::DataSource;
 use vortex::scan::DataSourceScan;
 use vortex::scan::Partition;
 use vortex::scan::PartitionStream;
 use vortex::scan::ScanRequest;
 use vortex::scan::selection::Selection;
+use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
+use vortex_arrow::ArrowSessionExt;
+use vortex_arrow::ToArrowType;
 
 use crate::RUNTIME;
 use crate::array::vx_array;
+use crate::box_wrapper;
 use crate::data_source::vx_data_source;
 use crate::dtype::vx_dtype;
 use crate::error::try_or;
@@ -49,9 +51,9 @@ pub enum VxScan {
     Started(PartitionStream),
     Finished,
 }
-crate::box_wrapper!(
-    /// A scan is a single traversal of a data source with projections and
-    /// filters. A scan can be consumed only once.
+box_wrapper!(
+    /// A vx_scan is a single traversal of a vx_data_source with projections and
+    /// filters. A vx_scan can be consumed only once.
     VxScan,
     vx_scan);
 
@@ -60,11 +62,28 @@ pub enum VxPartitionScan {
     Started(SendableArrayStream),
     Finished,
 }
-crate::box_wrapper!(
-    /// A partition is an independent unit of work. Call vx_partition_next repeatedly to
-    /// retrieve arrays, then free the partition with vx_partition_free.
+box_wrapper!(
+    /// A vx_partition is an independent unit of work. Call vx_partition_next
+    /// repeatedly to retrieve arrays, then free the partition with
+    /// vx_partition_free.
     VxPartitionScan,
     vx_partition);
+
+/// Consume an owned partition pointer for layered FFI crates and return its Vortex array stream.
+///
+/// # Safety
+///
+/// `partition` must be a non-null owned partition handle created by `vortex-ffi`. This function
+/// consumes the handle; callers must not use or free it after calling this function.
+pub unsafe fn vx_partition_into_array_stream(
+    partition: *mut vx_partition,
+) -> VortexResult<SendableArrayStream> {
+    vortex_ensure!(!partition.is_null(), "null vx_partition");
+    match *vx_partition::into_box(partition) {
+        VxPartitionScan::Pending(partition) => partition.execute(),
+        _ => vortex_bail!("partition already being consumed"),
+    }
+}
 
 // We parse Selection from vx_scan_selection[_include], so we don't need
 // to instantiate VX_SELECTION_* items directly.
@@ -161,13 +180,13 @@ fn scan_request(opts: *const vx_scan_options) -> VortexResult<ScanRequest> {
             vortex_ensure!(!selection.idx.is_null());
             let buf = unsafe { slice::from_raw_parts(selection.idx, selection.idx_len) };
             let buf = Buffer::copy_from(buf);
-            Selection::IncludeByIndex(buf)
+            Selection::IncludeByIndex(StrictSortedBuffer::try_new(buf)?)
         }
         vx_scan_selection_include::VX_SELECTION_EXCLUDE_RANGE => {
             vortex_ensure!(!selection.idx.is_null());
             let buf = unsafe { slice::from_raw_parts(selection.idx, selection.idx_len) };
             let buf = Buffer::copy_from(buf);
-            Selection::ExcludeByIndex(buf)
+            Selection::ExcludeByIndex(StrictSortedBuffer::try_new(buf)?)
         }
     };
 
@@ -209,9 +228,7 @@ fn write_estimate<T: Into<u64>>(estimate: Precision<T>, out: &mut vx_estimate) {
 
 /// Scan a data source.
 ///
-/// Return an owned scan that must be freed with vx_scan_free. A scan may be
-/// consumed only once.
-///
+/// A scan may be consumed only once.
 /// "options" and "estimate" may be NULL.
 ///
 /// If "options" is NULL, all rows and columns are returned.
@@ -240,10 +257,8 @@ pub unsafe extern "C-unwind" fn vx_data_source_scan(
     })
 }
 
-/// Return borrowed vx_scan's dtype.
+/// Return scan's dtype.
 /// This function will fail if called after vx_scan_next_partition.
-/// Called must not free the returned pointer as its lifetime is bound to the
-/// lifetime of the scan.
 /// On error returns NULL and sets "err".
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn vx_scan_dtype(
@@ -255,12 +270,11 @@ pub unsafe extern "C-unwind" fn vx_scan_dtype(
         let VxScan::Pending(scan) = scan else {
             vortex_bail!("dtype unavailable: scan already started");
         };
-        Ok(vx_dtype::new_ref(scan.dtype()))
+        Ok(vx_dtype::new(scan.dtype().clone()))
     })
 }
 
-/// Return an owned partition from a scan.
-/// The returned partition must be freed with vx_partition_free.
+/// Return an partition from a scan.
 ///
 /// On success returns a partition.
 /// On exhaustion (no more partitions in scan) returns NULL but doesn't set
@@ -382,8 +396,7 @@ pub unsafe extern "C-unwind" fn vx_partition_scan_arrow(
     })
 }
 
-/// Return an owned owned array from a partition.
-/// The returned array must be freed with vx_array_free.
+/// Return an array from a partition.
 ///
 /// On success returns an array.
 /// On exhaustion (no more arrays in partition) returns NULL but doesn't set
@@ -408,7 +421,7 @@ pub unsafe extern "C-unwind" fn vx_partition_next(
         let on_stream = |mut stream: SendableArrayStream| -> VortexResult<*const vx_array> {
             match RUNTIME.block_on(stream.next()) {
                 Some(array) => {
-                    let array = vx_array::new(Arc::new(array?));
+                    let array = vx_array::new(array?);
                     ptr::write(ptr, VxPartitionScan::Started(stream));
                     Ok(array)
                 }
@@ -431,13 +444,13 @@ pub unsafe extern "C-unwind" fn vx_partition_next(
 #[cfg(not(windows))]
 #[cfg(test)]
 mod tests {
-    use std::ffi::CString;
     use std::ptr;
 
     use vortex::VortexSessionDefault;
     use vortex::array::arrays::StructArray;
     use vortex::session::VortexSession;
-    use vortex_array::ExecutionCtx;
+    use vortex_array::VortexSessionExecute;
+    use vortex_array::array_session;
     use vortex_array::arrays::struct_::StructArrayExt;
     use vortex_array::assert_arrays_eq;
 
@@ -466,6 +479,7 @@ mod tests {
     use crate::scan::vx_scan_selection_include;
     use crate::session::vx_session_free;
     use crate::session::vx_session_new;
+    use crate::string::vx_view;
     use crate::tests::SAMPLE_ROWS;
     use crate::tests::assert_no_error;
     use crate::tests::write_sample;
@@ -476,9 +490,10 @@ mod tests {
         unsafe {
             let session = vx_session_new();
             let (sample, struct_array) = write_sample(session);
-            let path = CString::new(sample.path().to_str().unwrap()).unwrap();
+            let path = vx_view::from_str(sample.path().to_str().unwrap());
             let ds_options = vx_data_source_options {
-                paths: path.as_ptr(),
+                paths: &raw const path,
+                paths_len: 1,
             };
 
             let mut error = ptr::null_mut();
@@ -516,17 +531,19 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_no_options() {
+        let mut ctx = array_session().create_execution_ctx();
         let (array, struct_array) = scan(ptr::null());
-        assert_arrays_eq!(vx_array::as_ref(array), struct_array);
+        assert_arrays_eq!(vx_array::as_ref(array), struct_array, &mut ctx);
         unsafe { vx_array_free(array) };
     }
 
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_project_all() {
+        let mut ctx = array_session().create_execution_ctx();
         let opts = vx_scan_options::default();
         let (array, struct_array) = scan(&raw const opts);
-        assert_arrays_eq!(vx_array::as_ref(array), struct_array);
+        assert_arrays_eq!(vx_array::as_ref(array), struct_array, &mut ctx);
         unsafe { vx_array_free(array) };
     }
 
@@ -534,17 +551,19 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_project_single_field() {
         unsafe {
+            let mut ctx = array_session().create_execution_ctx();
             let root = vx_expression_root();
             let mut opts = vx_scan_options::default();
 
-            for (field, c_field) in [("age", c"age"), ("height", c"height"), ("name", c"name")] {
-                let field_expr = vx_expression_get_item(c_field.as_ptr(), root);
+            for field in ["age", "height", "name"] {
+                let field_expr = vx_expression_get_item(vx_view::from_str(field), root);
                 assert!(!field_expr.is_null());
                 opts.projection = field_expr;
                 let (array, struct_array) = scan(&raw const opts);
                 assert_arrays_eq!(
                     vx_array::as_ref(array),
-                    struct_array.unmasked_field_by_name(field).unwrap()
+                    struct_array.unmasked_field_by_name(field).unwrap(),
+                    &mut ctx
                 );
                 vx_array_free(array);
                 vx_expression_free(field_expr);
@@ -557,13 +576,13 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_project_sum() {
         let session = VortexSession::default();
-        let mut ctx = ExecutionCtx::new(session);
+        let mut ctx = session.create_execution_ctx();
         unsafe {
             let root = vx_expression_root();
             let mut opts = vx_scan_options::default();
 
-            let expr_age = vx_expression_get_item(c"age".as_ptr(), root);
-            let expr_height = vx_expression_get_item(c"height".as_ptr(), root);
+            let expr_age = vx_expression_get_item(vx_view::from_str("age"), root);
+            let expr_height = vx_expression_get_item(vx_view::from_str("height"), root);
             let expr_sum =
                 vx_expression_binary(vx_binary_operator::VX_OPERATOR_ADD, expr_age, expr_height);
 
@@ -593,7 +612,7 @@ mod tests {
     fn test_filter() {
         unsafe {
             let root = vx_expression_root();
-            let age_expr = vx_expression_get_item(c"age".as_ptr(), root);
+            let age_expr = vx_expression_get_item(vx_view::from_str("age"), root);
             let value = vx_scalar_new_u64(100, false);
             let mut error = ptr::null_mut();
             let lit_100 = vx_expression_literal(value, &raw mut error);
@@ -622,7 +641,7 @@ mod tests {
     fn test_filter_project() {
         unsafe {
             let root = vx_expression_root();
-            let age_expr = vx_expression_get_item(c"age".as_ptr(), root);
+            let age_expr = vx_expression_get_item(vx_view::from_str("age"), root);
             let value = vx_scalar_new_u64(100, false);
             let mut error = ptr::null_mut();
             let lit_100 = vx_expression_literal(value, &raw mut error);
@@ -630,7 +649,7 @@ mod tests {
             vx_scalar_free(value);
             let filter =
                 vx_expression_binary(vx_binary_operator::VX_OPERATOR_GTE, age_expr, lit_100);
-            let projection = vx_expression_get_item(c"age".as_ptr(), root);
+            let projection = vx_expression_get_item(vx_view::from_str("age"), root);
 
             let opts = vx_scan_options {
                 projection,
@@ -694,12 +713,13 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_ordered() {
+        let mut ctx = array_session().create_execution_ctx();
         let opts = vx_scan_options {
             ordered: true,
             ..Default::default()
         };
         let (array, struct_array) = scan(&raw const opts);
-        assert_arrays_eq!(vx_array::as_ref(array), struct_array);
+        assert_arrays_eq!(vx_array::as_ref(array), struct_array, &mut ctx);
         unsafe { vx_array_free(array) };
     }
 
@@ -709,9 +729,10 @@ mod tests {
         unsafe {
             let session = vx_session_new();
             let (sample, _) = write_sample(session);
-            let path = CString::new(sample.path().to_str().unwrap()).unwrap();
+            let path = vx_view::from_str(sample.path().to_str().unwrap());
             let ds_options = vx_data_source_options {
-                paths: path.as_ptr(),
+                paths: &raw const path,
+                paths_len: 1,
             };
 
             let mut error = ptr::null_mut();

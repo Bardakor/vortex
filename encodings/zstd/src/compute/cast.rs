@@ -12,6 +12,7 @@ use vortex_error::VortexResult;
 
 use crate::Zstd;
 use crate::ZstdData;
+use crate::ZstdSlots;
 
 impl CastReduce for Zstd {
     fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
@@ -33,12 +34,17 @@ impl CastReduce for Zstd {
             }
             (Nullability::NonNullable, Nullability::Nullable) => {
                 // nonnull => null, trivial cast by altering the validity
-                child_to_validity(array.slots()[0].as_ref(), array.dtype().nullability())
+                child_to_validity(
+                    array.slots()[ZstdSlots::VALIDITY].as_ref(),
+                    array.dtype().nullability(),
+                )
             }
             (Nullability::Nullable, Nullability::NonNullable) => {
                 // null => non-null works if there are no nulls in the sliced range
-                let unsliced_validity =
-                    child_to_validity(array.slots()[0].as_ref(), array.dtype().nullability());
+                let unsliced_validity = child_to_validity(
+                    array.slots()[ZstdSlots::VALIDITY].as_ref(),
+                    array.dtype().nullability(),
+                );
                 let has_nulls = !unsliced_validity
                     .slice(array.slice_start()..array.slice_stop())?
                     .definitely_no_nulls();
@@ -83,15 +89,13 @@ mod tests {
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
-    use vortex_array::session::ArraySession;
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_session::VortexSession;
 
     use crate::Zstd;
 
-    static SESSION: LazyLock<VortexSession> =
-        LazyLock::new(|| VortexSession::empty().with::<ArraySession>());
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(vortex_array::array_session);
 
     #[test]
     fn test_cast_zstd_i32_to_i64() {
@@ -109,7 +113,11 @@ mod tests {
         );
 
         let decoded = casted.execute::<PrimitiveArray>(&mut ctx).unwrap();
-        assert_arrays_eq!(decoded, PrimitiveArray::from_iter([1i64, 2, 3, 4, 5]));
+        assert_arrays_eq!(
+            decoded,
+            PrimitiveArray::from_iter([1i64, 2, 3, 4, 5]),
+            &mut ctx
+        );
     }
 
     #[test]
@@ -146,7 +154,11 @@ mod tests {
         );
         // Verify the values are correct
         let decoded = casted.execute::<PrimitiveArray>(&mut ctx).unwrap();
-        assert_arrays_eq!(decoded, PrimitiveArray::from_iter([20u32, 30, 40, 50]));
+        assert_arrays_eq!(
+            decoded,
+            PrimitiveArray::from_iter([20u32, 30, 40, 50]),
+            &mut ctx
+        );
     }
 
     #[test]
@@ -171,7 +183,7 @@ mod tests {
         );
         let decoded = casted.execute::<PrimitiveArray>(&mut ctx).unwrap();
         let expected = PrimitiveArray::from_iter([20u32, 30, 40, 50]);
-        assert_arrays_eq!(decoded, expected);
+        assert_arrays_eq!(decoded, expected, &mut ctx);
     }
 
     #[rstest]
@@ -194,6 +206,6 @@ mod tests {
     fn test_cast_zstd_conformance(#[case] values: PrimitiveArray) {
         let zstd =
             Zstd::from_primitive(&values, 0, 0, &mut SESSION.create_execution_ctx()).unwrap();
-        test_cast_conformance(&zstd.into_array());
+        test_cast_conformance(&zstd.into_array(), &mut SESSION.create_execution_ctx());
     }
 }

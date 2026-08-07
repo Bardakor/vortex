@@ -19,8 +19,8 @@ use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::arrays::ConstantArray;
 use crate::dtype::DType;
-use crate::expr::Expression;
-use crate::expr::StatsCatalog;
+use crate::expr::BoundExpression;
+use crate::expr::display::ExprDisplay;
 use crate::expr::traversal::NodeExt;
 use crate::expr::traversal::NodeVisitor;
 use crate::expr::traversal::TraversalOrder;
@@ -65,10 +65,10 @@ impl ScalarFnVTable for DynamicComparison {
     fn fmt_sql(
         &self,
         dynamic: &DynamicComparisonExpr,
-        expr: &Expression,
+        expr: &dyn ExprDisplay,
         f: &mut Formatter<'_>,
     ) -> std::fmt::Result {
-        expr.child(0).fmt_sql(f)?;
+        Display::fmt(expr.display_child(0), f)?;
         write!(f, " {} dynamic(", dynamic.operator)?;
         match dynamic.scalar() {
             None => write!(f, "scalar=<none>")?,
@@ -120,52 +120,7 @@ impl ScalarFnVTable for DynamicComparison {
         .into_array())
     }
 
-    fn stat_falsification(
-        &self,
-        dynamic: &DynamicComparisonExpr,
-        expr: &Expression,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression> {
-        let lhs = expr.child(0);
-        match dynamic.operator {
-            CompareOperator::Eq | CompareOperator::NotEq => None,
-            CompareOperator::Gt => Some(DynamicComparison.new_expr(
-                DynamicComparisonExpr {
-                    operator: CompareOperator::Lte,
-                    rhs: Arc::clone(&dynamic.rhs),
-                    default: !dynamic.default,
-                },
-                vec![lhs.stat_max(catalog)?],
-            )),
-            CompareOperator::Gte => Some(DynamicComparison.new_expr(
-                DynamicComparisonExpr {
-                    operator: CompareOperator::Lt,
-                    rhs: Arc::clone(&dynamic.rhs),
-                    default: !dynamic.default,
-                },
-                vec![lhs.stat_max(catalog)?],
-            )),
-            CompareOperator::Lt => Some(DynamicComparison.new_expr(
-                DynamicComparisonExpr {
-                    operator: CompareOperator::Gte,
-                    rhs: Arc::clone(&dynamic.rhs),
-                    default: !dynamic.default,
-                },
-                vec![lhs.stat_min(catalog)?],
-            )),
-            CompareOperator::Lte => Some(DynamicComparison.new_expr(
-                DynamicComparisonExpr {
-                    operator: CompareOperator::Gt,
-                    rhs: Arc::clone(&dynamic.rhs),
-                    default: !dynamic.default,
-                },
-                vec![lhs.stat_min(catalog)?],
-            )),
-        }
-    }
-
-    // Defer to the child
-    fn is_null_sensitive(&self, _instance: &Self::Options) -> bool {
+    fn is_strict(&self, _options: &Self::Options) -> bool {
         false
     }
 }
@@ -250,15 +205,19 @@ pub struct DynamicExprUpdates {
 }
 
 impl DynamicExprUpdates {
-    pub fn new(expr: &Expression) -> Option<Self> {
+    /// Track dynamic scalar functions contained in a bound expression tree.
+    pub fn new(expr: &BoundExpression) -> Option<Self> {
         #[derive(Default)]
         struct Visitor(Vec<DynamicComparisonExpr>);
 
         impl NodeVisitor<'_> for Visitor {
-            type NodeTy = Expression;
+            type NodeTy = BoundExpression;
 
             fn visit_down(&mut self, node: &'_ Self::NodeTy) -> VortexResult<TraversalOrder> {
-                if let Some(dynamic) = node.as_opt::<DynamicComparison>() {
+                if let Some(dynamic) = node
+                    .as_scalar()
+                    .and_then(|scalar_fn| scalar_fn.as_opt::<DynamicComparison>())
+                {
                     self.0.push(dynamic.clone());
                 }
                 Ok(TraversalOrder::Continue)
@@ -322,6 +281,8 @@ mod tests {
 
     use super::*;
     use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::BoolArray;
     use crate::assert_arrays_eq;
     use crate::dtype::DType;
@@ -329,6 +290,20 @@ mod tests {
     use crate::dtype::PType;
     use crate::expr::dynamic;
     use crate::expr::root;
+
+    #[test]
+    fn is_not_strict() {
+        let expr = dynamic(
+            CompareOperator::Lt,
+            || None,
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+            true,
+            root(),
+        );
+
+        assert!(!expr.signature().is_strict());
+    }
+
     #[test]
     fn return_dtype_bool() -> VortexResult<()> {
         let expr = dynamic(
@@ -348,6 +323,7 @@ mod tests {
 
     #[test]
     fn execute_with_value() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let input = buffer![1i32, 5, 10].into_array();
         let expr = dynamic(
             CompareOperator::Lt,
@@ -357,12 +333,13 @@ mod tests {
             root(),
         );
         let result = input.apply(&expr)?;
-        assert_arrays_eq!(result, BoolArray::from_iter([true, false, false]));
+        assert_arrays_eq!(result, BoolArray::from_iter([true, false, false]), &mut ctx);
         Ok(())
     }
 
     #[test]
     fn execute_without_value_default_true() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let input = buffer![1i32, 5, 10].into_array();
         let expr = dynamic(
             CompareOperator::Lt,
@@ -372,12 +349,13 @@ mod tests {
             root(),
         );
         let result = input.apply(&expr)?;
-        assert_arrays_eq!(result, BoolArray::from_iter([true, true, true]));
+        assert_arrays_eq!(result, BoolArray::from_iter([true, true, true]), &mut ctx);
         Ok(())
     }
 
     #[test]
     fn execute_without_value_default_false() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let input = buffer![1i32, 5, 10].into_array();
         let expr = dynamic(
             CompareOperator::Lt,
@@ -387,12 +365,17 @@ mod tests {
             root(),
         );
         let result = input.apply(&expr)?;
-        assert_arrays_eq!(result, BoolArray::from_iter([false, false, false]));
+        assert_arrays_eq!(
+            result,
+            BoolArray::from_iter([false, false, false]),
+            &mut ctx
+        );
         Ok(())
     }
 
     #[test]
     fn execute_value_flips() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let threshold = Arc::new(AtomicI32::new(5));
         let threshold_clone = Arc::clone(&threshold);
         let expr = dynamic(
@@ -405,11 +388,11 @@ mod tests {
         let input = buffer![1i32, 5, 10].into_array();
 
         let result = input.clone().apply(&expr)?;
-        assert_arrays_eq!(result, BoolArray::from_iter([true, false, false]));
+        assert_arrays_eq!(result, BoolArray::from_iter([true, false, false]), &mut ctx);
 
         threshold.store(10, Ordering::SeqCst);
         let result = input.apply(&expr)?;
-        assert_arrays_eq!(result, BoolArray::from_iter([true, true, false]));
+        assert_arrays_eq!(result, BoolArray::from_iter([true, true, false]), &mut ctx);
 
         Ok(())
     }

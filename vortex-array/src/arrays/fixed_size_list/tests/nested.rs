@@ -6,10 +6,8 @@ use std::sync::Arc;
 use vortex_buffer::buffer;
 
 use crate::IntoArray;
-use crate::LEGACY_SESSION;
-#[expect(deprecated)]
-use crate::ToCanonical as _;
 use crate::VortexSessionExecute;
+use crate::array_session;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::StructArray;
@@ -76,7 +74,7 @@ fn test_fsl_of_fsl_basic() {
     // The first outer list should contain 3 inner lists.
     // We can check by slicing and examining scalars.
     let first_scalar = outer_fsl
-        .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+        .execute_scalar(0, &mut array_session().create_execution_ctx())
         .unwrap();
     assert!(!first_scalar.is_null());
 
@@ -85,58 +83,60 @@ fn test_fsl_of_fsl_basic() {
     let first_outer_list = outer_fsl.fixed_size_list_elements_at(0).unwrap();
 
     // Check first inner list [1,2].
-    #[expect(deprecated)]
     let inner_list_0 = first_outer_list
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(0)
         .unwrap();
     assert_eq!(
         inner_list_0
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         1i32.into()
     );
     assert_eq!(
         inner_list_0
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         2i32.into()
     );
 
     // Check second inner list [3,4].
-    #[expect(deprecated)]
     let inner_list_1 = first_outer_list
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(1)
         .unwrap();
     assert_eq!(
         inner_list_1
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         3i32.into()
     );
     assert_eq!(
         inner_list_1
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         4i32.into()
     );
 
     // Check third inner list [5,6].
-    #[expect(deprecated)]
     let inner_list_2 = first_outer_list
-        .to_fixed_size_list()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(2)
         .unwrap();
     assert_eq!(
         inner_list_2
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         5i32.into()
     );
     assert_eq!(
         inner_list_2
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         6i32.into()
     );
@@ -145,58 +145,60 @@ fn test_fsl_of_fsl_basic() {
     let second_outer_list = outer_fsl.fixed_size_list_elements_at(1).unwrap();
 
     // Check first inner list [7,8].
-    #[expect(deprecated)]
     let inner_list_0 = second_outer_list
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(0)
         .unwrap();
     assert_eq!(
         inner_list_0
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         7i32.into()
     );
     assert_eq!(
         inner_list_0
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         8i32.into()
     );
 
     // Check second inner list [9,10].
-    #[expect(deprecated)]
     let inner_list_1 = second_outer_list
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(1)
         .unwrap();
     assert_eq!(
         inner_list_1
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         9i32.into()
     );
     assert_eq!(
         inner_list_1
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         10i32.into()
     );
 
     // Check third inner list [11,12].
-    #[expect(deprecated)]
     let inner_list_2 = second_outer_list
-        .to_fixed_size_list()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(2)
         .unwrap();
     assert_eq!(
         inner_list_2
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         11i32.into()
     );
     assert_eq!(
         inner_list_2
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         12i32.into()
     );
@@ -246,7 +248,7 @@ fn test_fsl_of_fsl_with_nulls() {
     // First outer list is valid.
     assert!(
         !outer_fsl
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap()
             .is_null()
     );
@@ -254,7 +256,7 @@ fn test_fsl_of_fsl_with_nulls() {
     // Second outer list is null.
     assert!(
         outer_fsl
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap()
             .is_null()
     );
@@ -262,7 +264,7 @@ fn test_fsl_of_fsl_with_nulls() {
     // Third outer list is valid.
     assert!(
         !outer_fsl
-            .execute_scalar(2, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(2, &mut array_session().create_execution_ctx())
             .unwrap()
             .is_null()
     );
@@ -307,87 +309,90 @@ fn test_deeply_nested_fsl() {
     // Check the actual deeply nested values.
     // Structure: [[[1,2],[3,4]],[[5,6],[7,8]]].
     let top_level = level3.fixed_size_list_elements_at(0).unwrap();
-    #[expect(deprecated)]
     let level2_0 = top_level
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(0)
         .unwrap();
-    #[expect(deprecated)]
     let level2_1 = top_level
-        .to_fixed_size_list()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(1)
         .unwrap();
 
     // First level-2 list: [[1,2],[3,4]].
-    #[expect(deprecated)]
     let level1_0_0 = level2_0
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(0)
         .unwrap();
     assert_eq!(
         level1_0_0
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         1i32.into()
     );
     assert_eq!(
         level1_0_0
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         2i32.into()
     );
 
-    #[expect(deprecated)]
     let level1_0_1 = level2_0
-        .to_fixed_size_list()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(1)
         .unwrap();
     assert_eq!(
         level1_0_1
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         3i32.into()
     );
     assert_eq!(
         level1_0_1
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         4i32.into()
     );
 
     // Second level-2 list: [[5,6],[7,8]].
-    #[expect(deprecated)]
     let level1_1_0 = level2_1
-        .to_fixed_size_list()
+        .clone()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(0)
         .unwrap();
     assert_eq!(
         level1_1_0
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         5i32.into()
     );
     assert_eq!(
         level1_1_0
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         6i32.into()
     );
 
-    #[expect(deprecated)]
     let level1_1_1 = level2_1
-        .to_fixed_size_list()
+        .execute::<FixedSizeListArray>(&mut array_session().create_execution_ctx())
+        .unwrap()
         .fixed_size_list_elements_at(1)
         .unwrap();
     assert_eq!(
         level1_1_1
-            .execute_scalar(0, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(0, &mut array_session().create_execution_ctx())
             .unwrap(),
         7i32.into()
     );
     assert_eq!(
         level1_1_1
-            .execute_scalar(1, &mut LEGACY_SESSION.create_execution_ctx())
+            .execute_scalar(1, &mut array_session().create_execution_ctx())
             .unwrap(),
         8i32.into()
     );

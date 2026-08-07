@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::fmt::Display;
 use std::fmt::Formatter;
 
 use prost::Message;
@@ -18,12 +19,10 @@ use crate::builtins::ArrayBuiltins;
 use crate::builtins::ExprBuiltins;
 use crate::dtype::DType;
 use crate::dtype::FieldName;
-use crate::dtype::FieldPath;
 use crate::dtype::Nullability;
 use crate::expr::Expression;
-use crate::expr::StatsCatalog;
+use crate::expr::display::ExprDisplay;
 use crate::expr::lit;
-use crate::expr::stats::Stat;
 use crate::scalar_fn::Arity;
 use crate::scalar_fn::ChildName;
 use crate::scalar_fn::EmptyOptions;
@@ -81,10 +80,10 @@ impl ScalarFnVTable for GetItem {
     fn fmt_sql(
         &self,
         field_name: &FieldName,
-        expr: &Expression,
+        expr: &dyn ExprDisplay,
         f: &mut Formatter<'_>,
     ) -> std::fmt::Result {
-        expr.children()[0].fmt_sql(f)?;
+        Display::fmt(expr.display_child(0), f)?;
         write!(f, ".{}", field_name)
     }
 
@@ -188,26 +187,7 @@ impl ScalarFnVTable for GetItem {
         Ok(None)
     }
 
-    fn stat_expression(
-        &self,
-        field_name: &FieldName,
-        _expr: &Expression,
-        stat: Stat,
-        catalog: &dyn StatsCatalog,
-    ) -> Option<Expression> {
-        // TODO(ngates): I think we can do better here and support stats over nested fields.
-        //  It would be nice if delegating to our child would return a struct of statistics
-        //  matching the nested DType such that we can write:
-        //    `get_item(expr.child(0).stat_expression(...), expr.data().field_name())`
-
-        // TODO(ngates): this is a bug whereby we may return stats for a nested field of the same
-        //  name as a field in the root struct. This should be resolved with upcoming change to
-        //  falsify expressions, but for now I'm preserving the existing buggy behavior.
-        catalog.stats_ref(&FieldPath::from_name(field_name.clone()), stat)
-    }
-
-    // This will apply struct nullability field. We could add a dtype??
-    fn is_null_sensitive(&self, _field_name: &FieldName) -> bool {
+    fn is_strict(&self, _field_name: &FieldName) -> bool {
         true
     }
 
@@ -220,6 +200,7 @@ impl ScalarFnVTable for GetItem {
 #[cfg(test)]
 mod tests {
     use vortex_buffer::buffer;
+    use vortex_error::VortexResult;
 
     use crate::IntoArray;
     use crate::dtype::DType;
@@ -248,6 +229,7 @@ mod tests {
     fn get_item_by_name() {
         let st = test_array();
         let get_item = get_item("a", root());
+        assert!(get_item.signature().is_strict());
         let item = st.into_array().apply(&get_item).unwrap();
         assert_eq!(item.dtype(), &DType::from(PType::I32))
     }
@@ -277,6 +259,24 @@ mod tests {
             item.dtype(),
             &DType::Primitive(PType::I32, Nullability::Nullable)
         );
+    }
+
+    #[test]
+    fn get_non_nullable_field_from_all_valid_nullable_struct() -> VortexResult<()> {
+        let st = StructArray::try_new(
+            FieldNames::from(["a"]),
+            vec![buffer![1i32].into_array()],
+            1,
+            Validity::AllValid,
+        )?
+        .into_array();
+
+        let item = st.apply(&get_item("a", root()))?;
+        assert_eq!(
+            item.dtype(),
+            &DType::Primitive(PType::I32, Nullability::Nullable)
+        );
+        Ok(())
     }
 
     #[test]

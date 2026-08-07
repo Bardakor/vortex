@@ -22,10 +22,10 @@ impl FillNullReduce for Constant {
 #[cfg(test)]
 mod test {
     use crate::IntoArray as _;
-    use crate::LEGACY_SESSION;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::ConstantArray;
-    use crate::arrow::ArrowSessionExt;
+    use crate::assert_arrays_eq;
     use crate::builtins::ArrayBuiltins;
     use crate::dtype::DType;
     use crate::dtype::Nullability;
@@ -34,7 +34,7 @@ mod test {
 
     #[test]
     fn test_null() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let actual = ConstantArray::new(Scalar::null_native::<i32>(), 3)
             .into_array()
             .fill_null(Scalar::from(1))
@@ -43,26 +43,12 @@ mod test {
 
         assert!(!actual.dtype().is_nullable());
 
-        let actual_arrow = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(actual.clone(), None, &mut ctx)
-            .unwrap();
-        let expected_arrow = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(expected.clone(), None, &mut ctx)
-            .unwrap();
-        assert_eq!(
-            &actual_arrow,
-            &expected_arrow,
-            "{}, {}",
-            actual.display_values(),
-            expected.display_values()
-        );
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_non_null() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let actual = ConstantArray::new(Scalar::from(Some(1)), 3)
             .into_array()
             .fill_null(Scalar::from(1))
@@ -71,26 +57,12 @@ mod test {
 
         assert!(!actual.dtype().is_nullable());
 
-        let actual_arrow = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(actual.clone(), None, &mut ctx)
-            .unwrap();
-        let expected_arrow = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(expected.clone(), None, &mut ctx)
-            .unwrap();
-        assert_eq!(
-            &actual_arrow,
-            &expected_arrow,
-            "{}, {}",
-            actual.display_values(),
-            expected.display_values()
-        );
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 
     #[test]
     fn test_non_nullable_with_nullable() {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let actual = ConstantArray::new(Scalar::from(1), 3)
             .into_array()
             .fill_null(Scalar::new(
@@ -98,26 +70,19 @@ mod test {
                 Some(1.into()),
             ))
             .unwrap();
-        let expected = ConstantArray::new(Scalar::from(1), 3).into_array();
+        let expected = ConstantArray::new(
+            Scalar::new(
+                DType::Primitive(PType::I32, Nullability::Nullable),
+                Some(1.into()),
+            ),
+            3,
+        )
+        .into_array();
 
         assert!(!Scalar::from(1).dtype().is_nullable());
 
         assert!(actual.dtype().is_nullable());
 
-        let actual_arrow = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(actual.clone(), None, &mut ctx)
-            .unwrap();
-        let expected_arrow = LEGACY_SESSION
-            .arrow()
-            .execute_arrow(expected.clone(), None, &mut ctx)
-            .unwrap();
-        assert_eq!(
-            &actual_arrow,
-            &expected_arrow,
-            "{}, {}",
-            actual.display_values(),
-            expected.display_values()
-        );
+        assert_arrays_eq!(actual, expected, &mut ctx);
     }
 }

@@ -6,11 +6,14 @@
 //! Vortex encoders must always produce unsigned integer codes; signed codes are only accepted
 //! for external compatibility.
 
+use vortex_array::ArrayId;
 use vortex_array::ArrayRef;
 use vortex_array::ArrayView;
 use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
+use vortex_array::VTable;
+use vortex_array::arrays::Dict;
 use vortex_array::arrays::DictArray;
 use vortex_array::arrays::Primitive;
 use vortex_array::arrays::PrimitiveArray;
@@ -23,9 +26,9 @@ use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 
 use crate::CascadingCompressor;
-use crate::ctx::CompressorContext;
-use crate::estimate::CompressionEstimate;
-use crate::estimate::EstimateVerdict;
+use crate::scheme::CompressionEstimate;
+use crate::scheme::CompressorContext;
+use crate::scheme::EstimateVerdict;
 use crate::scheme::Scheme;
 use crate::scheme::SchemeExt;
 use crate::stats::ArrayAndStats;
@@ -44,6 +47,10 @@ impl Scheme for IntDictScheme {
 
     fn matches(&self, canonical: &Canonical) -> bool {
         canonical.dtype().is_int()
+    }
+
+    fn produced_encodings(&self) -> Vec<ArrayId> {
+        vec![Dict.id()]
     }
 
     fn stats_options(&self) -> GenerateStatsOptions {
@@ -260,20 +267,16 @@ mod tests {
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::dict::DictArraySlotsExt;
     use vortex_array::assert_arrays_eq;
-    use vortex_array::session::ArraySession;
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
-    use vortex_session::VortexSession;
 
     use super::dictionary_encode;
     use crate::stats::IntegerStats;
 
     #[test]
     fn test_dict_encode_integer_stats() -> VortexResult<()> {
-        let mut ctx = VortexSession::empty()
-            .with::<ArraySession>()
-            .create_execution_ctx();
+        let mut ctx = vortex_array::array_session().create_execution_ctx();
         let data = buffer![100i32, 200, 100, 0, 100];
         let validity =
             Validity::Array(BoolArray::from_iter([true, true, true, false, true]).into_array());
@@ -300,7 +303,7 @@ mod tests {
             .clone()
             .execute::<PrimitiveArray>(&mut ctx)?
             .into_array();
-        assert_arrays_eq!(undict, expected);
+        assert_arrays_eq!(undict, expected, &mut ctx);
         Ok(())
     }
 }

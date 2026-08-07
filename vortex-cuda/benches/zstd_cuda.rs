@@ -19,7 +19,6 @@ use vortex::encodings::zstd::ZstdDataParts;
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
-use vortex::session::VortexSession;
 use vortex_cuda::CudaSession;
 use vortex_cuda::ZstdKernelPrep;
 use vortex_cuda::nvcomp::zstd as nvcomp_zstd;
@@ -83,6 +82,7 @@ async fn execute_zstd_kernel(
         .record(stream)
         .map_err(|e| vortex_err!("Failed to record start event: {:?}", e))?;
 
+    let (_device_output_ptr, record_device_output) = exec.device_output.device_ptr_mut(stream);
     let (device_actual_sizes_ptr, record_actual_sizes) =
         exec.device_actual_sizes.device_ptr_mut(stream);
     let (nvcomp_temp_buffer_ptr, record_temp) = exec.nvcomp_temp_buffer.device_ptr_mut(stream);
@@ -104,7 +104,12 @@ async fn execute_zstd_kernel(
         )
         .map_err(|e| vortex_err!("nvcomp decompress_async failed: {}", e))?;
     }
-    drop((record_actual_sizes, record_temp, record_statuses));
+    drop((
+        record_device_output,
+        record_actual_sizes,
+        record_temp,
+        record_statuses,
+    ));
 
     let end_event = ctx
         .new_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
@@ -126,7 +131,7 @@ fn benchmark_zstd_cuda_decompress(c: &mut Criterion) {
     let mut group = c.benchmark_group("cuda");
 
     for (num_strings, label) in BENCH_SIZES {
-        let mut setup_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
+        let mut setup_ctx = CudaSession::create_execution_ctx(&vortex_cuda::cuda_session())
             .vortex_expect("failed to create execution context");
         let (zstd_array, uncompressed_size) = make_zstd_array(*num_strings, &mut setup_ctx)
             .vortex_expect("failed to create ZSTD array");
@@ -137,8 +142,9 @@ fn benchmark_zstd_cuda_decompress(c: &mut Criterion) {
             &zstd_array,
             |b, zstd_array| {
                 b.iter_custom(|iters| {
-                    let mut cuda_ctx = CudaSession::create_execution_ctx(&VortexSession::empty())
-                        .vortex_expect("failed to create execution context");
+                    let mut cuda_ctx =
+                        CudaSession::create_execution_ctx(&vortex_cuda::cuda_session())
+                            .vortex_expect("failed to create execution context");
 
                     let mut total_time = Duration::ZERO;
 

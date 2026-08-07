@@ -7,18 +7,23 @@ use std::f64::consts::PI;
 
 use rstest::rstest;
 use vortex_array::IntoArray;
-use vortex_array::LEGACY_SESSION;
 use vortex_array::VortexSessionExecute;
+use vortex_array::array_session;
 use vortex_array::arrays::BoolArray;
+use vortex_array::arrays::DecimalArray;
 use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::ListViewArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::StructArray;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::listview::ListViewArrayExt;
+use vortex_array::arrays::listview::ListViewArraySlotsExt;
+use vortex_array::dtype::DecimalDType;
 use vortex_array::dtype::Nullability;
 use vortex_array::extension::datetime::Date;
 use vortex_array::extension::datetime::TimeUnit;
+use vortex_array::validity::Validity;
+use vortex_buffer::buffer;
 use vortex_error::VortexResult;
 
 use crate::RowEncoder;
@@ -29,7 +34,7 @@ use crate::convert_columns;
 use crate::convert_columns_with_options;
 
 fn collect_row_bytes(array: &ListViewArray) -> Vec<Vec<u8>> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let nrows = array.len();
     (0..nrows)
         .map(|i| {
@@ -43,7 +48,7 @@ fn collect_row_bytes(array: &ListViewArray) -> Vec<Vec<u8>> {
 /// Encode each column independently, sort the resulting row bytes, and check the permutation
 /// matches the natural sort order of `values`.
 fn assert_sort_order_i64(values: Vec<i64>, descending: bool) -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let col = PrimitiveArray::from_iter(values.clone()).into_array();
     let field = RowSortField::new(descending, true);
     let encoded = convert_columns(&[col], &[field], &mut ctx)?;
@@ -77,7 +82,7 @@ fn primitive_i64_roundtrip(#[case] descending: bool) -> VortexResult<()> {
 
 #[test]
 fn primitive_u32_sort_order() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let values: Vec<u32> = vec![0, 1, 100, u32::MAX, 42, 17];
     let col = PrimitiveArray::from_iter(values.clone()).into_array();
     let encoded = convert_columns(&[col], &[RowSortField::default()], &mut ctx)?;
@@ -95,7 +100,7 @@ fn primitive_u32_sort_order() -> VortexResult<()> {
 
 #[test]
 fn reject_temporal_extension_dtype_early() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let storage = PrimitiveArray::from_iter([2i32, -1, 0, 7]).into_array();
     let ext_dtype = Date::new(TimeUnit::Days, Nullability::NonNullable).erased();
     let col = ExtensionArray::new(ext_dtype, storage).into_array();
@@ -111,7 +116,7 @@ fn reject_temporal_extension_dtype_early() -> VortexResult<()> {
 
 #[test]
 fn reject_nested_temporal_extension_dtype_early() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let storage = PrimitiveArray::from_iter([2i32, -1, 0, 7]).into_array();
     let ext_dtype = Date::new(TimeUnit::Days, Nullability::NonNullable).erased();
     let date_col = ExtensionArray::new(ext_dtype, storage).into_array();
@@ -130,7 +135,7 @@ fn reject_nested_temporal_extension_dtype_early() -> VortexResult<()> {
 
 #[test]
 fn primitive_f64_sort_order() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     // We use IEEE total-ordering semantics: -0.0 < +0.0 in the byte encoding (matches
     // `arrow-row`). Avoid -0.0 in the natural-order baseline since partial_cmp says
     // -0.0 == 0.0.
@@ -151,7 +156,7 @@ fn primitive_f64_sort_order() -> VortexResult<()> {
 
 #[test]
 fn bool_sort_order() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let col = BoolArray::from_iter([true, false, true, false]).into_array();
     let encoded = convert_columns(&[col], &[RowSortField::default()], &mut ctx)?;
     let rows = collect_row_bytes(&encoded);
@@ -168,7 +173,7 @@ fn bool_sort_order() -> VortexResult<()> {
 
 #[test]
 fn utf8_sort_order() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let values = vec![
         "banana",
         "apple",
@@ -193,7 +198,7 @@ fn utf8_sort_order() -> VortexResult<()> {
 
 #[test]
 fn multi_column_sort() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let ints: Vec<i32> = vec![1, 2, 1, 2, 1, 3];
     let strs = vec!["b", "a", "a", "b", "c", "z"];
     let col0 = PrimitiveArray::from_iter(ints.clone()).into_array();
@@ -216,7 +221,7 @@ fn multi_column_sort() -> VortexResult<()> {
 
 #[test]
 fn nulls_first_and_last() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let values: Vec<Option<i32>> = vec![Some(5), None, Some(1), None, Some(3)];
     let col = PrimitiveArray::from_option_iter(values.clone()).into_array();
 
@@ -250,7 +255,7 @@ fn nulls_first_and_last() -> VortexResult<()> {
 
 #[test]
 fn reusable_options_helpers() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let options = RowEncodingOptions::new([RowSortField::descending().nulls_last()]);
     assert_eq!(options.len(), 1);
     assert!(!options.is_empty());
@@ -282,7 +287,7 @@ fn reusable_options_helpers() -> VortexResult<()> {
 
 #[test]
 fn row_encoder_new_accepts_sort_fields() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let encoder = RowEncoder::new([RowSortField::ascending()]);
     let col = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();
 
@@ -293,7 +298,7 @@ fn row_encoder_new_accepts_sort_fields() -> VortexResult<()> {
 
 #[test]
 fn default_row_encoder_uses_default_fields() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let col0 = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();
     let col1 = PrimitiveArray::from_iter([4i32, 5, 6]).into_array();
 
@@ -305,7 +310,7 @@ fn default_row_encoder_uses_default_fields() -> VortexResult<()> {
 #[test]
 fn struct_sort_order() -> VortexResult<()> {
     use vortex_array::arrays::StructArray;
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let ids: Vec<i64> = vec![3, 1, 3, 1, 2];
     let names = vec!["b", "a", "a", "b", "z"];
     let id_arr = PrimitiveArray::from_iter(ids.clone()).into_array();
@@ -332,7 +337,7 @@ fn row_size_struct_shape() -> VortexResult<()> {
 
     use crate::compute_row_sizes;
 
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let ints: Vec<i32> = vec![1, 2, 3, 4, 5];
     let strs = vec!["a", "bb", "ccc", "", "eeeee"];
     let col0 = PrimitiveArray::from_iter(ints).into_array();
@@ -372,7 +377,7 @@ fn row_size_struct_shape() -> VortexResult<()> {
 
 #[test]
 fn single_buffer_invariant() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     // Encoded rows here are all > 12 bytes, forcing the Ref-view path that points back into
     // the shared data buffer.
     let nrows = 64usize;
@@ -411,7 +416,7 @@ fn single_buffer_invariant() -> VortexResult<()> {
 /// boundaries always align.
 #[test]
 fn multi_column_varlen_empty_vs_nul_byte_string() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     // col1: empty vs single 0-byte. col2: same int for all rows.
     let col1 = VarBinViewArray::from_iter_str(["", "\0", "a", "ab"]).into_array();
     let col2 = PrimitiveArray::from_iter([1i32, 1, 1, 1]).into_array();
@@ -442,7 +447,7 @@ fn multi_column_varlen_empty_vs_nul_byte_string() -> VortexResult<()> {
 /// the 3-sentinel scheme null=0x00, empty=0x01 differ at byte 0.
 #[test]
 fn multi_column_varlen_null_vs_empty() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let col1 = VarBinViewArray::from_iter_nullable_str([
         None::<&str>,
         Some(""),
@@ -505,7 +510,7 @@ fn multi_column_varlen_null_vs_empty() -> VortexResult<()> {
 /// non-empty's first byte is smaller than empty's first byte.
 #[test]
 fn varlen_descending_empty_vs_non_empty() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let col = VarBinViewArray::from_iter_str(["a", "", "abc"]).into_array();
     let encoded = convert_columns(&[col], &[RowSortField::descending()], &mut ctx)?;
     let rows = collect_row_bytes(&encoded);
@@ -531,7 +536,7 @@ fn null_struct_rows_with_varying_child_lengths_are_byte_equal() -> VortexResult<
     use vortex_array::validity::Validity;
     use vortex_buffer::BitBuffer;
 
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     // Build a nullable struct{name: utf8} where rows 0 and 2 are null but the underlying
     // child has different length data ("short" vs "much longer text data").
     let names =
@@ -556,7 +561,7 @@ fn null_struct_rows_with_varying_child_lengths_are_byte_equal() -> VortexResult<
 
 #[test]
 fn primitive_f32_sort_order() -> VortexResult<()> {
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let values: Vec<f32> = vec![-1.5, 0.0, 1.5, f32::INFINITY, f32::NEG_INFINITY];
     let col = PrimitiveArray::from_iter(values.clone()).into_array();
     let encoded = convert_columns(&[col], &[RowSortField::default()], &mut ctx)?;
@@ -573,7 +578,7 @@ fn primitive_f32_sort_order() -> VortexResult<()> {
 #[test]
 fn primitive_f16_sort_order() -> VortexResult<()> {
     use vortex_array::dtype::half::f16;
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let values: Vec<f16> = vec![
         f16::from_f32(-1.5),
         f16::from_f32(0.0),
@@ -600,7 +605,7 @@ fn reject_list_dtype_early() {
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
 
-    let mut ctx = LEGACY_SESSION.create_execution_ctx();
+    let mut ctx = array_session().create_execution_ctx();
     let offsets = PrimitiveArray::new(buffer![0u32, 1, 2], Validity::NonNullable).into_array();
     let elements = PrimitiveArray::from_iter([10i32, 20]).into_array();
     let list: ArrayRef = ListArray::try_new(elements, offsets, Validity::NonNullable)
@@ -611,5 +616,79 @@ fn reject_list_dtype_early() {
     assert!(
         err.to_string().contains("List"),
         "expected error mentioning List, got: {err}"
+    );
+}
+
+/// Chunks of one decimal column can compress to different physical value widths. The key
+/// width must come from the declared dtype, not the chunk's `values_type`, otherwise keys
+/// from different chunks are not memcmp-comparable.
+#[rstest]
+#[case::ascending(false)]
+#[case::descending(true)]
+fn decimal_keys_comparable_across_chunk_widths(#[case] descending: bool) -> VortexResult<()> {
+    let mut ctx = array_session().create_execution_ctx();
+    let dtype = DecimalDType::new(7, 5);
+    let field = RowSortField::new(descending, true);
+
+    // One logical DECIMAL(7, 5) column whose chunks compressed to different physical widths.
+    let chunk_i8 = DecimalArray::new(buffer![91i8, -5], dtype, Validity::NonNullable).into_array();
+    let chunk_i16 =
+        DecimalArray::new(buffer![484i16, 300], dtype, Validity::NonNullable).into_array();
+    let values: [i32; 4] = [91, -5, 484, 300];
+
+    let keys_i8 = collect_row_bytes(&convert_columns(&[chunk_i8], &[field], &mut ctx)?);
+    let keys_i16 = collect_row_bytes(&convert_columns(&[chunk_i16], &[field], &mut ctx)?);
+    let keys = [keys_i8, keys_i16].concat();
+
+    for (i, vi) in values.iter().enumerate() {
+        for (j, vj) in values.iter().enumerate() {
+            let expected = if descending { vj.cmp(vi) } else { vi.cmp(vj) };
+            assert_eq!(
+                keys[i].cmp(&keys[j]),
+                expected,
+                "keys for {vi} and {vj} do not compare like the values"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A null slot's backing value is unspecified and might not fit the dtype-derived key width;
+/// encoding must ignore it rather than report a spurious overflow.
+#[test]
+fn decimal_null_slot_garbage_does_not_error() -> VortexResult<()> {
+    let mut ctx = array_session().create_execution_ctx();
+    let dtype = DecimalDType::new(7, 5);
+    let field = RowSortField::new(false, true);
+
+    let chunk = DecimalArray::new(
+        buffer![484i64, 10_000_000_000_000, 91],
+        dtype,
+        Validity::from_iter([true, false, true]),
+    )
+    .into_array();
+
+    let keys = collect_row_bytes(&convert_columns(&[chunk], &[field], &mut ctx)?);
+    assert!(keys[1] < keys[2], "null must sort before non-nulls");
+    assert!(keys[2] < keys[0], "91 must sort before 484");
+    Ok(())
+}
+
+/// A valid value too large for the dtype-derived key width must fail loudly instead of
+/// silently encoding a corrupt key.
+#[test]
+fn decimal_value_not_fitting_key_width_errors() {
+    let mut ctx = array_session().create_execution_ctx();
+    let dtype = DecimalDType::new(7, 5);
+    let field = RowSortField::new(false, true);
+
+    let chunk = DecimalArray::new(buffer![10_000_000_000_000i64], dtype, Validity::NonNullable)
+        .into_array();
+
+    let err = convert_columns(&[chunk], &[field], &mut ctx)
+        .expect_err("a valid value wider than the key width must be rejected");
+    assert!(
+        err.to_string().contains("does not fit"),
+        "expected a does-not-fit error, got: {err}"
     );
 }

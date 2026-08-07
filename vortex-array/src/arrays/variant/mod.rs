@@ -5,25 +5,24 @@ mod vtable;
 
 pub(crate) mod compute;
 
-use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 
 pub use self::vtable::Variant;
 pub use self::vtable::VariantArray;
+
+pub(crate) fn initialize(session: &vortex_session::VortexSession) {
+    vtable::initialize(session);
+}
+
 use crate::ArrayRef;
 use crate::array::Array;
 use crate::array::ArrayParts;
 use crate::array::EmptyArrayData;
-use crate::array::TypedArrayRef;
+use crate::array_slots;
 use crate::dtype::DType;
 
-pub(super) const CORE_STORAGE_SLOT: usize = 0;
-pub(super) const SHREDDED_SLOT: usize = 1;
-pub(super) const NUM_SLOTS: usize = 2;
-pub(super) const SLOT_NAMES: [&str; NUM_SLOTS] = ["core_storage", "shredded"];
-
-/// Accessors for canonical variant storage.
+/// Slots for canonical variant storage.
 ///
 /// A canonical variant array keeps the full variant value for every row in `core_storage` and may
 /// carry a row-aligned, storage-agnostic `shredded` typed tree for selected paths.
@@ -32,28 +31,23 @@ pub(super) const SLOT_NAMES: [&str; NUM_SLOTS] = ["core_storage", "shredded"];
 /// chunked, constant, or otherwise encoded. Callers must use normal array operations instead of
 /// assuming a particular slot layout. The shredded child may have any dtype; its dtype is recorded
 /// during serialization and validated by normal child deserialization.
-pub trait VariantArrayExt: TypedArrayRef<Variant> {
-    /// Returns the logical variant storage that preserves the full value for every row.
-    fn core_storage(&self) -> &ArrayRef {
-        self.as_ref().slots()[CORE_STORAGE_SLOT]
-            .as_ref()
-            .vortex_expect("validated variant core_storage slot")
-    }
-
-    /// Returns the optional row-aligned typed shredded tree for selected variant paths.
-    /// This functions returns `Some` only if the array was canonicalized and the shredded data
+#[array_slots(Variant)]
+pub struct VariantSlots {
+    /// The logical variant storage that preserves the full value for every row.
+    #[slot(0)]
+    pub core_storage: ArrayRef,
+    /// The optional row-aligned typed shredded tree for selected variant paths.
+    /// This slot is `Some` only if the array was canonicalized and the shredded data
     /// was pulled out of the underlying variant storage.
-    fn shredded(&self) -> Option<&ArrayRef> {
-        self.as_ref().slots()[SHREDDED_SLOT].as_ref()
-    }
+    #[slot(1)]
+    pub shredded: Option<ArrayRef>,
 }
-impl<T: TypedArrayRef<Variant>> VariantArrayExt for T {}
 
 impl Array<Variant> {
     /// Creates a new `VariantArray` with logical variant core storage and optional shredded storage.
     ///
     /// `core_storage` must have `DType::Variant`, but it may use any Variant-typed physical
-    /// encoding. See [`VariantArrayExt`] for the higher-level storage contract.
+    /// encoding. See [`VariantSlots`] for the higher-level storage contract.
     ///
     /// `shredded`, when present, must be row-aligned with `core_storage` and stores typed values for
     /// selected variant paths.
@@ -66,8 +60,13 @@ impl Array<Variant> {
         let len = core_storage.len();
         let stats = core_storage.statistics().to_owned();
         Ok(Array::try_from_parts(
-            ArrayParts::new(Variant, dtype, len, EmptyArrayData)
-                .with_slots(vec![Some(core_storage), shredded].into()),
+            ArrayParts::new(Variant, dtype, len, EmptyArrayData).with_slots(
+                VariantSlots {
+                    core_storage,
+                    shredded,
+                }
+                .into_slots(),
+            ),
         )?
         .with_stats_set(stats))
     }
@@ -83,15 +82,15 @@ mod tests {
     use crate::ArrayRef;
     use crate::Canonical;
     use crate::IntoArray;
-    use crate::LEGACY_SESSION;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::BoolArray;
     use crate::arrays::ChunkedArray;
     use crate::arrays::ConstantArray;
     use crate::arrays::PrimitiveArray;
     use crate::arrays::StructArray;
     use crate::arrays::VariantArray;
-    use crate::arrays::variant::VariantArrayExt;
+    use crate::arrays::variant::VariantArraySlotsExt;
     use crate::assert_arrays_eq;
     use crate::builtins::ArrayBuiltins;
     use crate::dtype::DType;
@@ -111,18 +110,17 @@ mod tests {
     }
 
     fn row_storage(values: impl IntoIterator<Item = i32>) -> VortexResult<ArrayRef> {
-        let chunks = values
-            .into_iter()
-            .map(|value| {
+        Ok(ChunkedArray::try_new(
+            values.into_iter().map(|value| {
                 ConstantArray::new(
                     Scalar::variant(Scalar::primitive(value, Nullability::NonNullable)),
                     1,
                 )
                 .into_array()
-            })
-            .collect();
-
-        Ok(ChunkedArray::try_new(chunks, DType::Variant(Nullability::NonNullable))?.into_array())
+            }),
+            DType::Variant(Nullability::NonNullable),
+        )?
+        .into_array())
     }
 
     fn variant_with_shredded(
@@ -136,7 +134,7 @@ mod tests {
     }
 
     fn execute_variant(array: ArrayRef) -> VortexResult<VariantArray> {
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let Canonical::Variant(variant) = array.execute::<Canonical>(&mut ctx)? else {
             return Err(vortex_err!("expected canonical variant array"));
         };
@@ -154,7 +152,7 @@ mod tests {
         let shredded = array
             .shredded()
             .ok_or_else(|| vortex_err!("expected shredded child"))?;
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         let shredded = shredded.clone().execute::<PrimitiveArray>(&mut ctx)?;
         let expected_shredded_array = if let Some(values) = expected_shredded
             .iter()
@@ -165,7 +163,7 @@ mod tests {
         } else {
             PrimitiveArray::from_option_iter(expected_shredded.iter().copied())
         };
-        assert_arrays_eq!(shredded, expected_shredded_array);
+        assert_arrays_eq!(shredded, expected_shredded_array, &mut ctx);
 
         Ok(())
     }
@@ -176,7 +174,7 @@ mod tests {
     ) -> VortexResult<()> {
         assert_eq!(array.len(), expected_core.len());
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         for (idx, expected) in expected_core.iter().enumerate() {
             let scalar = array.core_storage().execute_scalar(idx, &mut ctx)?;
             let variant = scalar.as_variant();
@@ -268,7 +266,7 @@ mod tests {
         let shredded = PrimitiveArray::from_option_iter([Some(10i32), Some(20), None]).into_array();
         let variant = VariantArray::try_new(core_storage, Some(shredded))?;
 
-        let mut ctx = LEGACY_SESSION.create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
         for (idx, expected) in [Some(10i32), None, Some(3)].into_iter().enumerate() {
             let scalar = variant.execute_scalar(idx, &mut ctx)?;
             let variant = scalar.as_variant();
@@ -374,6 +372,7 @@ mod tests {
 
     #[test]
     fn variant_get_keeps_valid_shredded_rows_for_matching_dtype() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let core_storage = row_storage([1, 2, 3])?;
         let shredded = StructArray::try_from_iter([(
             "a",
@@ -389,17 +388,19 @@ mod tests {
         let result = variant
             .into_array()
             .apply(&expr)?
-            .execute::<PrimitiveArray>(&mut LEGACY_SESSION.create_execution_ctx())?;
+            .execute::<PrimitiveArray>(&mut array_session().create_execution_ctx())?;
 
         assert_arrays_eq!(
             result,
-            PrimitiveArray::from_option_iter([Some(10i32), Some(20), Some(30)])
+            PrimitiveArray::from_option_iter([Some(10i32), Some(20), Some(30)]),
+            &mut ctx
         );
         Ok(())
     }
 
     #[test]
     fn variant_get_treats_value_and_typed_value_as_logical_field_names() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
         let core_storage = row_storage([1, 2, 3])?;
         let shredded = StructArray::try_from_iter([
             (
@@ -422,10 +423,11 @@ mod tests {
             .clone()
             .into_array()
             .apply(&value_expr)?
-            .execute::<PrimitiveArray>(&mut LEGACY_SESSION.create_execution_ctx())?;
+            .execute::<PrimitiveArray>(&mut array_session().create_execution_ctx())?;
         assert_arrays_eq!(
             value_result,
-            PrimitiveArray::from_option_iter([Some(10i32), Some(20), Some(30)])
+            PrimitiveArray::from_option_iter([Some(10i32), Some(20), Some(30)]),
+            &mut ctx
         );
 
         let typed_value_expr = variant_get(
@@ -436,10 +438,11 @@ mod tests {
         let typed_value_result = variant
             .into_array()
             .apply(&typed_value_expr)?
-            .execute::<PrimitiveArray>(&mut LEGACY_SESSION.create_execution_ctx())?;
+            .execute::<PrimitiveArray>(&mut array_session().create_execution_ctx())?;
         assert_arrays_eq!(
             typed_value_result,
-            PrimitiveArray::from_option_iter([Some(40i32), Some(50), Some(60)])
+            PrimitiveArray::from_option_iter([Some(40i32), Some(50), Some(60)]),
+            &mut ctx
         );
         Ok(())
     }
