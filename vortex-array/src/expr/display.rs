@@ -109,7 +109,7 @@ impl DisplayTreeNode for BoundExpression {
             BoundExpression::Root { .. } => write!(f, "{ROOT_DISPLAY}"),
             BoundExpression::Variable { variable, .. } => write!(f, "${variable}"),
             BoundExpression::Lambda(lambda) => {
-                write!(f, "lambda({})", lambda.params().iter().join(", "))
+                write!(f, "lambda({})", lambda.params().join(", "))
             }
         }
     }

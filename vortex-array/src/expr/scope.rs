@@ -13,7 +13,7 @@ use crate::expr::variable::Variable;
 ///
 /// A lambda pushes exactly one frame, holding its parameters. Names within a frame must be unique;
 /// a name in an inner frame shadows the same name in an outer one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Frame(Arc<Vec<(Variable, DType)>>);
 
 impl Frame {

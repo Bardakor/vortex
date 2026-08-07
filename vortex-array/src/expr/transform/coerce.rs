@@ -8,8 +8,6 @@ use vortex_error::VortexResult;
 use crate::dtype::DType;
 use crate::expr::Expression;
 use crate::expr::cast;
-use crate::expr::traversal::NodeExt;
-use crate::expr::traversal::Transformed;
 use crate::scalar_fn::fns::literal::Literal;
 
 /// Rewrite an expression tree to insert casts where a scalar function's `coerce_args` demands
@@ -18,53 +16,74 @@ use crate::scalar_fn::fns::literal::Literal;
 /// The rewrite is bottom-up: children are coerced first, then each parent node checks whether
 /// its children match the coerced argument types.
 pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expression> {
-    // We capture scope by reference for the closure.
-    let scope = scope.clone();
-    expr.transform_up(|node| {
-        // Leaf nodes (Root, Literal) have no children to coerce.
-        if node.is_root() || node.is::<Literal>() || node.children().is_empty() {
-            return Ok(Transformed::no(node));
+    // A lambda is a coercion boundary. Its body types against a parameter frame that this pass
+    // does not carry, so descending into one would try to type a variable against the root dtype
+    // and fail. Leave it for whoever binds the lambda and knows the parameter types. Recursing
+    // explicitly rather than using `transform_up` is what makes skipping the body possible.
+    fn coerce_node(node: Expression, scope: &DType) -> VortexResult<Expression> {
+        if node.as_lambda().is_some() {
+            return Ok(node);
         }
 
-        // Compute the current child return types.
-        let child_dtypes: Vec<DType> = node
+        let coerced_children = node
             .children()
             .iter()
-            .map(|c| c.return_dtype(&scope))
-            .collect::<VortexResult<_>>()?;
+            .cloned()
+            .map(|child| coerce_node(child, scope))
+            .collect::<VortexResult<Vec<_>>>()?;
+        let node = node.with_children(coerced_children)?;
 
-        // Ask the scalar function what types it wants.
-        let Some(scalar_fn) = node.as_scalar() else {
-            return Ok(Transformed::no(node));
-        };
-        let coerced_dtypes = scalar_fn.coerce_args(&child_dtypes)?;
+        coerce_one(node, scope)
+    }
 
-        // If nothing changed, skip.
-        if child_dtypes == coerced_dtypes {
-            return Ok(Transformed::no(node));
+    fn coerce_one(node: Expression, scope: &DType) -> VortexResult<Expression> {
+        let scope = scope.clone();
+        {
+            // Leaf nodes (Root, Literal) have no children to coerce.
+            if node.is_root() || node.is::<Literal>() || node.children().is_empty() {
+                return Ok(node);
+            }
+
+            // Compute the current child return types.
+            let child_dtypes: Vec<DType> = node
+                .children()
+                .iter()
+                .map(|c| c.return_dtype(&scope))
+                .collect::<VortexResult<_>>()?;
+
+            // Ask the scalar function what types it wants.
+            let Some(scalar_fn) = node.as_scalar() else {
+                return Ok(node);
+            };
+            let coerced_dtypes = scalar_fn.coerce_args(&child_dtypes)?;
+
+            // If nothing changed, skip.
+            if child_dtypes == coerced_dtypes {
+                return Ok(node);
+            }
+
+            // Build new children, inserting casts where needed.
+            let new_children: Vec<Expression> = node
+                .children()
+                .iter()
+                .zip(coerced_dtypes.iter())
+                .map(|(child, target)| {
+                    let child_dtype = child.return_dtype(&scope)?;
+                    if child_dtype.eq_ignore_nullability(target)
+                        && child_dtype.nullability() == target.nullability()
+                    {
+                        Ok(child.clone())
+                    } else {
+                        Ok(cast(child.clone(), target.clone()))
+                    }
+                })
+                .collect::<VortexResult<_>>()?;
+
+            node.with_children(new_children)
         }
+    }
 
-        // Build new children, inserting casts where needed.
-        let new_children: Vec<Expression> = node
-            .children()
-            .iter()
-            .zip(coerced_dtypes.iter())
-            .map(|(child, target)| {
-                let child_dtype = child.return_dtype(&scope)?;
-                if child_dtype.eq_ignore_nullability(target)
-                    && child_dtype.nullability() == target.nullability()
-                {
-                    Ok(child.clone())
-                } else {
-                    Ok(cast(child.clone(), target.clone()))
-                }
-            })
-            .collect::<VortexResult<_>>()?;
-
-        let new_expr = node.with_children(new_children)?;
-        Ok(Transformed::yes(new_expr))
-    })
-    .map(|t| t.into_inner())
+    coerce_node(expr, scope)
 }
 
 #[cfg(test)]
@@ -215,6 +234,42 @@ mod tests {
         assert_eq!(
             coerced.child(1).return_dtype(&scope)?,
             DType::Primitive(PType::I64, NonNullable)
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lambda_tests {
+    use vortex_error::VortexResult;
+
+    use super::*;
+    use crate::expr::Expression;
+    use crate::expr::checked_add;
+    use crate::expr::col;
+    use crate::expr::lambda;
+    use crate::expr::lit;
+    use crate::expr::test_harness::struct_dtype;
+    use crate::expr::var;
+
+    /// A lambda body types against a parameter frame, which this pass does not carry. Descending
+    /// into one would try to type the variable against the root dtype and fail, so a lambda is a
+    /// coercion boundary and is returned untouched.
+    #[test]
+    fn a_lambda_is_a_coercion_boundary() -> VortexResult<()> {
+        let l = Expression::from(lambda(["x"], checked_add(var("x"), lit(1i32))));
+        assert_eq!(coerce_expression(l.clone(), &struct_dtype())?, l);
+        Ok(())
+    }
+
+    /// The boundary must not stop coercion of everything around it.
+    #[test]
+    fn coercion_still_applies_outside_a_lambda() -> VortexResult<()> {
+        let expr = checked_add(col("a"), lit(1i64));
+        let coerced = coerce_expression(expr.clone(), &struct_dtype())?;
+        assert_ne!(
+            coerced, expr,
+            "an i32 column against an i64 literal should coerce"
         );
         Ok(())
     }
