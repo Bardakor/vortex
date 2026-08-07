@@ -21,8 +21,8 @@ use crate::validity::Validity;
 /// concatenates them at the end, exactly as [`Validity::concat`] does.
 ///
 /// Materializing them instead would mean executing every appended array's validity into a
-/// [`Mask`] and copying its bits, which for a builder assembling many chunks is the dominant cost
-/// of tracking validity at all.
+/// [`Mask`](vortex_mask::Mask) and copying its bits, which for a builder assembling many chunks is
+/// the dominant cost of tracking validity at all.
 pub(crate) struct ValidityBuilder {
     /// Completed runs, in logical order, with the number of values each covers. Never contains an
     /// empty run.
