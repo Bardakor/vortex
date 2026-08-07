@@ -5,10 +5,8 @@
 //!
 //! An [`Expression`] is a tree of scalar operations rooted at a scope (see [`root`]). Expressions
 //! are the common currency of scans: a scan takes a *filter* expression that resolves to a boolean
-//! and a *projection* expression that shapes the output. Scalar expressions are serializable and own
+//! and a *projection* expression that shapes the output. All expressions are serializable and own
 //! their own wire format, so they can be pushed down to remote sources and reconstructed on workers.
-//! [`Expression::Variable`] and [`Expression::Lambda`] are the exception: they have no wire format
-//! yet and reject serialization, so an expression containing one cannot be pushed down.
 //!
 //! # Scalar functions
 //!

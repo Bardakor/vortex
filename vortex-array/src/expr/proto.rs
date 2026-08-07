@@ -2,14 +2,16 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use itertools::Itertools;
+use prost::Message;
 use vortex_error::VortexResult;
-use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_proto::expr as pb;
 use vortex_session::VortexSession;
 
 use crate::expr::Expression;
+use crate::expr::Lambda;
+use crate::expr::Variable;
 use crate::scalar_fn::ForeignScalarFnVTable;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::session::ScalarFnSessionExt;
@@ -23,6 +25,12 @@ pub trait ExprSerializeProtoExt {
 /// already-serialized expressions keep round-tripping.
 pub(crate) const ROOT_ID: &str = "vortex.root";
 
+/// The wire id for [`Expression::Variable`].
+pub(crate) const VARIABLE_ID: &str = "vortex.var";
+
+/// The wire id for [`Expression::Lambda`]. Its body is the message's single child.
+pub(crate) const LAMBDA_ID: &str = "vortex.lambda";
+
 impl ExprSerializeProtoExt for Expression {
     fn serialize_proto(&self) -> VortexResult<pb::Expr> {
         let scalar_fn = match self {
@@ -33,14 +41,33 @@ impl ExprSerializeProtoExt for Expression {
                     metadata: Some(vec![]),
                 });
             }
-            // There is no wire format for these yet. Rejecting is the only safe answer: falling
-            // through would serialize them as a root and silently drop the name, parameters and
-            // body.
             Expression::Variable(variable) => {
-                vortex_bail!("variable '{variable}' is not serializable")
+                return Ok(pb::Expr {
+                    id: VARIABLE_ID.to_string(),
+                    children: vec![],
+                    metadata: Some(
+                        pb::VariableOpts {
+                            name: variable.name().to_string(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                });
             }
             Expression::Lambda(lambda) => {
-                vortex_bail!("lambda ({lambda}) is not serializable")
+                return Ok(pb::Expr {
+                    id: LAMBDA_ID.to_string(),
+                    children: vec![lambda.body().serialize_proto()?],
+                    metadata: Some(
+                        pb::LambdaOpts {
+                            params: lambda
+                                .params()
+                                .iter()
+                                .map(|v| v.name().to_string())
+                                .collect(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                });
             }
             Expression::Scalar { scalar_fn, .. } => scalar_fn,
         };
@@ -69,7 +96,8 @@ impl ExprSerializeProtoExt for Expression {
 
 impl Expression {
     pub fn from_proto(expr: &pb::Expr, session: &VortexSession) -> VortexResult<Expression> {
-        // Root is not a registered scalar fn, so it must be resolved before the registry lookup.
+        // These are language primitives rather than registered scalar fns, so they must be
+        // resolved before the registry lookup below.
         if expr.id == ROOT_ID {
             vortex_ensure!(
                 expr.children.is_empty(),
@@ -77,6 +105,30 @@ impl Expression {
                 expr.children.len()
             );
             return Ok(Expression::Root);
+        }
+
+        if expr.id == VARIABLE_ID {
+            vortex_ensure!(
+                expr.children.is_empty(),
+                "a variable must have no children, got {}",
+                expr.children.len()
+            );
+            let opts = pb::VariableOpts::decode(expr.metadata())?;
+            return Ok(Expression::Variable(Variable::new(opts.name)));
+        }
+
+        if expr.id == LAMBDA_ID {
+            vortex_ensure!(
+                expr.children.len() == 1,
+                "a lambda must have exactly one child, its body, got {}",
+                expr.children.len()
+            );
+            let opts = pb::LambdaOpts::decode(expr.metadata())?;
+            let body = Expression::from_proto(&expr.children[0], session)?;
+            return Ok(Expression::from(Lambda::new(
+                opts.params.into_iter().map(Variable::new),
+                body,
+            )));
         }
 
         #[expect(clippy::disallowed_methods, reason = "interning a dynamic id")]
@@ -111,6 +163,7 @@ pub fn deserialize_expr_proto(
 #[cfg(test)]
 mod tests {
     use prost::Message;
+    use vortex_error::VortexResult;
     use vortex_proto::expr as pb;
     use vortex_session::VortexSession;
 
@@ -154,21 +207,47 @@ mod tests {
         assert_eq!(&deser_expr, &expr);
     }
 
-    /// Neither has a wire format yet, so serializing must fail rather than silently emitting a
-    /// root and losing the name, parameters and body.
+    /// Variables and lambdas round-trip on reserved ids, like `Root`. The body travels as the
+    /// lambda message's single child, so a generic walk of the wire format still sees it.
     #[test]
-    fn variables_and_lambdas_are_not_serializable() {
+    fn variables_and_lambdas_round_trip() -> VortexResult<()> {
+        use crate::expr::checked_add;
         use crate::expr::lambda;
         use crate::expr::var;
 
-        assert!(var("x").serialize_proto().is_err());
-        assert!(
-            Expression::from(lambda(["x"], var("x")))
-                .serialize_proto()
-                .is_err()
-        );
-        // Root still round-trips on its historical id.
-        assert_eq!(root().serialize_proto().unwrap().id, "vortex.root");
+        for expr in [
+            var("x"),
+            Expression::from(lambda(["x"], var("x"))),
+            Expression::from(lambda(
+                ["x", "y"],
+                checked_add(var("x"), checked_add(var("y"), lit(1_i32))),
+            )),
+            // Nested, so the inner lambda travels inside the outer one's body.
+            Expression::from(lambda(["x"], Expression::from(lambda(["y"], var("y"))))),
+        ] {
+            let bytes = expr.serialize_proto()?.encode_to_vec();
+            let decoded =
+                Expression::from_proto(&pb::Expr::decode(bytes.as_slice())?, &array_session())?;
+            assert_eq!(decoded, expr, "round trip changed {expr}");
+        }
+        Ok(())
+    }
+
+    /// A lambda carries its body as a child, so a malformed message must be rejected rather than
+    /// silently producing a lambda with the wrong arity.
+    #[test]
+    fn a_lambda_without_a_body_is_rejected() {
+        let malformed = pb::Expr {
+            id: "vortex.lambda".to_string(),
+            children: vec![],
+            metadata: Some(
+                pb::LambdaOpts {
+                    params: vec!["x".to_string()],
+                }
+                .encode_to_vec(),
+            ),
+        };
+        assert!(Expression::from_proto(&malformed, &array_session()).is_err());
     }
 
     #[test]
