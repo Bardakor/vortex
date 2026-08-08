@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use vortex_buffer::BitBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
-use vortex_mask::AllOr;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
 
@@ -20,18 +18,15 @@ use crate::aggregate_fn::GroupedAccumulator;
 use crate::aggregate_fn::GroupedArray;
 use crate::aggregate_fn::NumericalAggregateOpts;
 use crate::aggregate_fn::fns::sum::Sum;
-use crate::arrays::BoolArray;
 use crate::arrays::ConstantArray;
 use crate::arrays::FixedSizeList;
 use crate::arrays::ListView;
-use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
 use crate::scalar_fn::Arity;
 use crate::scalar_fn::ChildName;
 use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::validity::Validity;
 
 /// Sum of the elements in each list of a `List` or `FixedSizeList` typed array.
 ///
@@ -82,7 +77,7 @@ impl ScalarFnVTable for ListSum {
             DType::List(elem, _) | DType::FixedSizeList(elem, ..) => elem.as_ref(),
             other => vortex_bail!("list_sum() requires List or FixedSizeList, got {other}"),
         };
-        Sum.return_dtype(options, elem_dtype)
+        Sum.return_dtype(&(*options).into(), elem_dtype)
             .ok_or_else(|| vortex_err!("list_sum() cannot sum elements of type {elem_dtype}"))
     }
 
@@ -99,7 +94,6 @@ impl ScalarFnVTable for ListSum {
             other => vortex_bail!("list_sum() requires List or FixedSizeList, got {other}"),
         };
 
-        // `mask_empty_lists` needs access to list elements validity and sizes
         let columnar = input.execute::<Columnar>(ctx)?;
 
         match columnar {
@@ -133,8 +127,7 @@ impl ScalarFnVTable for ListSum {
 
 /// Sum each list of a canonical `array` into one value per list.
 ///
-/// Note that we need to nullify sums produced by empty or all-null lists,
-/// since grouped sum kernels default to 0 for these.
+/// The null-on-empty [`Sum`] behavior yields null for null, empty, and all-null lists.
 fn list_sum_impl(
     canonical: ArrayRef,
     elem_dtype: DType,
@@ -152,46 +145,9 @@ fn list_sum_impl(
 
     let num_groups = grouped.len();
     let (values, group_ids) = grouped.dense_input(ctx)?;
-    let mut acc = GroupedAccumulator::try_new(Sum, *options, elem_dtype)?;
+    let mut acc = GroupedAccumulator::try_new(Sum, (*options).into(), elem_dtype)?;
     acc.accumulate(&values, &group_ids, ctx)?;
-    let sums = acc.finish(num_groups)?;
-
-    mask_empty_lists(grouped, sums, ctx)
-}
-
-/// Applies a mask to `sums` that nullifies entries produced by lists without at least
-/// one valid element. This is necessary because the grouped `Sum` aggregate only produces
-/// nulls for null lists and sums that overflow.
-fn mask_empty_lists(
-    grouped: GroupedArray,
-    sums: ArrayRef,
-    ctx: &mut ExecutionCtx,
-) -> VortexResult<ArrayRef> {
-    let elements = grouped.elements();
-    let elem_mask = elements.validity()?.execute_mask(elements.len(), ctx)?;
-    let ranges = grouped.group_ranges(ctx)?;
-    let group_validity = grouped.group_validity(ctx)?;
-
-    let has_valid_element: BitBuffer = match elem_mask.bit_buffer() {
-        AllOr::All => ranges
-            .iter()
-            .zip(group_validity.iter())
-            .map(|((_, size), valid)| valid && size > 0)
-            .collect(),
-        AllOr::None => BitBuffer::full(false, ranges.len()),
-        AllOr::Some(bits) => ranges
-            .iter()
-            .zip(group_validity.iter())
-            .map(|((offset, size), valid)| {
-                valid && size > 0 && bits.count_range(offset, offset + size) > 0
-            })
-            .collect(),
-    };
-    if has_valid_element.true_count() == has_valid_element.len() {
-        return Ok(sums);
-    }
-
-    sums.mask(BoolArray::new(has_valid_element, Validity::NonNullable).into_array())
+    acc.finish(num_groups)
 }
 
 #[cfg(test)]

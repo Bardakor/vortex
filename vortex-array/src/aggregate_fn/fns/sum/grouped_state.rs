@@ -4,22 +4,29 @@
 use std::any::Any;
 
 use num_traits::CheckedAdd;
+use vortex_buffer::BitBuffer;
 use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
-use vortex_mask::AllOr;
 use vortex_mask::Mask;
 
+use super::IS_EMPTY_FIELD;
+use super::IS_OVERFLOW_FIELD;
+use super::SUM_FIELD;
 use super::checked_add_i64;
 use super::checked_add_u64;
+use super::decode_sum_partial_scalar;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::aggregate_fn::GroupedState;
+use crate::arrays::BoolArray;
 use crate::arrays::DecimalArray;
 use crate::arrays::PrimitiveArray;
+use crate::arrays::StructArray;
+use crate::arrays::struct_::StructArrayExt;
 use crate::dtype::DType;
 use crate::dtype::DecimalDType;
 use crate::dtype::DecimalType;
@@ -76,12 +83,14 @@ impl SumGroupedValues {
 pub(crate) struct SumGroupedState {
     values: SumGroupedValues,
     overflowed: Vec<u8>,
+    empty: Vec<u8>,
     partial_dtype: DType,
+    return_dtype: DType,
 }
 
 impl SumGroupedState {
-    pub(crate) fn try_new(partial_dtype: DType) -> VortexResult<Self> {
-        let values = match &partial_dtype {
+    pub(crate) fn try_new(partial_dtype: DType, return_dtype: DType) -> VortexResult<Self> {
+        let values = match &return_dtype {
             DType::Primitive(PType::U64, _) => SumGroupedValues::Unsigned(Vec::new()),
             DType::Primitive(PType::I64, _) => SumGroupedValues::Signed(Vec::new()),
             DType::Primitive(PType::F64, _) => SumGroupedValues::Float(Vec::new()),
@@ -93,21 +102,23 @@ impl SumGroupedState {
                 DecimalType::I128 => SumGroupedValues::Decimal128(Vec::new()),
                 DecimalType::I256 => SumGroupedValues::Decimal256(Vec::new()),
             },
-            dtype => vortex_bail!("Unsupported grouped sum partial dtype: {dtype}"),
+            dtype => vortex_bail!("Unsupported grouped sum return dtype: {dtype}"),
         };
         Ok(Self {
             values,
             overflowed: Vec::new(),
+            empty: Vec::new(),
             partial_dtype,
+            return_dtype,
         })
     }
 
-    pub(super) fn parts_mut(&mut self) -> (&mut SumGroupedValues, &mut [u8]) {
-        (&mut self.values, &mut self.overflowed)
+    pub(super) fn parts_mut(&mut self) -> (&mut SumGroupedValues, &mut [u8], &mut [u8]) {
+        (&mut self.values, &mut self.overflowed, &mut self.empty)
     }
 
     pub(super) fn decimal_dtype(&self) -> Option<DecimalDType> {
-        self.partial_dtype.as_decimal_opt().copied()
+        self.return_dtype.as_decimal_opt().copied()
     }
 }
 
@@ -124,6 +135,7 @@ impl GroupedState for SumGroupedState {
         let len = num_groups.max(self.len());
         self.values.resize(len);
         self.overflowed.resize(len, 0);
+        self.empty.resize(len, 1);
         Ok(())
     }
 
@@ -135,7 +147,12 @@ impl GroupedState for SumGroupedState {
     }
 
     fn combine_scalar(&mut self, group_id: usize, partial: Scalar) -> VortexResult<()> {
-        if partial.is_null() {
+        let (partial, partial_overflowed, partial_empty) = decode_sum_partial_scalar(partial)?;
+        if partial_empty {
+            return Ok(());
+        }
+        self.empty[group_id] = 0;
+        if partial_overflowed {
             self.overflowed[group_id] = 1;
             return Ok(());
         }
@@ -144,7 +161,7 @@ impl GroupedState for SumGroupedState {
         }
 
         let decimal_dtype = self.decimal_dtype();
-        let (values, overflowed) = self.parts_mut();
+        let (values, overflowed, _) = self.parts_mut();
         match values {
             SumGroupedValues::Unsigned(values) => {
                 let value = partial
@@ -213,26 +230,18 @@ impl GroupedState for SumGroupedState {
     }
 
     fn partial_scalar(&self, group_id: usize) -> VortexResult<Scalar> {
-        if self
-            .overflowed
-            .get(group_id)
-            .is_some_and(|&overflowed| overflowed != 0)
-        {
-            return Ok(Scalar::null(self.partial_dtype.clone()));
-        }
-
-        Ok(match &self.values {
+        let sum = match &self.values {
             SumGroupedValues::Unsigned(values) => Scalar::primitive(
                 values.get(group_id).copied().unwrap_or(0),
-                Nullability::Nullable,
+                Nullability::NonNullable,
             ),
             SumGroupedValues::Signed(values) => Scalar::primitive(
                 values.get(group_id).copied().unwrap_or(0),
-                Nullability::Nullable,
+                Nullability::NonNullable,
             ),
             SumGroupedValues::Float(values) => Scalar::primitive(
                 values.get(group_id).copied().unwrap_or(0.0),
-                Nullability::Nullable,
+                Nullability::NonNullable,
             ),
             SumGroupedValues::Decimal8(values) => decimal_scalar(
                 values.get(group_id).copied().unwrap_or(0),
@@ -261,7 +270,23 @@ impl GroupedState for SumGroupedState {
                     .unwrap_or(crate::dtype::i256::ZERO),
                 self.decimal_dtype().vortex_expect("decimal state dtype"),
             ),
-        })
+        };
+        Ok(Scalar::struct_(
+            self.partial_dtype.clone(),
+            vec![
+                sum,
+                Scalar::bool(
+                    self.overflowed
+                        .get(group_id)
+                        .is_some_and(|&overflowed| overflowed != 0),
+                    Nullability::NonNullable,
+                ),
+                Scalar::bool(
+                    self.empty.get(group_id).is_none_or(|&empty| empty != 0),
+                    Nullability::NonNullable,
+                ),
+            ],
+        ))
     }
 
     fn accumulate_partials(
@@ -270,88 +295,127 @@ impl GroupedState for SumGroupedState {
         group_ids: &[u32],
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<()> {
-        let validity = partials.validity()?.execute_mask(partials.len(), ctx)?;
+        let partials = partials.clone().execute::<StructArray>(ctx)?;
+        let validity = partials
+            .as_ref()
+            .validity()?
+            .execute_mask(partials.as_ref().len(), ctx)?;
+        let sums = partials.unmasked_field_by_name(SUM_FIELD)?.clone();
+        let partial_overflowed = partials
+            .unmasked_field_by_name(IS_OVERFLOW_FIELD)?
+            .clone()
+            .execute::<BoolArray>(ctx)?
+            .into_bit_buffer();
+        let partial_empty = partials
+            .unmasked_field_by_name(IS_EMPTY_FIELD)?
+            .clone()
+            .execute::<BoolArray>(ctx)?
+            .into_bit_buffer();
+        let rows = PartialRows {
+            group_ids,
+            validity: &validity,
+            overflowed: &partial_overflowed,
+            empty: &partial_empty,
+        };
         let decimal_dtype = self.decimal_dtype();
-        let (values, overflowed) = self.parts_mut();
+        let (values, overflowed, empty) = self.parts_mut();
         match values {
             SumGroupedValues::Unsigned(values) => {
-                let partials = partials.clone().execute::<PrimitiveArray>(ctx)?;
+                let sums = sums.execute::<PrimitiveArray>(ctx)?;
                 accumulate_primitive_partials(
-                    values,
-                    overflowed,
-                    partials.as_slice::<u64>(),
-                    group_ids,
-                    &validity,
+                    PartialState {
+                        values,
+                        overflowed,
+                        empty,
+                    },
+                    sums.as_slice::<u64>(),
+                    &rows,
                     checked_add_u64,
                 );
             }
             SumGroupedValues::Signed(values) => {
-                let partials = partials.clone().execute::<PrimitiveArray>(ctx)?;
+                let sums = sums.execute::<PrimitiveArray>(ctx)?;
                 accumulate_primitive_partials(
-                    values,
-                    overflowed,
-                    partials.as_slice::<i64>(),
-                    group_ids,
-                    &validity,
+                    PartialState {
+                        values,
+                        overflowed,
+                        empty,
+                    },
+                    sums.as_slice::<i64>(),
+                    &rows,
                     checked_add_i64,
                 );
             }
             SumGroupedValues::Float(values) => {
-                let partials = partials.clone().execute::<PrimitiveArray>(ctx)?;
+                let sums = sums.execute::<PrimitiveArray>(ctx)?;
                 accumulate_float_partials(
-                    values,
-                    overflowed,
-                    partials.as_slice::<f64>(),
-                    group_ids,
-                    &validity,
+                    PartialState {
+                        values,
+                        overflowed,
+                        empty,
+                    },
+                    sums.as_slice::<f64>(),
+                    &rows,
                 );
             }
             SumGroupedValues::Decimal8(values) => accumulate_decimal_partials(
-                values,
-                overflowed,
-                &partials.clone().execute::<DecimalArray>(ctx)?,
-                group_ids,
-                &validity,
+                PartialState {
+                    values,
+                    overflowed,
+                    empty,
+                },
+                &sums.execute::<DecimalArray>(ctx)?,
+                &rows,
                 decimal_dtype.vortex_expect("decimal state dtype"),
             ),
             SumGroupedValues::Decimal16(values) => accumulate_decimal_partials(
-                values,
-                overflowed,
-                &partials.clone().execute::<DecimalArray>(ctx)?,
-                group_ids,
-                &validity,
+                PartialState {
+                    values,
+                    overflowed,
+                    empty,
+                },
+                &sums.execute::<DecimalArray>(ctx)?,
+                &rows,
                 decimal_dtype.vortex_expect("decimal state dtype"),
             ),
             SumGroupedValues::Decimal32(values) => accumulate_decimal_partials(
-                values,
-                overflowed,
-                &partials.clone().execute::<DecimalArray>(ctx)?,
-                group_ids,
-                &validity,
+                PartialState {
+                    values,
+                    overflowed,
+                    empty,
+                },
+                &sums.execute::<DecimalArray>(ctx)?,
+                &rows,
                 decimal_dtype.vortex_expect("decimal state dtype"),
             ),
             SumGroupedValues::Decimal64(values) => accumulate_decimal_partials(
-                values,
-                overflowed,
-                &partials.clone().execute::<DecimalArray>(ctx)?,
-                group_ids,
-                &validity,
+                PartialState {
+                    values,
+                    overflowed,
+                    empty,
+                },
+                &sums.execute::<DecimalArray>(ctx)?,
+                &rows,
                 decimal_dtype.vortex_expect("decimal state dtype"),
             ),
             SumGroupedValues::Decimal128(values) => accumulate_decimal_partials(
-                values,
-                overflowed,
-                &partials.clone().execute::<DecimalArray>(ctx)?,
-                group_ids,
-                &validity,
+                PartialState {
+                    values,
+                    overflowed,
+                    empty,
+                },
+                &sums.execute::<DecimalArray>(ctx)?,
+                &rows,
                 decimal_dtype.vortex_expect("decimal state dtype"),
             ),
             SumGroupedValues::Decimal256(values) => accumulate_decimal_partials(
-                values,
-                overflowed,
-                &partials.clone().execute::<DecimalArray>(ctx)?,
-                group_ids,
-                &validity,
+                PartialState {
+                    values,
+                    overflowed,
+                    empty,
+                },
+                &sums.execute::<DecimalArray>(ctx)?,
+                &rows,
                 decimal_dtype.vortex_expect("decimal state dtype"),
             ),
         }
@@ -366,143 +430,159 @@ impl GroupedState for SumGroupedState {
             self.len()
         );
         self.ensure_groups(num_groups)?;
-        let validity = validity_from_overflow(&self.overflowed);
-        self.overflowed.clear();
+        let overflowed = std::mem::take(&mut self.overflowed);
+        let empty = std::mem::take(&mut self.empty);
         let decimal_dtype = self.decimal_dtype();
-        Ok(match &mut self.values {
+        let sums = match &mut self.values {
             SumGroupedValues::Unsigned(values) => {
-                PrimitiveArray::new(Buffer::from(std::mem::take(values)), validity).into_array()
+                PrimitiveArray::new(Buffer::from(std::mem::take(values)), Validity::NonNullable)
+                    .into_array()
             }
             SumGroupedValues::Signed(values) => {
-                PrimitiveArray::new(Buffer::from(std::mem::take(values)), validity).into_array()
+                PrimitiveArray::new(Buffer::from(std::mem::take(values)), Validity::NonNullable)
+                    .into_array()
             }
             SumGroupedValues::Float(values) => {
-                PrimitiveArray::new(Buffer::from(std::mem::take(values)), validity).into_array()
+                PrimitiveArray::new(Buffer::from(std::mem::take(values)), Validity::NonNullable)
+                    .into_array()
             }
             SumGroupedValues::Decimal8(values) => decimal_array(
                 std::mem::take(values),
                 decimal_dtype.vortex_expect("decimal state dtype"),
-                validity,
+                Validity::NonNullable,
             ),
             SumGroupedValues::Decimal16(values) => decimal_array(
                 std::mem::take(values),
                 decimal_dtype.vortex_expect("decimal state dtype"),
-                validity,
+                Validity::NonNullable,
             ),
             SumGroupedValues::Decimal32(values) => decimal_array(
                 std::mem::take(values),
                 decimal_dtype.vortex_expect("decimal state dtype"),
-                validity,
+                Validity::NonNullable,
             ),
             SumGroupedValues::Decimal64(values) => decimal_array(
                 std::mem::take(values),
                 decimal_dtype.vortex_expect("decimal state dtype"),
-                validity,
+                Validity::NonNullable,
             ),
             SumGroupedValues::Decimal128(values) => decimal_array(
                 std::mem::take(values),
                 decimal_dtype.vortex_expect("decimal state dtype"),
-                validity,
+                Validity::NonNullable,
             ),
             SumGroupedValues::Decimal256(values) => decimal_array(
                 std::mem::take(values),
                 decimal_dtype.vortex_expect("decimal state dtype"),
-                validity,
+                Validity::NonNullable,
             ),
-        })
+        };
+        let names = self.partial_dtype.as_struct_fields().names().clone();
+        Ok(StructArray::try_new(
+            names,
+            vec![
+                sums,
+                BoolArray::from_iter(overflowed.into_iter().map(|value| value != 0)).into_array(),
+                BoolArray::from_iter(empty.into_iter().map(|value| value != 0)).into_array(),
+            ],
+            num_groups,
+            Validity::AllValid,
+        )?
+        .into_array())
     }
 }
 
-fn for_each_partial_row(validity: &Mask, len: usize, mut f: impl FnMut(usize, bool)) {
-    match validity.indices() {
-        AllOr::All => (0..len).for_each(|idx| f(idx, true)),
-        AllOr::None => (0..len).for_each(|idx| f(idx, false)),
-        AllOr::Some(valid_indices) => {
-            let mut valid_indices = valid_indices.iter().copied().peekable();
-            for idx in 0..len {
-                let valid = valid_indices.next_if_eq(&idx).is_some();
-                f(idx, valid);
-            }
+struct PartialRows<'a> {
+    group_ids: &'a [u32],
+    validity: &'a Mask,
+    overflowed: &'a BitBuffer,
+    empty: &'a BitBuffer,
+}
+
+struct PartialState<'a, T> {
+    values: &'a mut [T],
+    overflowed: &'a mut [u8],
+    empty: &'a mut [u8],
+}
+
+fn for_each_nonempty_partial(rows: &PartialRows<'_>, mut f: impl FnMut(usize, bool)) {
+    for (idx, ((valid, overflowed), empty)) in rows
+        .validity
+        .iter()
+        .zip(rows.overflowed.iter())
+        .zip(rows.empty.iter())
+        .enumerate()
+    {
+        if valid && !empty {
+            f(idx, overflowed);
         }
     }
 }
 
 fn accumulate_primitive_partials<T: Copy>(
-    values: &mut [T],
-    overflowed: &mut [u8],
+    state: PartialState<'_, T>,
     partials: &[T],
-    group_ids: &[u32],
-    validity: &Mask,
+    rows: &PartialRows<'_>,
     checked_add: fn(&mut T, T) -> bool,
 ) {
-    for_each_partial_row(validity, partials.len(), |idx, valid| {
-        let group = group_ids[idx] as usize;
-        if !valid || checked_add(&mut values[group], partials[idx]) {
-            overflowed[group] = 1;
+    for_each_nonempty_partial(rows, |idx, is_overflowed| {
+        let group = rows.group_ids[idx] as usize;
+        state.empty[group] = 0;
+        if is_overflowed || checked_add(&mut state.values[group], partials[idx]) {
+            state.overflowed[group] = 1;
         }
     });
 }
 
 fn accumulate_float_partials(
-    values: &mut [f64],
-    overflowed: &mut [u8],
+    state: PartialState<'_, f64>,
     partials: &[f64],
-    group_ids: &[u32],
-    validity: &Mask,
+    rows: &PartialRows<'_>,
 ) {
-    for_each_partial_row(validity, partials.len(), |idx, valid| {
-        let group = group_ids[idx] as usize;
-        if !valid {
-            overflowed[group] = 1;
+    for_each_nonempty_partial(rows, |idx, is_overflowed| {
+        let group = rows.group_ids[idx] as usize;
+        state.empty[group] = 0;
+        if is_overflowed {
+            state.overflowed[group] = 1;
         } else {
-            values[group] += partials[idx];
+            state.values[group] += partials[idx];
         }
     });
 }
 
 fn accumulate_decimal_partials<I>(
-    values: &mut [I],
-    overflowed: &mut [u8],
+    state: PartialState<'_, I>,
     partials: &DecimalArray,
-    group_ids: &[u32],
-    validity: &Mask,
+    rows: &PartialRows<'_>,
     dtype: DecimalDType,
 ) where
     I: NativeDecimalType + CheckedAdd,
 {
     match_each_decimal_value_type!(partials.values_type(), |T| {
-        accumulate_decimal_partial_values(
-            values,
-            overflowed,
-            &partials.buffer::<T>(),
-            group_ids,
-            validity,
-            dtype,
-        );
+        accumulate_decimal_partial_values(state, &partials.buffer::<T>(), rows, dtype);
     });
 }
 
 fn accumulate_decimal_partial_values<T, I>(
-    values: &mut [I],
-    overflowed: &mut [u8],
+    state: PartialState<'_, I>,
     partials: &[T],
-    group_ids: &[u32],
-    validity: &Mask,
+    rows: &PartialRows<'_>,
     dtype: DecimalDType,
 ) where
     T: NativeDecimalType,
     I: NativeDecimalType + CheckedAdd,
 {
-    for_each_partial_row(validity, partials.len(), |idx, valid| {
-        let group = group_ids[idx] as usize;
-        if !valid {
-            overflowed[group] = 1;
+    for_each_nonempty_partial(rows, |idx, is_overflowed| {
+        let group = rows.group_ids[idx] as usize;
+        state.empty[group] = 0;
+        if is_overflowed {
+            state.overflowed[group] = 1;
         } else {
             let Some(value) = <I as crate::dtype::BigCast>::from(partials[idx]) else {
-                overflowed[group] = 1;
+                state.overflowed[group] = 1;
                 return;
             };
-            add_decimal(values, overflowed, group, value, dtype);
+            add_decimal(state.values, state.overflowed, group, value, dtype);
         }
     });
 }
@@ -549,19 +629,11 @@ pub(super) fn add_decimal<T>(
     }
 }
 
-fn validity_from_overflow(overflowed: &[u8]) -> Validity {
-    if overflowed.iter().all(|&overflowed| overflowed == 0) {
-        Validity::AllValid
-    } else {
-        Validity::from_iter(overflowed.iter().map(|&overflowed| overflowed == 0))
-    }
-}
-
 fn decimal_scalar<T: NativeDecimalType>(value: T, dtype: DecimalDType) -> Scalar
 where
     DecimalValue: From<T>,
 {
-    Scalar::decimal(DecimalValue::from(value), dtype, Nullability::Nullable)
+    Scalar::decimal(DecimalValue::from(value), dtype, Nullability::NonNullable)
 }
 
 fn decimal_array<T: NativeDecimalType>(

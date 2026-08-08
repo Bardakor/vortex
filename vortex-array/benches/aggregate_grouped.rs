@@ -12,13 +12,13 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use vortex_array::ArrayRef;
+use vortex_array::Canonical;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::aggregate_fn::AggregateFnVTable;
 use vortex_array::aggregate_fn::DynGroupedAccumulator;
 use vortex_array::aggregate_fn::GroupIds;
 use vortex_array::aggregate_fn::GroupedAccumulator;
-use vortex_array::aggregate_fn::NumericalAggregateOpts;
 use vortex_array::aggregate_fn::fns::count::Count;
 use vortex_array::aggregate_fn::fns::sum::Sum;
 use vortex_array::arrays::PrimitiveArray;
@@ -177,22 +177,23 @@ fn i32_cardinality_input(group_count: usize, order: IdOrder) -> DenseGroupedInpu
 
 fn grouped_accumulator<V>(input: &DenseGroupedInput, vtable: V) -> ArrayRef
 where
-    V: AggregateFnVTable<Options = NumericalAggregateOpts> + Clone,
+    V: AggregateFnVTable + Clone,
+    V::Options: Default,
 {
-    let mut acc = GroupedAccumulator::try_new(
-        vtable,
-        NumericalAggregateOpts::default(),
-        input.values.dtype().clone(),
-    )
-    .unwrap();
+    let mut acc =
+        GroupedAccumulator::try_new(vtable, V::Options::default(), input.values.dtype().clone())
+            .unwrap();
     let num_groups = input.group_ids.num_groups();
-    acc.accumulate(
-        &input.values,
-        &input.group_ids,
-        &mut SESSION.create_execution_ctx(),
-    )
-    .unwrap();
-    divan::black_box(acc.finish(num_groups).unwrap())
+    let mut ctx = SESSION.create_execution_ctx();
+    acc.accumulate(&input.values, &input.group_ids, &mut ctx)
+        .unwrap();
+    let result = acc
+        .finish(num_groups)
+        .unwrap()
+        .execute::<Canonical>(&mut ctx)
+        .unwrap()
+        .into_array();
+    divan::black_box(result)
 }
 
 #[divan::bench]
