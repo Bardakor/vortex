@@ -20,6 +20,8 @@ use crate::aggregate_fn::AggregateFn;
 use crate::aggregate_fn::AggregateFnId;
 use crate::aggregate_fn::AggregateFnRef;
 use crate::aggregate_fn::AggregateFnSatisfaction;
+use crate::aggregate_fn::DefaultGroupedState;
+use crate::aggregate_fn::GroupedState;
 use crate::dtype::DType;
 use crate::scalar::Scalar;
 
@@ -113,6 +115,24 @@ pub trait AggregateFnVTable: 'static + Sized + Clone + Send + Sync {
         options: &Self::Options,
         input_dtype: &DType,
     ) -> VortexResult<Self::Partial>;
+
+    /// Create the dense state container used by grouped accumulation.
+    ///
+    /// Aggregates may override this to keep monomorphic, cache-dense state. The default stores one
+    /// [`Self::Partial`] per group.
+    fn grouped_state(
+        &self,
+        options: &Self::Options,
+        input_dtype: &DType,
+        partial_dtype: &DType,
+    ) -> VortexResult<Box<dyn GroupedState>> {
+        Ok(Box::new(DefaultGroupedState::new(
+            self.clone(),
+            options.clone(),
+            input_dtype.clone(),
+            partial_dtype.clone(),
+        )))
+    }
 
     /// Combine partial scalar state into the accumulator.
     fn combine_partials(&self, partial: &mut Self::Partial, other: Scalar) -> VortexResult<()>;

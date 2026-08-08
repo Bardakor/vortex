@@ -10,6 +10,7 @@ use divan::Bencher;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
@@ -37,8 +38,22 @@ const GROUP_COUNT: usize = 128;
 const GROUP_SIZE_SEED: u64 = 42;
 const MIN_VALUES_PER_GROUP: usize = 1;
 const MAX_VALUES_PER_GROUP: usize = 15;
-const SHUFFLED_ELEMENT_COUNT: usize = 1 << 16;
-const SHUFFLED_GROUP_COUNT: usize = 1 << 12;
+const CARDINALITY_ELEMENT_COUNT: usize = 1 << 16;
+
+#[derive(Clone, Copy, Debug)]
+enum IdOrder {
+    Clustered,
+    Shuffled,
+}
+
+const CARDINALITY_ARGS: &[(usize, IdOrder)] = &[
+    (128, IdOrder::Clustered),
+    (128, IdOrder::Shuffled),
+    (1 << 12, IdOrder::Clustered),
+    (1 << 12, IdOrder::Shuffled),
+    (1 << 16, IdOrder::Clustered),
+    (1 << 16, IdOrder::Shuffled),
+];
 
 fn random_group_sizes() -> Vec<usize> {
     let mut rng = StdRng::seed_from_u64(GROUP_SIZE_SEED);
@@ -142,18 +157,21 @@ fn varbinview_input() -> DenseGroupedInput {
     )
 }
 
-fn i32_shuffled_input() -> DenseGroupedInput {
+fn i32_cardinality_input(group_count: usize, order: IdOrder) -> DenseGroupedInput {
     let mut rng = StdRng::seed_from_u64(GROUP_SIZE_SEED);
-    let values: Buffer<i32> = (0..SHUFFLED_ELEMENT_COUNT)
+    let values: Buffer<i32> = (0..CARDINALITY_ELEMENT_COUNT)
         .map(|_| rng.random_range(-512..512))
         .collect();
-    let group_ids: Buffer<u32> = (0..SHUFFLED_ELEMENT_COUNT)
-        .map(|_| rng.random_range(0..SHUFFLED_GROUP_COUNT as u32))
+    let mut group_ids: Vec<u32> = (0..CARDINALITY_ELEMENT_COUNT)
+        .map(|idx| (idx * group_count / CARDINALITY_ELEMENT_COUNT) as u32)
         .collect();
+    if matches!(order, IdOrder::Shuffled) {
+        group_ids.shuffle(&mut rng);
+    }
 
     DenseGroupedInput {
         values: PrimitiveArray::new(values, Validity::NonNullable).into_array(),
-        group_ids: GroupIds::from_buffer(group_ids, SHUFFLED_GROUP_COUNT).unwrap(),
+        group_ids: GroupIds::from_buffer(Buffer::from(group_ids), group_count).unwrap(),
     }
 }
 
@@ -225,17 +243,17 @@ fn count_varbinview(bencher: Bencher) {
         .bench_refs(|input| grouped_accumulator(input, Count));
 }
 
-#[divan::bench]
-fn sum_i32_shuffled_4k_groups(bencher: Bencher) {
-    let input = i32_shuffled_input();
+#[divan::bench(args = CARDINALITY_ARGS)]
+fn sum_i32_cardinality(bencher: Bencher, (group_count, order): (usize, IdOrder)) {
+    let input = i32_cardinality_input(group_count, order);
     bencher
         .with_inputs(|| &input)
         .bench_refs(|input| grouped_accumulator(input, Sum));
 }
 
-#[divan::bench]
-fn count_i32_shuffled_4k_groups(bencher: Bencher) {
-    let input = i32_shuffled_input();
+#[divan::bench(args = CARDINALITY_ARGS)]
+fn count_i32_cardinality(bencher: Bencher, (group_count, order): (usize, IdOrder)) {
+    let input = i32_cardinality_input(group_count, order);
     bencher
         .with_inputs(|| &input)
         .bench_refs(|input| grouped_accumulator(input, Count));

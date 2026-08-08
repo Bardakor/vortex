@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::Any;
+
 use num_traits::ToPrimitive;
+use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_error::vortex_ensure;
 use vortex_mask::AllOr;
 use vortex_mask::Mask;
 
 use super::Count;
-use super::CountPartial;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
+use crate::IntoArray;
 use crate::aggregate_fn::GroupIds;
+use crate::aggregate_fn::GroupedState;
 use crate::aggregate_fn::NumericalAggregateOpts;
 use crate::aggregate_fn::kernels::GroupedAggregateKernel;
 use crate::aggregate_fn::kernels::GroupedAggregateKernelAdapter;
@@ -19,6 +24,76 @@ use crate::arrays::Primitive;
 use crate::arrays::PrimitiveArray;
 use crate::dtype::NativePType;
 use crate::match_each_native_ptype;
+use crate::scalar::Scalar;
+
+#[derive(Default)]
+pub(crate) struct CountGroupedState {
+    counts: Vec<u64>,
+}
+
+impl CountGroupedState {
+    fn counts_mut(&mut self) -> &mut [u64] {
+        &mut self.counts
+    }
+}
+
+impl GroupedState for CountGroupedState {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    fn ensure_groups(&mut self, num_groups: usize) -> VortexResult<()> {
+        self.counts.resize(num_groups.max(self.counts.len()), 0);
+        Ok(())
+    }
+
+    fn is_saturated(&self, _group_id: usize) -> bool {
+        false
+    }
+
+    fn combine_scalar(&mut self, group_id: usize, partial: Scalar) -> VortexResult<()> {
+        self.counts[group_id] += partial
+            .as_primitive()
+            .typed_value::<u64>()
+            .vortex_expect("count partial should not be null");
+        Ok(())
+    }
+
+    fn partial_scalar(&self, group_id: usize) -> VortexResult<Scalar> {
+        Ok(Scalar::primitive(
+            self.counts.get(group_id).copied().unwrap_or(0),
+            crate::dtype::Nullability::NonNullable,
+        ))
+    }
+
+    fn accumulate_partials(
+        &mut self,
+        partials: &ArrayRef,
+        group_ids: &[u32],
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<()> {
+        let partials = partials.clone().execute::<Buffer<u64>>(ctx)?;
+        for (&partial, &group_id) in partials.iter().zip(group_ids) {
+            self.counts[group_id as usize] += partial;
+        }
+        Ok(())
+    }
+
+    fn flush_partials(&mut self, num_groups: usize) -> VortexResult<ArrayRef> {
+        vortex_ensure!(
+            num_groups >= self.len(),
+            "Cannot flush {} groups after accumulating {} groups",
+            num_groups,
+            self.len()
+        );
+        self.ensure_groups(num_groups)?;
+        Ok(Buffer::from(std::mem::take(&mut self.counts)).into_array())
+    }
+}
 
 pub(crate) static COUNT_GROUPED_KERNEL: GroupedAggregateKernelAdapter<Count, CountGroupedKernel> =
     GroupedAggregateKernelAdapter::new(CountGroupedKernel);
@@ -27,14 +102,17 @@ pub(crate) static COUNT_GROUPED_KERNEL: GroupedAggregateKernelAdapter<Count, Cou
 pub(crate) struct CountGroupedKernel;
 
 impl GroupedAggregateKernel<Count> for CountGroupedKernel {
+    type State = CountGroupedState;
+
     fn grouped_accumulate(
         &self,
         options: &NumericalAggregateOpts,
-        states: &mut [CountPartial],
+        state: &mut Self::State,
         batch: &ArrayRef,
         group_ids: &GroupIds,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<bool> {
+        let states = state.counts_mut();
         if options.skip_nans && batch.dtype().is_float() {
             let Some(primitive) = batch.as_opt::<Primitive>() else {
                 return Ok(false);
@@ -51,11 +129,49 @@ impl GroupedAggregateKernel<Count> for CountGroupedKernel {
 
         let group_ids = group_ids.validated_ids(ctx)?;
         let validity = batch.validity()?.execute_mask(batch.len(), ctx)?;
-        for_each_valid_idx(&validity, batch.len(), |idx| {
-            states[group_ids[idx] as usize].count += 1;
-        });
+        if matches!(validity.indices(), AllOr::All) && has_long_group_runs(group_ids.as_ref()) {
+            for_each_group_run(group_ids.as_ref(), |group_id, start, end| {
+                states[group_id as usize] +=
+                    u64::try_from(end - start).vortex_expect("group run length must fit u64");
+            });
+        } else {
+            for_each_valid_idx(&validity, batch.len(), |idx| {
+                states[group_ids[idx] as usize] += 1;
+            });
+        }
         Ok(true)
     }
+}
+
+fn has_long_group_runs(group_ids: &[u32]) -> bool {
+    let mut run_length = 1;
+    for ids in group_ids[..group_ids.len().min(256)].windows(2) {
+        if ids[0] == ids[1] {
+            run_length += 1;
+            if run_length >= 4 {
+                return true;
+            }
+        } else {
+            run_length = 1;
+        }
+    }
+    false
+}
+
+fn for_each_group_run(group_ids: &[u32], mut f: impl FnMut(u32, usize, usize)) {
+    let Some(&first_group_id) = group_ids.first() else {
+        return;
+    };
+    let mut group_id = first_group_id;
+    let mut start = 0;
+    for (idx, &next_group_id) in group_ids.iter().enumerate().skip(1) {
+        if next_group_id != group_id {
+            f(group_id, start, idx);
+            group_id = next_group_id;
+            start = idx;
+        }
+    }
+    f(group_id, start, group_ids.len());
 }
 
 fn for_each_valid_idx(validity: &Mask, len: usize, mut f: impl FnMut(usize)) {
@@ -67,7 +183,7 @@ fn for_each_valid_idx(validity: &Mask, len: usize, mut f: impl FnMut(usize)) {
 }
 
 fn accumulate_grouped_float_count(
-    states: &mut [CountPartial],
+    states: &mut [u64],
     primitive: &PrimitiveArray,
     group_ids: &[u32],
     ctx: &mut ExecutionCtx,
@@ -89,7 +205,7 @@ fn accumulate_grouped_float_count(
 }
 
 fn accumulate_valid_non_nan<T: NativePType + ToPrimitive>(
-    states: &mut [CountPartial],
+    states: &mut [u64],
     values: &[T],
     group_ids: &[u32],
     validity: &Mask,
@@ -97,7 +213,7 @@ fn accumulate_valid_non_nan<T: NativePType + ToPrimitive>(
     for_each_valid_idx(validity, values.len(), |idx| {
         let value = ToPrimitive::to_f64(&values[idx]).vortex_expect("float to f64");
         if !value.is_nan() {
-            states[group_ids[idx] as usize].count += 1;
+            states[group_ids[idx] as usize] += 1;
         }
     });
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -270,6 +271,147 @@ impl GroupIds {
     }
 }
 
+/// Aggregate-owned dense state used by grouped accumulation.
+pub trait GroupedState: 'static + Send {
+    /// Expose the concrete state container to a typed grouped kernel.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Return the number of allocated group slots.
+    fn len(&self) -> usize;
+
+    /// Return whether no group slots are allocated.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Ensure that at least `num_groups` state slots exist.
+    fn ensure_groups(&mut self, num_groups: usize) -> VortexResult<()>;
+
+    /// Return whether one group has reached a terminal state.
+    fn is_saturated(&self, group_id: usize) -> bool;
+
+    /// Combine one scalar partial into a group.
+    fn combine_scalar(&mut self, group_id: usize, partial: Scalar) -> VortexResult<()>;
+
+    /// Read one group's partial state.
+    fn partial_scalar(&self, group_id: usize) -> VortexResult<Scalar>;
+
+    /// Fold an array of partial states into dense groups.
+    fn accumulate_partials(
+        &mut self,
+        partials: &ArrayRef,
+        group_ids: &[u32],
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<()> {
+        for (row_idx, &group_id) in group_ids.iter().enumerate() {
+            self.combine_scalar(group_id as usize, partials.execute_scalar(row_idx, ctx)?)?;
+        }
+        Ok(())
+    }
+
+    /// Flush all partial states into an array and reset the container.
+    fn flush_partials(&mut self, num_groups: usize) -> VortexResult<ArrayRef>;
+}
+
+/// Default grouped state backed by one aggregate partial value per group.
+pub(crate) struct DefaultGroupedState<V: AggregateFnVTable> {
+    vtable: V,
+    options: V::Options,
+    input_dtype: DType,
+    partial_dtype: DType,
+    partials: Vec<V::Partial>,
+}
+
+impl<V: AggregateFnVTable> DefaultGroupedState<V> {
+    pub(crate) fn new(
+        vtable: V,
+        options: V::Options,
+        input_dtype: DType,
+        partial_dtype: DType,
+    ) -> Self {
+        Self {
+            vtable,
+            options,
+            input_dtype,
+            partial_dtype,
+            partials: Vec::new(),
+        }
+    }
+}
+
+impl<V: AggregateFnVTable> GroupedState for DefaultGroupedState<V> {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.partials.len()
+    }
+
+    fn ensure_groups(&mut self, num_groups: usize) -> VortexResult<()> {
+        self.partials
+            .reserve(num_groups.saturating_sub(self.partials.len()));
+        while self.partials.len() < num_groups {
+            self.partials.push(
+                self.vtable
+                    .empty_partial(&self.options, &self.input_dtype)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn is_saturated(&self, group_id: usize) -> bool {
+        self.vtable.is_saturated(&self.partials[group_id])
+    }
+
+    fn combine_scalar(&mut self, group_id: usize, partial: Scalar) -> VortexResult<()> {
+        self.vtable
+            .combine_partials(&mut self.partials[group_id], partial)
+    }
+
+    fn partial_scalar(&self, group_id: usize) -> VortexResult<Scalar> {
+        if let Some(partial) = self.partials.get(group_id) {
+            self.vtable.to_scalar(partial)
+        } else {
+            let partial = self
+                .vtable
+                .empty_partial(&self.options, &self.input_dtype)?;
+            self.vtable.to_scalar(&partial)
+        }
+    }
+
+    fn flush_partials(&mut self, num_groups: usize) -> VortexResult<ArrayRef> {
+        vortex_ensure!(
+            num_groups >= self.partials.len(),
+            "Cannot flush {} groups after accumulating {} groups",
+            num_groups,
+            self.partials.len()
+        );
+        self.ensure_groups(num_groups)?;
+
+        if let Some(states) = self
+            .vtable
+            .partials_to_array(&self.partials, &self.partial_dtype)?
+        {
+            vortex_ensure!(
+                states.dtype() == &self.partial_dtype,
+                "Partial array DType mismatch: expected {}, got {}",
+                self.partial_dtype,
+                states.dtype()
+            );
+            self.partials.clear();
+            return Ok(states);
+        }
+
+        let mut states = builder_with_capacity(&self.partial_dtype, num_groups);
+        for partial in &self.partials {
+            states.append_scalar(&self.vtable.to_scalar(partial)?)?;
+        }
+        self.partials.clear();
+        Ok(states.finish())
+    }
+}
+
 /// An accumulator used for computing aggregates over group ids.
 ///
 /// Group ids are caller-assigned `u32` ordinals in the dense range `0..num_groups`. Input batches
@@ -289,8 +431,8 @@ pub struct GroupedAccumulator<V: AggregateFnVTable> {
     return_dtype: DType,
     /// The DType of the partial accumulator state.
     partial_dtype: DType,
-    /// Dense per-group partial state.
-    partials: Vec<V::Partial>,
+    /// Aggregate-owned dense per-group state.
+    state: Box<dyn GroupedState>,
 }
 
 impl<V: AggregateFnVTable> GroupedAccumulator<V> {
@@ -310,6 +452,7 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
                 dtype
             )
         })?;
+        let state = vtable.grouped_state(&options, &dtype, &partial_dtype)?;
 
         Ok(Self {
             vtable,
@@ -318,20 +461,14 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
             dtype,
             return_dtype,
             partial_dtype,
-            partials: Vec::new(),
+            state,
         })
     }
 
     fn ensure_groups(&mut self, num_groups: usize) -> VortexResult<()> {
         validate_num_groups(num_groups)?;
 
-        self.partials
-            .reserve(num_groups.saturating_sub(self.partials.len()));
-        while self.partials.len() < num_groups {
-            self.partials
-                .push(self.vtable.empty_partial(&self.options, &self.dtype)?);
-        }
-        Ok(())
+        self.state.ensure_groups(num_groups)
     }
 
     fn try_accumulate_kernel(
@@ -350,7 +487,7 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
             &self.aggregate_fn,
             batch,
             group_ids,
-            &mut self.partials,
+            self.state.as_any_mut(),
             ctx,
         )? {
             return Ok(true);
@@ -404,7 +541,7 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
             }
 
             let group = first + group_offset;
-            if self.vtable.is_saturated(&self.partials[group]) {
+            if self.state.is_saturated(group) {
                 continue;
             }
 
@@ -415,8 +552,7 @@ impl<V: AggregateFnVTable> GroupedAccumulator<V> {
             )?;
             accumulator.accumulate(&gathered.slice(start..end)?, ctx)?;
             let partial = accumulator.flush()?;
-            self.vtable
-                .combine_partials(&mut self.partials[group], partial)?;
+            self.state.combine_scalar(group, partial)?;
         }
         Ok(())
     }
@@ -599,13 +735,8 @@ impl<V: AggregateFnVTable> DynGroupedAccumulator for GroupedAccumulator<V> {
 
         let group_ids = group_ids.validated_ids(ctx)?;
         self.ensure_groups(num_groups)?;
-
-        for (row_idx, &group_id) in group_ids.iter().enumerate() {
-            let partial = partials.execute_scalar(row_idx, ctx)?;
-            self.vtable
-                .combine_partials(&mut self.partials[group_id as usize], partial)?;
-        }
-        Ok(())
+        self.state
+            .accumulate_partials(partials, group_ids.as_ref(), ctx)
     }
 
     fn merge_group(
@@ -621,9 +752,8 @@ impl<V: AggregateFnVTable> DynGroupedAccumulator for GroupedAccumulator<V> {
             other.partial_dtype()
         );
         self.ensure_groups((into as usize) + 1)?;
-        let partial = other.partial_scalar(from)?;
-        self.vtable
-            .combine_partials(&mut self.partials[into as usize], partial)
+        self.state
+            .combine_scalar(into as usize, other.partial_scalar(from)?)
     }
 
     fn partial_dtype(&self) -> &DType {
@@ -631,44 +761,11 @@ impl<V: AggregateFnVTable> DynGroupedAccumulator for GroupedAccumulator<V> {
     }
 
     fn partial_scalar(&self, group_id: u32) -> VortexResult<Scalar> {
-        if let Some(partial) = self.partials.get(group_id as usize) {
-            self.vtable.to_scalar(partial)
-        } else {
-            let partial = self.vtable.empty_partial(&self.options, &self.dtype)?;
-            self.vtable.to_scalar(&partial)
-        }
+        self.state.partial_scalar(group_id as usize)
     }
 
     fn flush_partials(&mut self, num_groups: usize) -> VortexResult<ArrayRef> {
-        vortex_ensure!(
-            num_groups >= self.partials.len(),
-            "Cannot flush {} groups after accumulating {} groups",
-            num_groups,
-            self.partials.len()
-        );
-        self.ensure_groups(num_groups)?;
-
-        if let Some(states) = self
-            .vtable
-            .partials_to_array(&self.partials, &self.partial_dtype)?
-        {
-            vortex_ensure!(
-                states.dtype() == &self.partial_dtype,
-                "Partial array DType mismatch: expected {}, got {}",
-                self.partial_dtype,
-                states.dtype()
-            );
-            self.partials.clear();
-            return Ok(states);
-        }
-
-        let mut states = builder_with_capacity(&self.partial_dtype, num_groups);
-        for partial in &self.partials {
-            states.append_scalar(&self.vtable.to_scalar(partial)?)?;
-        }
-        self.partials.clear();
-
-        Ok(states.finish())
+        self.state.flush_partials(num_groups)
     }
 
     fn finish(&mut self, num_groups: usize) -> VortexResult<ArrayRef> {

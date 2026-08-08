@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use num_traits::AsPrimitive;
+use num_traits::CheckedAdd;
 use num_traits::ToPrimitive;
 use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
@@ -11,14 +12,14 @@ use vortex_mask::AllOr;
 use vortex_mask::Mask;
 
 use super::Sum;
-use super::SumPartial;
-use super::SumState;
 use super::checked_add_i64;
 use super::checked_add_u64;
+use super::grouped_state::SumGroupedState;
+use super::grouped_state::SumGroupedValues;
+use super::grouped_state::add_decimal;
 use super::primitive::sum_float_all;
 use super::primitive::sum_signed_all;
 use super::primitive::sum_unsigned_all;
-use super::sum_decimal_dtype;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::aggregate_fn::GroupIds;
@@ -32,12 +33,10 @@ use crate::arrays::DecimalArray;
 use crate::arrays::Primitive;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::bool::BoolArrayExt;
-use crate::dtype::DecimalType;
 use crate::dtype::NativeDecimalType;
 use crate::dtype::NativePType;
 use crate::match_each_decimal_value_type;
 use crate::match_each_native_ptype;
-use crate::scalar::DecimalValue;
 
 const MIN_GROUP_RUN_LENGTH: usize = 4;
 
@@ -48,10 +47,12 @@ pub(crate) static SUM_GROUPED_KERNEL: GroupedAggregateKernelAdapter<Sum, SumGrou
 pub(crate) struct SumGroupedKernel;
 
 impl GroupedAggregateKernel<Sum> for SumGroupedKernel {
+    type State = SumGroupedState;
+
     fn grouped_accumulate(
         &self,
         options: &NumericalAggregateOpts,
-        partials: &mut [SumPartial],
+        state: &mut Self::State,
         batch: &ArrayRef,
         group_ids: &GroupIds,
         ctx: &mut ExecutionCtx,
@@ -59,7 +60,7 @@ impl GroupedAggregateKernel<Sum> for SumGroupedKernel {
         if let Some(primitive) = batch.as_opt::<Primitive>() {
             let group_ids = group_ids.validated_ids(ctx)?;
             accumulate_grouped_primitive(
-                partials,
+                state,
                 &primitive.into_owned(),
                 group_ids.as_ref(),
                 options.skip_nans,
@@ -70,13 +71,13 @@ impl GroupedAggregateKernel<Sum> for SumGroupedKernel {
 
         if let Some(bools) = batch.as_opt::<Bool>() {
             let group_ids = group_ids.validated_ids(ctx)?;
-            accumulate_grouped_bool(partials, &bools.into_owned(), group_ids.as_ref(), ctx)?;
+            accumulate_grouped_bool(state, &bools.into_owned(), group_ids.as_ref(), ctx)?;
             return Ok(true);
         }
 
         if let Some(decimals) = batch.as_opt::<Decimal>() {
             let group_ids = group_ids.validated_ids(ctx)?;
-            accumulate_grouped_decimal(partials, &decimals.into_owned(), group_ids.as_ref(), ctx)?;
+            accumulate_grouped_decimal(state, &decimals.into_owned(), group_ids.as_ref(), ctx)?;
             return Ok(true);
         }
 
@@ -109,139 +110,154 @@ fn for_each_group_run(group_ids: &[u32], mut f: impl FnMut(u32, usize, usize)) {
     f(group_id, start, group_ids.len());
 }
 
-fn accumulate_grouped_unsigned(partials: &mut [SumPartial], group_id: u32, value: u64) {
-    let partial = &mut partials[group_id as usize];
-    let saturated = match partial.current.as_mut() {
-        None => return,
-        Some(SumState::Unsigned(acc)) => checked_add_u64(acc, value),
-        Some(_) => vortex_panic!("unsigned sum state with non-unsigned input"),
-    };
-    if saturated {
-        partial.current = None;
-    }
-}
-
-fn accumulate_grouped_unsigned_run<T>(partials: &mut [SumPartial], group_id: u32, values: &[T])
-where
-    T: NativePType + AsPrimitive<u64>,
-{
-    let partial = &mut partials[group_id as usize];
-    let saturated = match partial.current.as_mut() {
-        None => return,
-        Some(SumState::Unsigned(acc)) => sum_unsigned_all(acc, values),
-        Some(_) => vortex_panic!("unsigned sum state with non-unsigned input"),
-    };
-    if saturated {
-        partial.current = None;
-    }
-}
-
-fn accumulate_grouped_unsigned_all<T>(partials: &mut [SumPartial], values: &[T], group_ids: &[u32])
-where
-    T: NativePType + AsPrimitive<u64>,
-{
-    for_each_group_run(group_ids, |group_id, start, end| {
-        if end - start >= MIN_GROUP_RUN_LENGTH {
-            accumulate_grouped_unsigned_run(partials, group_id, &values[start..end]);
-        } else {
-            for &value in &values[start..end] {
-                accumulate_grouped_unsigned(partials, group_id, value.as_());
+fn has_long_group_runs(group_ids: &[u32]) -> bool {
+    let mut run_length = 1;
+    for ids in group_ids[..group_ids.len().min(256)].windows(2) {
+        if ids[0] == ids[1] {
+            run_length += 1;
+            if run_length >= MIN_GROUP_RUN_LENGTH {
+                return true;
             }
-        }
-    });
-}
-
-fn accumulate_grouped_signed(partials: &mut [SumPartial], group_id: u32, value: i64) {
-    let partial = &mut partials[group_id as usize];
-    let saturated = match partial.current.as_mut() {
-        None => return,
-        Some(SumState::Signed(acc)) => checked_add_i64(acc, value),
-        Some(_) => vortex_panic!("signed sum state with non-signed input"),
-    };
-    if saturated {
-        partial.current = None;
-    }
-}
-
-fn accumulate_grouped_signed_run<T>(partials: &mut [SumPartial], group_id: u32, values: &[T])
-where
-    T: NativePType + AsPrimitive<i64>,
-{
-    let partial = &mut partials[group_id as usize];
-    let saturated = match partial.current.as_mut() {
-        None => return,
-        Some(SumState::Signed(acc)) => sum_signed_all(acc, values),
-        Some(_) => vortex_panic!("signed sum state with non-signed input"),
-    };
-    if saturated {
-        partial.current = None;
-    }
-}
-
-fn accumulate_grouped_signed_all<T>(partials: &mut [SumPartial], values: &[T], group_ids: &[u32])
-where
-    T: NativePType + AsPrimitive<i64>,
-{
-    for_each_group_run(group_ids, |group_id, start, end| {
-        if end - start >= MIN_GROUP_RUN_LENGTH {
-            accumulate_grouped_signed_run(partials, group_id, &values[start..end]);
         } else {
-            for &value in &values[start..end] {
-                accumulate_grouped_signed(partials, group_id, value.as_());
-            }
+            run_length = 1;
         }
-    });
+    }
+    false
 }
 
-fn accumulate_grouped_float(
-    partials: &mut [SumPartial],
+fn accumulate_grouped_unsigned(
+    values: &mut [u64],
+    overflowed: &mut [u8],
     group_id: u32,
-    value: f64,
-    skip_nans: bool,
+    value: u64,
 ) {
-    if skip_nans && value.is_nan() {
-        return;
-    }
-    match partials[group_id as usize].current.as_mut() {
-        None => {}
-        Some(SumState::Float(acc)) => *acc += value,
-        Some(_) => vortex_panic!("float sum state with non-float input"),
+    let group = group_id as usize;
+    if checked_add_u64(&mut values[group], value) {
+        overflowed[group] = 1;
     }
 }
 
-fn accumulate_grouped_float_run<T: NativePType>(
-    partials: &mut [SumPartial],
+fn accumulate_grouped_unsigned_run<T>(
+    sums: &mut [u64],
+    overflowed: &mut [u8],
     group_id: u32,
     values: &[T],
-    skip_nans: bool,
-) {
-    match partials[group_id as usize].current.as_mut() {
-        None => {}
-        Some(SumState::Float(acc)) => sum_float_all(acc, values, skip_nans),
-        Some(_) => vortex_panic!("float sum state with non-float input"),
+) where
+    T: NativePType + AsPrimitive<u64>,
+{
+    let group = group_id as usize;
+    if sum_unsigned_all(&mut sums[group], values) {
+        overflowed[group] = 1;
+    }
+}
+
+fn accumulate_grouped_unsigned_all<T>(
+    sums: &mut [u64],
+    overflowed: &mut [u8],
+    values: &[T],
+    group_ids: &[u32],
+) where
+    T: NativePType + AsPrimitive<u64>,
+{
+    if !has_long_group_runs(group_ids) {
+        for (&value, &group_id) in values.iter().zip(group_ids) {
+            accumulate_grouped_unsigned(sums, overflowed, group_id, value.as_());
+        }
+        return;
+    }
+
+    for_each_group_run(group_ids, |group_id, start, end| {
+        if end - start >= MIN_GROUP_RUN_LENGTH {
+            accumulate_grouped_unsigned_run(sums, overflowed, group_id, &values[start..end]);
+        } else {
+            for &value in &values[start..end] {
+                accumulate_grouped_unsigned(sums, overflowed, group_id, value.as_());
+            }
+        }
+    });
+}
+
+fn accumulate_grouped_signed(values: &mut [i64], overflowed: &mut [u8], group_id: u32, value: i64) {
+    let group = group_id as usize;
+    if checked_add_i64(&mut values[group], value) {
+        overflowed[group] = 1;
+    }
+}
+
+fn accumulate_grouped_signed_run<T>(
+    sums: &mut [i64],
+    overflowed: &mut [u8],
+    group_id: u32,
+    values: &[T],
+) where
+    T: NativePType + AsPrimitive<i64>,
+{
+    let group = group_id as usize;
+    if sum_signed_all(&mut sums[group], values) {
+        overflowed[group] = 1;
+    }
+}
+
+fn accumulate_grouped_signed_all<T>(
+    sums: &mut [i64],
+    overflowed: &mut [u8],
+    values: &[T],
+    group_ids: &[u32],
+) where
+    T: NativePType + AsPrimitive<i64>,
+{
+    if !has_long_group_runs(group_ids) {
+        for (&value, &group_id) in values.iter().zip(group_ids) {
+            accumulate_grouped_signed(sums, overflowed, group_id, value.as_());
+        }
+        return;
+    }
+
+    for_each_group_run(group_ids, |group_id, start, end| {
+        if end - start >= MIN_GROUP_RUN_LENGTH {
+            accumulate_grouped_signed_run(sums, overflowed, group_id, &values[start..end]);
+        } else {
+            for &value in &values[start..end] {
+                accumulate_grouped_signed(sums, overflowed, group_id, value.as_());
+            }
+        }
+    });
+}
+
+fn accumulate_grouped_float(sums: &mut [f64], group_id: u32, value: f64, skip_nans: bool) {
+    if !skip_nans || !value.is_nan() {
+        sums[group_id as usize] += value;
     }
 }
 
 fn accumulate_grouped_float_all<T: NativePType>(
-    partials: &mut [SumPartial],
+    sums: &mut [f64],
     values: &[T],
     group_ids: &[u32],
     skip_nans: bool,
 ) {
+    if !has_long_group_runs(group_ids) {
+        for (value, &group_id) in values.iter().zip(group_ids) {
+            let value = ToPrimitive::to_f64(value).vortex_expect("float to f64");
+            accumulate_grouped_float(sums, group_id, value, skip_nans);
+        }
+        return;
+    }
+
     for_each_group_run(group_ids, |group_id, start, end| {
         if end - start >= MIN_GROUP_RUN_LENGTH {
-            accumulate_grouped_float_run(partials, group_id, &values[start..end], skip_nans);
+            sum_float_all(&mut sums[group_id as usize], &values[start..end], skip_nans);
         } else {
             for value in &values[start..end] {
                 let value = ToPrimitive::to_f64(value).vortex_expect("float to f64");
-                accumulate_grouped_float(partials, group_id, value, skip_nans);
+                accumulate_grouped_float(sums, group_id, value, skip_nans);
             }
         }
     });
 }
 
 fn accumulate_grouped_primitive(
-    partials: &mut [SumPartial],
+    state: &mut SumGroupedState,
     primitive: &PrimitiveArray,
     group_ids: &[u32],
     skip_nans: bool,
@@ -252,36 +268,46 @@ fn accumulate_grouped_primitive(
         .validity()?
         .execute_mask(primitive.as_ref().len(), ctx)?;
     let all_valid = matches!(validity.slices(), AllOr::All);
+    let (state, overflowed) = state.parts_mut();
 
     match_each_native_ptype!(primitive.ptype(),
         unsigned: |T| {
+            let SumGroupedValues::Unsigned(sums) = state else {
+                vortex_panic!("unsigned input with non-unsigned grouped sum state")
+            };
             let values = primitive.as_slice::<T>();
             if all_valid {
-                accumulate_grouped_unsigned_all(partials, values, group_ids);
+                accumulate_grouped_unsigned_all(sums, overflowed, values, group_ids);
             } else {
                 for_each_valid_idx(&validity, values.len(), |idx| {
-                    accumulate_grouped_unsigned(partials, group_ids[idx], values[idx].as_());
+                    accumulate_grouped_unsigned(sums, overflowed, group_ids[idx], values[idx].as_());
                 });
             }
         },
         signed: |T| {
+            let SumGroupedValues::Signed(sums) = state else {
+                vortex_panic!("signed input with non-signed grouped sum state")
+            };
             let values = primitive.as_slice::<T>();
             if all_valid {
-                accumulate_grouped_signed_all(partials, values, group_ids);
+                accumulate_grouped_signed_all(sums, overflowed, values, group_ids);
             } else {
                 for_each_valid_idx(&validity, values.len(), |idx| {
-                    accumulate_grouped_signed(partials, group_ids[idx], values[idx].as_());
+                    accumulate_grouped_signed(sums, overflowed, group_ids[idx], values[idx].as_());
                 });
             }
         },
         floating: |T| {
+            let SumGroupedValues::Float(sums) = state else {
+                vortex_panic!("float input with non-float grouped sum state")
+            };
             let values = primitive.as_slice::<T>();
             if all_valid {
-                accumulate_grouped_float_all(partials, values, group_ids, skip_nans);
+                accumulate_grouped_float_all(sums, values, group_ids, skip_nans);
             } else {
                 for_each_valid_idx(&validity, values.len(), |idx| {
                     let value = ToPrimitive::to_f64(&values[idx]).vortex_expect("float to f64");
-                    accumulate_grouped_float(partials, group_ids[idx], value, skip_nans);
+                    accumulate_grouped_float(sums, group_ids[idx], value, skip_nans);
                 });
             }
         }
@@ -290,7 +316,7 @@ fn accumulate_grouped_primitive(
 }
 
 fn accumulate_grouped_bool(
-    partials: &mut [SumPartial],
+    state: &mut SumGroupedState,
     bools: &BoolArray,
     group_ids: &[u32],
     ctx: &mut ExecutionCtx,
@@ -305,14 +331,18 @@ fn accumulate_grouped_bool(
         AllOr::None => return Ok(()),
         AllOr::Some(validity) => &values & validity,
     };
+    let (state, overflowed) = state.parts_mut();
+    let SumGroupedValues::Unsigned(sums) = state else {
+        vortex_panic!("boolean input with non-unsigned grouped sum state")
+    };
     valid_true.for_each_set_index(|idx| {
-        accumulate_grouped_unsigned(partials, group_ids[idx], 1);
+        accumulate_grouped_unsigned(sums, overflowed, group_ids[idx], 1);
     });
     Ok(())
 }
 
 fn accumulate_grouped_decimal(
-    partials: &mut [SumPartial],
+    state: &mut SumGroupedState,
     decimals: &DecimalArray,
     group_ids: &[u32],
     ctx: &mut ExecutionCtx,
@@ -321,46 +351,86 @@ fn accumulate_grouped_decimal(
         .as_ref()
         .validity()?
         .execute_mask(decimals.as_ref().len(), ctx)?;
-    let output_dtype = sum_decimal_dtype(&decimals.decimal_dtype());
-    let output_type = DecimalType::smallest_decimal_value_type(&output_dtype);
+    let output_dtype = state
+        .decimal_dtype()
+        .vortex_expect("decimal sum state dtype");
+    let (state, overflowed) = state.parts_mut();
     match_each_decimal_value_type!(decimals.values_type(), |T| {
-        match_each_decimal_value_type!(output_type, |I| {
-            accumulate_grouped_decimal_values::<T, I>(
-                partials,
-                decimals.buffer::<T>(),
+        let values = decimals.buffer::<T>();
+        match state {
+            SumGroupedValues::Decimal8(sums) => accumulate_grouped_decimal_values(
+                sums,
+                overflowed,
+                values,
                 group_ids,
                 &validity,
-            );
-        })
+                output_dtype,
+            ),
+            SumGroupedValues::Decimal16(sums) => accumulate_grouped_decimal_values(
+                sums,
+                overflowed,
+                values,
+                group_ids,
+                &validity,
+                output_dtype,
+            ),
+            SumGroupedValues::Decimal32(sums) => accumulate_grouped_decimal_values(
+                sums,
+                overflowed,
+                values,
+                group_ids,
+                &validity,
+                output_dtype,
+            ),
+            SumGroupedValues::Decimal64(sums) => accumulate_grouped_decimal_values(
+                sums,
+                overflowed,
+                values,
+                group_ids,
+                &validity,
+                output_dtype,
+            ),
+            SumGroupedValues::Decimal128(sums) => accumulate_grouped_decimal_values(
+                sums,
+                overflowed,
+                values,
+                group_ids,
+                &validity,
+                output_dtype,
+            ),
+            SumGroupedValues::Decimal256(sums) => accumulate_grouped_decimal_values(
+                sums,
+                overflowed,
+                values,
+                group_ids,
+                &validity,
+                output_dtype,
+            ),
+            _ => vortex_panic!("decimal input with non-decimal grouped sum state"),
+        }
     });
     Ok(())
 }
 
 fn accumulate_grouped_decimal_values<T, I>(
-    partials: &mut [SumPartial],
+    sums: &mut [I],
+    overflowed: &mut [u8],
     values: Buffer<T>,
     group_ids: &[u32],
     validity: &Mask,
+    dtype: crate::dtype::DecimalDType,
 ) where
     T: NativeDecimalType + AsPrimitive<I>,
-    I: NativeDecimalType,
-    DecimalValue: From<I>,
+    I: NativeDecimalType + CheckedAdd,
 {
     for_each_valid_idx(validity, values.len(), |idx| {
-        let partial = &mut partials[group_ids[idx] as usize];
-        let Some(SumState::Decimal { value, dtype }) = partial.current.as_mut() else {
-            return;
-        };
-        let operand = DecimalValue::from(values[idx].as_());
-        let Some(result) = value.checked_add(&operand) else {
-            partial.current = None;
-            return;
-        };
-        if result.fits_in_precision(*dtype) {
-            *value = result;
-        } else {
-            partial.current = None;
-        }
+        add_decimal(
+            sums,
+            overflowed,
+            group_ids[idx] as usize,
+            values[idx].as_(),
+            dtype,
+        );
     });
 }
 
@@ -382,7 +452,10 @@ mod tests {
     use crate::arrays::DecimalArray;
     use crate::arrays::PrimitiveArray;
     use crate::assert_arrays_eq;
+    use crate::dtype::DType;
     use crate::dtype::DecimalDType;
+    use crate::dtype::Nullability;
+    use crate::dtype::PType;
     use crate::dtype::i256;
     use crate::scalar::DecimalValue;
     use crate::validity::Validity;
@@ -533,6 +606,57 @@ mod tests {
             group_one.as_decimal().decimal_value(),
             Some(DecimalValue::I256(i256::from_i128(7)))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn accumulates_typed_primitive_partials() -> VortexResult<()> {
+        let input_dtype = DType::Primitive(PType::I32, Nullability::Nullable);
+        let partials =
+            PrimitiveArray::from_option_iter([Some(2i64), Some(3), Some(5), None]).into_array();
+        let mut ctx = array_session().create_execution_ctx();
+        let mut acc =
+            GroupedAccumulator::try_new(Sum, NumericalAggregateOpts::default(), input_dtype)?;
+        acc.accumulate_partials(
+            &partials,
+            &GroupIds::from_iter([0u32, 1, 1, 0], 2)?,
+            &mut ctx,
+        )?;
+        let actual = acc.finish(2)?;
+        let expected = PrimitiveArray::from_option_iter([None, Some(8i64)]).into_array();
+        assert_arrays_eq!(&actual, &expected, &mut ctx);
+        Ok(())
+    }
+
+    #[test]
+    fn accumulates_typed_decimal_partials() -> VortexResult<()> {
+        let input_dtype = DecimalDType::new(10, 2);
+        let partial_dtype = DecimalDType::new(20, 2);
+        let partials = DecimalArray::new(
+            buffer![200i64, 300, 500, 700],
+            partial_dtype,
+            Validity::from_iter([true, true, true, false]),
+        )
+        .into_array();
+        let mut ctx = array_session().create_execution_ctx();
+        let mut acc = GroupedAccumulator::try_new(
+            Sum,
+            NumericalAggregateOpts::default(),
+            DType::Decimal(input_dtype, Nullability::Nullable),
+        )?;
+        acc.accumulate_partials(
+            &partials,
+            &GroupIds::from_iter([0u32, 1, 1, 0], 2)?,
+            &mut ctx,
+        )?;
+        let actual = acc.finish(2)?;
+        let expected = DecimalArray::new(
+            buffer![0i128, 800],
+            partial_dtype,
+            Validity::from_iter([false, true]),
+        )
+        .into_array();
+        assert_arrays_eq!(&actual, &expected, &mut ctx);
         Ok(())
     }
 }

@@ -3,6 +3,7 @@
 
 mod grouped;
 pub(crate) use grouped::COUNT_GROUPED_KERNEL;
+use grouped::CountGroupedState;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_session::registry::CachedId;
@@ -13,6 +14,7 @@ use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::aggregate_fn::AggregateFnId;
 use crate::aggregate_fn::AggregateFnVTable;
+use crate::aggregate_fn::GroupedState;
 use crate::aggregate_fn::NumericalAggregateOpts;
 use crate::aggregate_fn::fns::nan_count::nan_count;
 use crate::arrays::PrimitiveArray;
@@ -69,6 +71,15 @@ impl AggregateFnVTable for Count {
             count: 0,
             exclude_nans: options.skip_nans && input_dtype.is_float(),
         })
+    }
+
+    fn grouped_state(
+        &self,
+        _options: &Self::Options,
+        _input_dtype: &DType,
+        _partial_dtype: &DType,
+    ) -> VortexResult<Box<dyn GroupedState>> {
+        Ok(Box::new(CountGroupedState::default()))
     }
 
     fn combine_partials(&self, partial: &mut Self::Partial, other: Scalar) -> VortexResult<()> {

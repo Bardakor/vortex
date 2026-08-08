@@ -5,6 +5,7 @@ mod bool;
 mod constant;
 mod decimal;
 mod grouped;
+mod grouped_state;
 mod primitive;
 
 pub(crate) use grouped::SUM_GROUPED_KERNEL;
@@ -20,6 +21,7 @@ use vortex_session::registry::CachedId;
 use self::bool::accumulate_bool;
 use self::constant::multiply_constant;
 use self::decimal::accumulate_decimal;
+use self::grouped_state::SumGroupedState;
 use self::primitive::accumulate_primitive;
 use crate::ArrayRef;
 use crate::Canonical;
@@ -30,6 +32,7 @@ use crate::aggregate_fn::Accumulator;
 use crate::aggregate_fn::AggregateFnId;
 use crate::aggregate_fn::AggregateFnVTable;
 use crate::aggregate_fn::DynAccumulator;
+use crate::aggregate_fn::GroupedState;
 use crate::aggregate_fn::NumericalAggregateOpts;
 use crate::arrays::DecimalArray;
 use crate::arrays::PrimitiveArray;
@@ -162,6 +165,15 @@ impl AggregateFnVTable for Sum {
             current: Some(initial),
             skip_nans: options.skip_nans,
         })
+    }
+
+    fn grouped_state(
+        &self,
+        _options: &Self::Options,
+        _input_dtype: &DType,
+        partial_dtype: &DType,
+    ) -> VortexResult<Box<dyn GroupedState>> {
+        Ok(Box::new(SumGroupedState::try_new(partial_dtype.clone())?))
     }
 
     fn combine_partials(&self, partial: &mut Self::Partial, other: Scalar) -> VortexResult<()> {

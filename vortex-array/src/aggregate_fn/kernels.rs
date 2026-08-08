@@ -17,6 +17,7 @@ use crate::ExecutionCtx;
 use crate::aggregate_fn::AggregateFnRef;
 use crate::aggregate_fn::AggregateFnVTable;
 use crate::aggregate_fn::GroupIds;
+use crate::aggregate_fn::GroupedState;
 use crate::scalar::Scalar;
 
 /// A pluggable kernel for an aggregate function.
@@ -37,11 +38,14 @@ pub trait DynAggregateKernel: 'static + Send + Sync + Debug {
 /// Implementations receive the concrete aggregate options and typed partial state. Return
 /// `Ok(false)` when the kernel cannot handle the current values or group-id encodings.
 pub trait GroupedAggregateKernel<V: AggregateFnVTable>: 'static + Send + Sync + Debug {
+    /// Concrete aggregate-owned grouped state consumed by this kernel.
+    type State: GroupedState;
+
     /// Accumulate `batch` into `states` according to `group_ids`.
     fn grouped_accumulate(
         &self,
         options: &V::Options,
-        states: &mut [V::Partial],
+        state: &mut Self::State,
         batch: &ArrayRef,
         group_ids: &GroupIds,
         ctx: &mut ExecutionCtx,
@@ -115,7 +119,7 @@ where
             return Ok(false);
         };
 
-        let Some(states) = states.downcast_mut::<Vec<V::Partial>>() else {
+        let Some(state) = states.downcast_mut::<K::State>() else {
             vortex_bail!(
                 "Grouped aggregate kernel for {} received incompatible partial state",
                 aggregate_fn.id()
@@ -123,19 +127,14 @@ where
         };
 
         vortex_ensure!(
-            states.len() >= group_ids.num_groups(),
+            state.len() >= group_ids.num_groups(),
             "Grouped aggregate kernel for {} received {} partial states for {} groups",
             aggregate_fn.id(),
-            states.len(),
+            state.len(),
             group_ids.num_groups()
         );
 
-        self.kernel.grouped_accumulate(
-            options,
-            &mut states[..group_ids.num_groups()],
-            batch,
-            group_ids,
-            ctx,
-        )
+        self.kernel
+            .grouped_accumulate(options, state, batch, group_ids, ctx)
     }
 }
