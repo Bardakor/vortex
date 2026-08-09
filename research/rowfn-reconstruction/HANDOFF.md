@@ -181,6 +181,10 @@ padding or enable the hidden LLVM option as a production fix.
 Samply could not record this benchmark because `perf_event_paranoid` is 2 and the machine requires
 1 or lower. The assembly comparison is available evidence; there is no sampled native profile.
 
+Outlining the validated all-varying lane kernel behind `#[inline(never)]` did not change the result.
+Ten runs measured 2.799 to 2.829 microseconds, the same range as the ordinary cleaned API binary.
+Do not add this code movement; it does not isolate the residual cost.
+
 ## Focused CodSpeed ablation
 
 Two `workflow_dispatch` runs were started and then canceled:
@@ -242,6 +246,19 @@ costs 0.933 microseconds self and 7.629 microseconds total. On develop, the old 
 function alone costs 0.741 microseconds self and 18.639 microseconds total. The larger reduction in
 `list_view_from_list`, from 79.144 to 29.634 microseconds total, includes the lazy scalar-function
 array and optimizer work removed by the direct operation.
+
+PR [#9299] extracts this fix from RowFn. A pinned AVX2 comparison against its exact develop base
+used separate binaries, logical CPU 2, the TSC timer, 100 samples, and a 500-millisecond minimum
+time. Five alternating runs covered all 14 list benchmarks. Every median-of-run-medians improves:
+
+- The range is 27.9% to 33.3% faster.
+- `take_filter_list_small_uncached_random_mask_random_indices[256, 10]` improves from 5.939 to
+  4.059 microseconds, or 31.7%.
+- The matching 768 case improves from 6.189 to 4.319 microseconds, or 30.2%.
+- The smallest improvement is the nullable 768 case, from 6.419 to 4.629 microseconds, or 27.9%.
+
+This is native wall-time evidence that the extracted fix is worthwhile independently of the
+CodSpeed result.
 
 ## Numeric helper ID
 
@@ -340,5 +357,6 @@ source-placement sensitivity remains unknown.
 [offsets fix check]: https://github.com/vortex-data/vortex/actions/runs/31317322594
 [numeric ID check]: https://github.com/vortex-data/vortex/actions/runs/31318131466
 [masked tensor check]: https://github.com/vortex-data/vortex/actions/runs/31318825883
+[#9299]: https://github.com/vortex-data/vortex/pull/9299
 [run `31289620637`]: https://github.com/vortex-data/vortex/actions/runs/31289620637
 [run `31289622392`]: https://github.com/vortex-data/vortex/actions/runs/31289622392

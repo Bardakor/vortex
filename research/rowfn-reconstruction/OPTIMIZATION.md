@@ -249,6 +249,13 @@ no-drop assertion expresses the actual safety condition.
 This change did not improve cosine or spatial performance. The shared helper remains in those
 paths.
 
+### Outline the all-varying kernel
+
+Moving the validated all-varying lane kernel into a private `#[inline(never)]` helper does not
+improve `mul_u16_nonnull`. Ten pinned runs remain between 2.799 and 2.829 microseconds, the same as
+the ordinary cleaned API binary. The larger Rust function containing both argument shapes is not
+by itself the residual cause.
+
 ## Unrelated benchmark movement
 
 An unrelated benchmark can move after a RowFn source edit even when it never calls RowFn. The
@@ -411,6 +418,11 @@ This result is larger than a recovery to develop because develop also uses gener
 subtraction for this internal offset adjustment. The direct typed operation removes that older
 overhead as well as the additional RowFn work.
 
+PR [#9299] extracts the offset fix without RowFn. Five alternating native AVX2 runs against its
+exact develop base improve all 14 list cases by 27.9% to 33.3%. The small uncached 256 case moves
+from 5.939 to 4.059 microseconds, and its 768 counterpart moves from 6.189 to 4.319 microseconds.
+The extraction is therefore a native win as well as a CodSpeed win.
+
 ### Avoid a second ID for an internal helper
 
 The focused numeric profile shows another fixed cost. `CachedId::deref` increases from 0.702 to
@@ -521,3 +533,4 @@ move a report without removing a measured cause.
 [offsets fix check]: https://github.com/vortex-data/vortex/actions/runs/31317322594
 [numeric ID check]: https://github.com/vortex-data/vortex/actions/runs/31318131466
 [masked tensor check]: https://github.com/vortex-data/vortex/actions/runs/31318825883
+[#9299]: https://github.com/vortex-data/vortex/pull/9299
