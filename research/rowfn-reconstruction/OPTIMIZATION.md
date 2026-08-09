@@ -564,6 +564,21 @@ link layout differ. The earlier inspection did not include the numeric callee in
 Do not fix unrelated movement with arbitrary padding or an unrelated source edit. Such a change can
 move a report without removing a measured cause.
 
+### Reuse zero-based list offsets
+
+The review follow-up adds the remaining fast path from the old `reset_offsets` TODO. When the
+executed primitive offsets start at zero, `reset_offsets` now reuses that array. It does not copy
+the complete offsets buffer to subtract zero.
+
+The native control contains every other review edit and removes only the early return. Three
+alternating runs used `-C target-cpu=native`, CPU 2, the TSC timer, 100 samples, and a 0.5-second
+minimum per case. The early return improves all 14 `take_filter_list_*` cases by 1.66% to 3.29%.
+The small uncached 256 case moves from 4.149 to 4.049 microseconds. The matching 768 case moves
+from 4.379 to 4.299 microseconds.
+
+This isolated result supports the code change, but it remains native wall-time evidence. It does
+not provide CodSpeed instruction, cache, or memory counters.
+
 ## Current unresolved work
 
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.

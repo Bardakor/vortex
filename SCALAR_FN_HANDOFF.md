@@ -61,15 +61,6 @@ cargo bench -p vortex-spatial --bench envelope
 cargo bench -p vortex-spatial --bench predicate_bbox
 ```
 
-For the spatial PR, also run the branch-only `vortex-spatial` `null_strategies` diagnostic. It
-forces branch-and-skip and filter-and-scatter for the measured nullable geometry shapes. Confirm
-that automatic selection uses the faster mechanism for one costly decode at 50% survivors and for
-two costly decodes at about 81% survivors.
-
-```bash
-cargo bench -p vortex-spatial --bench null_strategies
-```
-
 The public benchmark names are shared with `develop`, so cross-revision comparisons do not need a
 frozen benchmark-local implementation as their primary control.
 
@@ -215,36 +206,25 @@ types:
 - `Dense` may execute over garbage behind nulls and masks afterward;
 - `DenseWithRetry` may execute densely, then retry valid rows when deferred evidence reports an
   error; and
-- `ValidOnly { filtered_decode_cost }` guarantees that the row closure sees only valid rows.
+- `ValidOnly` guarantees that the row closure sees only valid rows.
 
 An early-failing row or a decoder that is not dense-safe must use valid-only execution. A deferred
 kernel may use dense execution because it writes a legal provisional value for every row. If only
 garbage behind nulls reports an error, the valid-row retry discards it.
 
-Valid-only execution has two mechanisms. Filter-and-scatter shrinks inputs before decoding.
-Branch-and-skip decodes the original batch and visits set bits from the conjoined validity mask. A
-sink that does not support skipped rows automatically falls back to filter-and-scatter.
+Valid-only execution first calls `reduce_encoded` on the original arrays. If reduction declines,
+the executor tries branch-and-skip on the original batch. This path decodes values behind nulls and
+visits the set bits from the conjoined validity mask. It requires null-tolerant input decoding and a
+sink that supports skipped rows.
 
-The selector needs more than a boolean "decode shrinks" flag. Every `InputElement` declares an
-additive `FILTERED_DECODE_COST`, defaulting to zero. `ElementTuple` sums the costs across arguments:
-
-- cost 0 always prefers branch-and-skip;
-- cost 1 prefers branch-and-skip at 50% or more surviving rows; and
-- cost 2 or greater prefers branch-and-skip at 85% or more surviving rows.
-
-This distinction comes from the x86 measurement in #9128. One nullable geometry input at 50% nulls
-favored branching, while two independently nullable geometry inputs at 10% nulls each, about 81%
-survivors, favored filtering. OR-ing a per-argument flag loses exactly that distinction.
-
-The values are still a coarse heuristic. There is no evidence yet to separate cost 2 from cost 3,
-and the batch-size crossover has not been measured. `NullStrategy` remains only as a test-harness
-seam for forcing a mechanism. Do not expose the private row policy as an author contract.
+If branch-and-skip declines, filter-and-scatter shrinks the inputs before decoding. It then scatters
+the output into a full-length nullable array. Authors declare local safety through their input and
+result types. They do not select the mechanism or provide a decode-cost estimate.
 
 ## Performance and generated-code evidence
 
 The older Ryzen 9 7950X AVX-512 measurements remain the production-performance record in the
-[#9128 follow-up](https://github.com/vortex-data/vortex/issues/9128#issuecomment-5151831802). They
-also supplied the per-argument null-selection evidence above.
+[#9128 follow-up](https://github.com/vortex-data/vortex/issues/9128#issuecomment-5151831802).
 
 The final API cleanup was checked separately against its parent, `53c51d803c`, by cross-compiling
 the optimized `row_fn_executor` benchmark for `x86_64-apple-darwin` with `target-cpu=x86-64-v3`.
@@ -442,8 +422,6 @@ Use the IR gate for loop shape and a focused microbenchmark for anything the loo
 
 ## Remaining boundaries
 
-- Complete the required x86 production and forced-null-strategy benchmark run above before treating
-  the thresholds or overall performance as settled.
 - Keep nullable outputs separate until the first real function can define the validity contract.
 - Do not add another sink composition abstraction. Put multiple builders in one custom sink.
 - Do not add a general runtime-shaped sink until a production function needs one.

@@ -226,7 +226,7 @@ dictionary values safe to evaluate.
   [infallible], [no legal evaluation errors],
     [speculative evaluation],
   [dense-safe], [bytes behind nulls may be read safely],
-    [`NullHandling::Dense`],
+    [`RowPolicy::Dense`],
 )
 
 Representability is a type-level obligation: a strict `cast` with a pinned non-nullable return type

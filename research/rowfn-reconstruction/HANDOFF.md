@@ -396,6 +396,21 @@ alternating `target-cpu=native` runs measure a 1.939-microsecond develop median 
 line. A global `-align-loops=64` diagnostic neither aligned this loop nor changed its timing, so it
 does not prove an alignment cause. Native counters remain unavailable on this host.
 
+## Zero-based list offsets
+
+The review follow-up adds an early return when `ListArray::reset_offsets` receives primitive
+offsets that already start at zero. This reuses the executed offsets instead of copying and
+subtracting zero from the complete buffer.
+
+An isolated `target-cpu=native` A/B used the same review edits on both sides. The control removed
+only this early return. Three alternating runs on CPU 2 used the TSC timer, 100 samples, and a
+0.5-second minimum per case. All 14 `take_filter_list_*` cases improve by 1.66% to 3.29%.
+The small uncached cases move from 4.149 to 4.049 microseconds at 256 rows and from 4.379 to
+4.299 microseconds at 768 rows.
+
+This result is native wall-time evidence for the early return. It is not CodSpeed simulation
+evidence and does not explain earlier CodSpeed movement.
+
 ## Recommended next steps
 
 1. Use pinned, alternating local x86 runs for performance decisions and retain the raw per-run
