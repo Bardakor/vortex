@@ -562,11 +562,12 @@ move a report without removing a measured cause.
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
 - Reduce fixed RowFn batch overhead if 32,768-row numeric calls are latency-critical.
 - Isolate allocator state before changing the `mul_u8_nonnull` loop.
-- Recheck the native list/filter wall-time gap after removing the measured call path.
+- Choose between the direct typed offset fix and PR #9299's materialize-once design based on API
+  maintenance and correctness. Both are native wins, but they are different implementations.
 - Identify the spatial `envelope` regression that begins when numeric RowFn code enters the linked
   binary.
-- Compare the current CodSpeed flame graph for `envelope` against develop.
-- Repeat the key results on a second compiler version before filing a compiler issue.
+- Repeat the key local results on a second x86 machine and compiler version before filing a
+  compiler issue.
 
 [CodSpeed check at `4c936447a`]: https://github.com/vortex-data/vortex/runs/93181527671
 [CodSpeed check at `892717f30`]: https://github.com/vortex-data/vortex/runs/93169735961
