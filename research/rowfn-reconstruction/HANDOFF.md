@@ -225,6 +225,13 @@ The per-element loops have native parity or better at scale. The visible percent
 rows come primarily from fixed RowFn batch planning, dispatch, decode, and reconciliation costs.
 Do not attribute them to failed autovectorization or slower arithmetic throughput.
 
+The framework control reaches the same conclusion without the numeric wrapper. Five
+`target-cpu=native` runs of `row_fn_executor` compare 65,536-row loops in one linked binary. The
+hand-written sink median is 137.4 microseconds. Infallible owned RowFn execution is 138.8
+microseconds, and sink RowFn execution is 138.5 microseconds, both within 1%. Checked owned
+execution is 141.9 microseconds, or 3.3% slower. The shared executor does not impose a large
+steady-state throughput cost.
+
 ## Focused CodSpeed ablation
 
 Two `workflow_dispatch` runs were started and then canceled:
@@ -306,6 +313,10 @@ list benchmarks. Every median-of-run-medians improves:
 This is native wall-time evidence that executing and reusing the normalized offsets is worthwhile
 independently of the CodSpeed result. It does not measure the same implementation as the direct
 typed fix on `ct/row-fn`.
+
+The same five-run comparison with `-C target-cpu=native` improves every case by 16.0% to 19.6%.
+The small uncached cases move from 6.159 to 4.979 microseconds and from 6.389 to 5.209
+microseconds. The improvement therefore survives the host's AVX-512 code generation.
 
 ## Numeric helper ID
 

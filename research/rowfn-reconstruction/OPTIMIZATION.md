@@ -337,6 +337,12 @@ The large-batch result shows that RowFn preserves native per-element throughput.
 in the 32,768-row microbenchmarks primarily measure fixed batch planning, dispatch, decode, and
 output reconciliation. Optimize those costs as batch overhead; do not rewrite the vector loops.
 
+The `row_fn_executor` control isolates the framework in one linked binary. Across five
+`target-cpu=native` runs at 65,536 rows, the hand-written sink median is 137.4 microseconds.
+Infallible owned RowFn execution is 138.8 microseconds, and sink RowFn execution is 138.5
+microseconds. Checked owned execution is 141.9 microseconds. The infallible executor variants are
+within 1% of the hand-written loop, while deferred overflow reduction retains about 3.3% overhead.
+
 ## `take_filter_list` regression
 
 The [CodSpeed check at `4c936447a`] reports 31 regressions. Several `take_filter_list_*`
@@ -453,6 +459,10 @@ sizes and output offsets. Five fresh alternating runs improve all 14 cases by 17
 small uncached 256 case moves from 5.909 to 4.879 microseconds, and its 768 counterpart moves from
 6.169 to 5.109 microseconds. This implementation is also a native win, but it is distinct from the
 direct typed fix measured in CodSpeed and retained on `ct/row-fn`.
+
+With `-C target-cpu=native`, five more alternating runs improve every case by 16.0% to 19.6%. The
+small uncached cases move from 6.159 to 4.979 microseconds and from 6.389 to 5.209 microseconds.
+The optimization therefore remains effective under this host's AVX-512 code generation.
 
 ### Avoid a second ID for an internal helper
 
