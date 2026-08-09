@@ -27,14 +27,14 @@ The API branch was rewritten with an exact force-with-lease from seven commits t
 4. `266350488` removes validated input bounds checks.
 5. `6dd500f59` restores mixed-constant performance.
 
-Three temporary remote refs exist for the CodSpeed ablation:
+Two temporary remote refs remain for the CodSpeed ablation:
 
 - `ct/row-fn-codspeed-framework` points to `0a0ad0db1`.
 - `ct/row-fn-codspeed-numeric` points to `89fd28bc1`.
-- `ct/row-fn-codspeed-take-filter` is the head of temporary draft PR #9298.
 
-The first two refs contain exact historical code. The third ref adds a PR-only workflow that runs
-only `cargo codspeed run --bench take_filter`.
+Both refs contain exact historical code. Temporary draft PR #9298 supplied the pull-request context
+for the focused comparisons. It is now closed, and its `ct/row-fn-codspeed-take-filter` head branch
+has been deleted.
 
 ## Corrected CodSpeed history
 
