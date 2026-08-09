@@ -326,6 +326,13 @@ most nullable wide cases are within 1%. Narrow varying integer cases are general
 slower. Mixed-constant add, subtract, and multiply remain 19% to 23% slower even though their hot
 loops use AVX-512 broadcasts and packed arithmetic.
 
+`mul_u8_nonnull` retains a stable 10.8% gap when run alone: 1.939 microseconds on develop and 2.149
+microseconds with RowFn across ten alternating runs. Both hot loops process 64 lanes with the same
+normalized AVX-512 instructions. Develop's loop target is 64-byte aligned, while RowFn's is seven
+bytes into a line. The global `-align-loops=64` diagnostic did not align this loop and did not
+change the timing. This rules out local benchmark-order allocator state, but it does not establish
+an alignment cause.
+
 Changing numeric dispatch from a two-element `Vec<ArrayRef>` to a stack-backed borrowed argument
 view does not improve repeated timings. Removing that allocation is not a measured remedy.
 
@@ -561,7 +568,7 @@ move a report without removing a measured cause.
 
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
 - Reduce fixed RowFn batch overhead if 32,768-row numeric calls are latency-critical.
-- Isolate allocator state before changing the `mul_u8_nonnull` loop.
+- Profile the isolated `mul_u8_nonnull` case with native performance counters.
 - Choose between the direct typed offset fix and PR #9299's materialize-once design based on API
   maintenance and correctness. Both are native wins, but they are different implementations.
 - Identify the spatial `envelope` regression that begins when numeric RowFn code enters the linked

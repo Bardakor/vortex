@@ -389,12 +389,19 @@ cost increases from 7.221 to 22.449 microseconds. The evidence points to allocat
 benchmark-order sensitivity around the output allocation. It does not show a slower arithmetic
 loop. Do not change the loop or add layout padding without an isolated allocator experiment.
 
+The isolated native benchmark does not reproduce that allocator-order explanation. Ten
+alternating `target-cpu=native` runs measure a 1.939-microsecond develop median and a
+2.149-microsecond RowFn median, a stable 10.8% gap. Both hot loops execute the same normalized
+64-lane AVX-512 sequence. Develop's loop target is 64-byte aligned; RowFn's is seven bytes into a
+line. A global `-align-loops=64` diagnostic neither aligned this loop nor changed its timing, so it
+does not prove an alignment cause. Native counters remain unavailable on this host.
+
 ## Recommended next steps
 
 1. Use pinned, alternating local x86 runs for performance decisions and retain the raw per-run
    medians.
 2. Reduce the remaining `mul_u16_nonnull` native gap without relying on incidental padding.
-3. Isolate allocator state before changing the `mul_u8_nonnull` loop.
+3. Profile the isolated `mul_u8_nonnull` case on a host that permits native performance counters.
 4. Keep local wall time separate from CodSpeed CPU simulation.
 
 ## Mixed-constant optimization
