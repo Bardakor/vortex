@@ -106,6 +106,11 @@ The source placement is a measured constraint for the current toolchain. Rust se
 require it. The source ablation proves the performance relationship, but it does not identify the
 LLVM pass that causes it.
 
+Pinned local x86 measurements on an AMD Ryzen 9 7950X confirm that this is not only a CodSpeed
+effect. Before the fix, constant `i64` add and subtract were 3.23 and 3.35 times slower than
+develop. After the fix, they are about 11% slower. Constant `i32` multiply changes from 58.6%
+slower than develop to 28.5% faster.
+
 The sink executors retain the shared validator. Moving their proof into each branch did not improve
 the cosine or spatial benchmarks.
 
@@ -269,6 +274,36 @@ differential flame graph.
 
 An unrelated recovery does not prove that an algorithmic problem was fixed. The result is stable
 only after source ablation, machine-code inspection, and repeated measurements agree on a cause.
+
+### Native benchmark policy
+
+Pinned local x86 wall time is the primary performance acceptance signal for the remaining RowFn
+work. Run separate copied binaries on the same logical CPU, alternate revision order, and report
+the median of repeated run medians. Use enough minimum time to make a narrow result stable.
+
+CodSpeed simulation remains a diagnostic tool. Its instruction, cache, and memory components can
+expose a changed stack that local wall time cannot explain. A CodSpeed-only movement does not
+override native parity or improvement, and local wall time must not be presented as a prediction
+of CodSpeed simulation.
+
+### Identical vector loops can retain a native gap
+
+`mul_u16_nonnull` is a useful counterexample to treating autovectorization as the end of the
+investigation. Ten alternating one-second runs measure 2.229 microseconds on develop and 2.809
+microseconds on the cleaned API branch, a 26.0% native regression.
+
+Both hot loops contain the same normalized vector instructions. They load two 128-bit vectors,
+execute `pmullw` and `pmulhuw`, combine the overflow evidence, store one vector, and branch. The
+develop loop fits in one 64-byte cache line. The ordinary RowFn loop crosses a line boundary.
+
+A diagnostic build with `-C llvm-args=-align-loops=64` measures 2.449 microseconds. The option did
+not align this loop to 64 bytes, but the resulting linked layout moved it wholly inside one cache
+line. This recovers 62% of the gap while leaving a 9.9% difference from develop.
+
+This experiment supports front-end and code-placement sensitivity. It does not prove that line
+crossing explains the complete regression. A hidden global LLVM option and source padding are not
+stable remedies. The RowFn monomorph also contains all-varying and mixed shape branches in one
+larger function, so entry and setup code remain candidates for the residual cost.
 
 ## `take_filter_list` regression
 
@@ -468,7 +503,8 @@ move a report without removing a measured cause.
 ## Current unresolved work
 
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
-- Isolate allocator state before `mul_u8_nonnull` if its CodSpeed regression must be removed.
+- Explain the residual `mul_u16_nonnull` native gap after accounting for hot-loop placement.
+- Isolate allocator state before changing the `mul_u8_nonnull` loop.
 - Recheck the native list/filter wall-time gap after removing the measured call path.
 - Identify the spatial `envelope` regression that begins when numeric RowFn code enters the linked
   binary.

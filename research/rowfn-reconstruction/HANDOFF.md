@@ -16,6 +16,15 @@ read [`DESIGN.md`](DESIGN.md), [`OPTIMIZATION.md`](OPTIMIZATION.md), and
 - Direct offsets fix: `61410ef21`.
 - Numeric helper ID fix: `f9dfde730` on this branch and `df8fcbe1a` on `ct/row-fn-api`.
 - Masked tensor decode fix: `7baa9fab7`.
+- Cleaned `ct/row-fn-api` head: `6dd500f59`.
+
+The API branch was rewritten with an exact force-with-lease from seven commits to five:
+
+1. `71c3e7a58` adds the framework, refined contracts, and self-contained arguments.
+2. `6e864bf8b` moves primitive numeric operators to RowFn and reuses `Binary`'s ID.
+3. `41bb10143` adds focused executor benchmarks.
+4. `266350488` removes validated input bounds checks.
+5. `6dd500f59` restores mixed-constant performance.
 
 Three temporary remote refs exist for the CodSpeed ablation:
 
@@ -107,6 +116,12 @@ rebuild. That warning remains useful, but alignment is not the cause of this sim
 
 ## Native measurements are separate evidence
 
+For the rest of this investigation, pinned local x86 wall time is the primary acceptance signal.
+CodSpeed remains useful for finding changed call paths and separating instruction, cache, and
+memory costs, but a simulated microbenchmark movement is not by itself a reason to reject code
+that has native parity or an improvement. Keep the two measurements labeled; neither predicts the
+other.
+
 Pinned AVX2 wall-time runs on an AMD Ryzen 9 7950X found both `892717f30` and `4c936447a` about 25%
 to 31% slower than develop for the tested take/filter list cases. The final push changes those
 native medians by only 0% to 2%.
@@ -121,6 +136,50 @@ representative median pair was:
 
 These measurements do not explain the CodSpeed simulation result. Do not use local wall time as a
 proxy for CodSpeed CPU simulation.
+
+### Primitive numeric matrix
+
+The cleaned API branch was compared with develop on an AMD Ryzen 9 7950X. Each Divan binary was
+pinned to logical CPU 2 and used the TSC timer, 100 samples, and a 250-millisecond minimum time.
+Five alternating runs covered 26 shared `binary_ops` cases.
+
+Before the mixed-constant fix, the varying cases were generally within 0% to 8.5% of develop. The
+constant cases exposed a separate source-placement regression:
+
+| Benchmark | Develop | Before fix | Difference |
+| --- | ---: | ---: | ---: |
+| `add_i64_constant` | 8.369 us | 35.42 us | +323.2% |
+| `sub_i64_constant` | 8.319 us | 36.19 us | +335.0% |
+| `mul_i32_constant` | 26.43 us | 41.91 us | +58.6% |
+
+Commit `6dd500f59` keeps each length proof in the branch that consumes it. After the fix,
+`add_i64_constant` measures 9.269 microseconds, `sub_i64_constant` measures 9.199 microseconds, and
+`mul_i32_constant` measures 18.91 microseconds. The first two retain about 11% overhead; multiply
+is 28.5% faster than develop.
+
+### `mul_u16_nonnull` code placement
+
+Ten one-second alternating runs isolate a stable native regression:
+
+| Binary | Median | Observed range |
+| --- | ---: | ---: |
+| Develop `66d096b5d` | 2.229 us | 2.229 to 2.239 us |
+| Clean API `6dd500f59` | 2.809 us | 2.799 to 2.829 us |
+| `-C llvm-args=-align-loops=64` diagnostic | 2.449 us | 2.439 to 2.499 us |
+
+The develop and RowFn steady-state loops have the same normalized instruction sequence: two
+128-bit loads, `pmullw`, `pmulhuw`, failure accumulation, one store, and the loop branch. Both are
+vectorized. Develop's loop starts 16 bytes into a cache line and fits in that line. The ordinary
+RowFn loop starts 32 bytes into a line and crosses the boundary.
+
+The LLVM diagnostic did not force this loop to a 64-byte boundary. It changed the linked layout so
+the loop starts 19 bytes into a line and fits. That recovers 0.360 microseconds of the 0.580
+microsecond gap, leaving the diagnostic binary 9.9% slower than develop. This is evidence that code
+placement matters, but it is not a complete cause or a suitable global compiler flag. Do not add
+padding or enable the hidden LLVM option as a production fix.
+
+Samply could not record this benchmark because `perf_event_paranoid` is 2 and the machine requires
+1 or lower. The assembly comparison is available evidence; there is no sampled native profile.
 
 ## Focused CodSpeed ablation
 
@@ -252,10 +311,11 @@ loop. Do not change the loop or add layout padding without an isolated allocator
 
 ## Recommended next steps
 
-1. Isolate the allocator state before `mul_u8_nonnull` if its CodSpeed regression must be removed.
-2. Keep local wall time separate from CodSpeed CPU simulation.
-3. Continue investigating the native wall-time gap only if it remains after the measured call path
-   is removed.
+1. Use pinned, alternating local x86 runs for performance decisions and retain the raw per-run
+   medians.
+2. Reduce the remaining `mul_u16_nonnull` native gap without relying on incidental padding.
+3. Isolate allocator state before changing the `mul_u8_nonnull` loop.
+4. Keep local wall time separate from CodSpeed CPU simulation.
 
 ## Mixed-constant optimization
 
