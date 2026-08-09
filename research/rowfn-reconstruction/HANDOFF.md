@@ -185,6 +185,29 @@ Outlining the validated all-varying lane kernel behind `#[inline(never)]` did no
 Ten runs measured 2.799 to 2.829 microseconds, the same range as the ordinary cleaned API binary.
 Do not add this code movement; it does not isolate the residual cost.
 
+Compiling both revisions with `-C target-cpu=native` reduces the gap. Ten alternating runs measure
+2.259 to 2.269 microseconds on develop and 2.479 to 2.489 microseconds on the API branch. The
+native difference is about 9.7%, not 26%.
+
+Both native loops use AVX-512. Develop handles 64 `u16` lanes per iteration with two ZMM vectors.
+RowFn handles 128 lanes with four ZMM vectors. Both compute `vpmullw`, `vpmulhuw`, the failure OR,
+and the output stores. The remaining difference is not lost autovectorization.
+
+Five alternating native runs across all 27 shared `binary_ops` cases give this shape:
+
+- Decimal arithmetic, integer division, comparisons, and nullable wide arithmetic are within 1%.
+- Varying narrow integer operations are generally 4% to 12% slower.
+- `mul_i64_nonnull` is 2.8% faster and `mul_u64_nonnull` is at parity.
+- Constant `i64` add and subtract are 19.5% and 22.9% slower.
+- Constant `i32` multiply is 22.5% slower.
+
+The mixed-constant native loops also use AVX-512 broadcasts and packed arithmetic. Their remaining
+regressions are not scalar fallbacks.
+
+Replacing numeric dispatch's two-element `Vec<ArrayRef>` with a stack-backed borrowed view removes
+an allocation but does not improve the repeated matrix. Do not keep that change without a smaller
+benchmark that shows the allocation itself matters.
+
 ## Focused CodSpeed ablation
 
 Two `workflow_dispatch` runs were started and then canceled:

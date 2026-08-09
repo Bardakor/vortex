@@ -312,6 +312,23 @@ crossing explains the complete regression. A hidden global LLVM option and sourc
 stable remedies. The RowFn monomorph also contains all-varying and mixed shape branches in one
 larger function, so entry and setup code remain candidates for the residual cost.
 
+With `-C target-cpu=native` on the Ryzen 9 7950X, develop measures 2.259 to 2.269 microseconds and
+RowFn measures 2.479 to 2.489 microseconds. Native CPU targeting reduces the gap from 26.0% to
+about 9.7%.
+
+Both native loops use AVX-512. Develop processes two ZMM vectors, or 64 `u16` lanes, per iteration.
+RowFn processes four ZMM vectors, or 128 lanes. Both use packed low- and high-half multiply,
+failure reduction, and packed stores. Autovectorization is intact; LLVM chose a different unroll
+factor and the shared RowFn path retains additional batch setup.
+
+The complete native matrix shows the same distinction. Decimal arithmetic, integer division, and
+most nullable wide cases are within 1%. Narrow varying integer cases are generally 4% to 12%
+slower. Mixed-constant add, subtract, and multiply remain 19% to 23% slower even though their hot
+loops use AVX-512 broadcasts and packed arithmetic.
+
+Changing numeric dispatch from a two-element `Vec<ArrayRef>` to a stack-backed borrowed argument
+view does not improve repeated timings. Removing that allocation is not a measured remedy.
+
 ## `take_filter_list` regression
 
 The [CodSpeed check at `4c936447a`] reports 31 regressions. Several `take_filter_list_*`

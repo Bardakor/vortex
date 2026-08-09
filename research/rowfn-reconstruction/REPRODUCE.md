@@ -220,6 +220,24 @@ RUSTFLAGS='-C target-feature=+avx2' \
 Build independent experiments in parallel. Run their benchmark binaries serially on the same
 hardware thread. Parallel benchmark runs compete for caches and memory bandwidth.
 
+### Match the native host
+
+Use the host CPU when native wall time is the acceptance signal:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' \
+  CARGO_TARGET_DIR=/tmp/rowfn-native-base \
+  cargo bench -j 8 -p vortex-array --bench binary_ops --no-run
+```
+
+Build the candidate into a different target directory with the same flags. Copy or retain both
+executables, pin them to the same logical CPU, and alternate their run order. Record the compiler,
+CPU model, flags, timer, sample count, minimum time, and every run median.
+
+This build answers how the code runs on that host. It does not match CodSpeed's AVX2 compilation.
+For example, `target-cpu=native` enables AVX-512 on the Ryzen 9 7950X and reduces the measured
+`mul_u16_nonnull` RowFn gap from 26.0% to about 9.7%.
+
 ### Match CodSpeed compilation
 
 The repository bench profile uses the CodSpeed-relevant defaults:
