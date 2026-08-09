@@ -329,6 +329,14 @@ loops use AVX-512 broadcasts and packed arithmetic.
 Changing numeric dispatch from a two-element `Vec<ArrayRef>` to a stack-backed borrowed argument
 view does not improve repeated timings. Removing that allocation is not a measured remedy.
 
+A benchmark-only 1,048,576-row ablation reduces the remaining differences to within 1% for
+`mul_u16_nonnull`, `add_i32_nonnull`, and constant `i64` add and subtract. Constant `i32` multiply
+is 2.0% faster than develop, and varying `i64` multiply is 3.7% faster.
+
+The large-batch result shows that RowFn preserves native per-element throughput. The percentages
+in the 32,768-row microbenchmarks primarily measure fixed batch planning, dispatch, decode, and
+output reconciliation. Optimize those costs as batch overhead; do not rewrite the vector loops.
+
 ## `take_filter_list` regression
 
 The [CodSpeed check at `4c936447a`] reports 31 regressions. Several `take_filter_list_*`
@@ -532,7 +540,7 @@ move a report without removing a measured cause.
 ## Current unresolved work
 
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
-- Explain the residual `mul_u16_nonnull` native gap after accounting for hot-loop placement.
+- Reduce fixed RowFn batch overhead if 32,768-row numeric calls are latency-critical.
 - Isolate allocator state before changing the `mul_u8_nonnull` loop.
 - Recheck the native list/filter wall-time gap after removing the measured call path.
 - Identify the spatial `envelope` regression that begins when numeric RowFn code enters the linked

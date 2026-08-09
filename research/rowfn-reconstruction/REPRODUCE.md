@@ -334,6 +334,12 @@ procedure:
 For the mixed-constant regression, the single property was the location of the varying-source
 match and its length proof. Controls showed that all-varying execution did not move.
 
+To distinguish fixed setup from per-row throughput, repeat a focused case with a much larger
+`LEN`. Keep every other source property and build flag fixed. Compare both the percentage and the
+absolute time difference. If a 32-times-larger batch reaches parity while the small batch moves,
+investigate planning, dispatch, decode, allocation, and output construction before changing the
+loop.
+
 Do not preserve a source edit only because an unrelated benchmark report improves. First prove
 that the benchmark executes the changed path or that its machine-code change is stable and
 understood.

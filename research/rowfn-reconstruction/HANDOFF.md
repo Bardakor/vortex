@@ -208,6 +208,22 @@ Replacing numeric dispatch's two-element `Vec<ArrayRef>` with a stack-backed bor
 an allocation but does not improve the repeated matrix. Do not keep that change without a smaller
 benchmark that shows the allocation itself matters.
 
+A 32-times-larger batch separates fixed setup from loop throughput. The benchmark-only ablation
+changes `LEN` from 32,768 to 1,048,576 and keeps `target-cpu=native`:
+
+| Benchmark | Develop | RowFn | Difference |
+| --- | ---: | ---: | ---: |
+| `add_i64_constant` | 162.3 us | 163.0 us | +0.4% |
+| `sub_i64_constant` | 162.5 us | 162.8 us | +0.2% |
+| `mul_i32_constant` | 94.84 us | 92.99 us | -2.0% |
+| `mul_u16_nonnull` | 61.04 us | 61.53 us | +0.8% |
+| `add_i32_nonnull` | 121.8 us | 122.1 us | +0.2% |
+| `mul_i64_nonnull` | 778.1 us | 749.4 us | -3.7% |
+
+The per-element loops have native parity or better at scale. The visible percentages at 32,768
+rows come primarily from fixed RowFn batch planning, dispatch, decode, and reconciliation costs.
+Do not attribute them to failed autovectorization or slower arithmetic throughput.
+
 ## Focused CodSpeed ablation
 
 Two `workflow_dispatch` runs were started and then canceled:
