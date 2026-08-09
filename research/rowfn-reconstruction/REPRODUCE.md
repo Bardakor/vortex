@@ -168,7 +168,7 @@ above, but use these commits to repeat an ablation or inspect why a design was r
 | `fef191df5` | Original RowFn framework |
 | `ae099e890` | Initial executor and null-policy benchmarks |
 | `b324f3e26` | First numeric RowFn port |
-| `aebe3caf7` | First tensor port |
+| `aebe3ca` | First tensor port |
 | `6c13e8516` | First spatial port |
 | `0a0ad0db1` | Cleaned RowFn framework based on current develop |
 | `89fd28bc1` | Owned primitive numeric execution |

@@ -255,7 +255,7 @@ Commit history isolates when it appears:
 | --- | ---: | ---: | ---: |
 | Framework only, `fef191df5` | 42.52 us | 44.52 us | 33.73 us |
 | Numeric RowFn port, `b324f3e26` | 58.02 us | 59.72 us | 49.11 us |
-| Before geo RowFn, `aebe3caf7` | 58.43 us | 59.99 us | 49.50 us |
+| Before geo RowFn, `aebe3ca` | 58.43 us | 59.99 us | 49.50 us |
 
 The regression therefore predates the geo visitor conversion. The `envelope.rs` source is
 unchanged. It appears when numeric RowFn code is linked into the benchmark binary.
