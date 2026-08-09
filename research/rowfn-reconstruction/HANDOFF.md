@@ -17,6 +17,7 @@ read [`DESIGN.md`](DESIGN.md), [`OPTIMIZATION.md`](OPTIMIZATION.md), and
 - Numeric helper ID fix: `f9dfde730` on this branch and `df8fcbe1a` on `ct/row-fn-api`.
 - Masked tensor decode fix: `7baa9fab7`.
 - Cleaned `ct/row-fn-api` head: `6dd500f59`.
+- PR #9299 head measured locally: `d97e53e66`.
 
 The API branch was rewritten with an exact force-with-lease from seven commits to five:
 
@@ -286,18 +287,25 @@ function alone costs 0.741 microseconds self and 18.639 microseconds total. The 
 `list_view_from_list`, from 79.144 to 29.634 microseconds total, includes the lazy scalar-function
 array and optimizer work removed by the direct operation.
 
-PR [#9299] extracts this fix from RowFn. A pinned AVX2 comparison against its exact develop base
-used separate binaries, logical CPU 2, the TSC timer, 100 samples, and a 500-millisecond minimum
-time. Five alternating runs covered all 14 list benchmarks. Every median-of-run-medians improves:
+PR [#9299] originally extracted this direct typed subtraction at `fa54891b`. Five alternating
+native AVX2 runs found that superseded revision 27.9% to 33.3% faster than its exact develop base.
+Do not attribute those numbers to the current PR implementation.
 
-- The range is 27.9% to 33.3% faster.
-- `take_filter_list_small_uncached_random_mask_random_indices[256, 10]` improves from 5.939 to
-  4.059 microseconds, or 31.7%.
-- The matching 768 case improves from 6.189 to 4.319 microseconds, or 30.2%.
-- The smallest improvement is the nullable 768 case, from 6.419 to 4.629 microseconds, or 27.9%.
+The current PR head, `d97e53e66`, keeps the generic lazy subtraction in `reset_offsets`. It executes
+the normalized offsets once in `list_view_from_list`, then uses the same primitive array to build
+sizes and output offsets. A fresh pinned AVX2 comparison used separate binaries, logical CPU 2, the
+TSC timer, 100 samples, and a 500-millisecond minimum time. Five alternating runs covered all 14
+list benchmarks. Every median-of-run-medians improves:
 
-This is native wall-time evidence that the extracted fix is worthwhile independently of the
-CodSpeed result.
+- The range is 17.2% to 19.3% faster.
+- `take_filter_list_small_uncached_random_mask_random_indices[256, 10]` improves from 5.909 to
+  4.879 microseconds, or 17.4%.
+- The matching 768 case improves from 6.169 to 5.109 microseconds, or 17.2%.
+- The largest improvement is the small random 256 case, from 5.659 to 4.569 microseconds, or 19.3%.
+
+This is native wall-time evidence that executing and reusing the normalized offsets is worthwhile
+independently of the CodSpeed result. It does not measure the same implementation as the direct
+typed fix on `ct/row-fn`.
 
 ## Numeric helper ID
 

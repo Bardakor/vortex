@@ -298,6 +298,13 @@ taskset -c 4 target/release/deps/row_fn_executor-<hash> \
   --bench --sample-count 100 --max-time 1 --color never
 ```
 
+For the `take_filter` comparison in this record, the exact runner options were:
+
+```bash
+taskset -c 2 target/release/deps/take_filter-<hash> \
+  --bench take_filter_list --timer tsc --sample-count 100 --min-time 0.5 --color never
+```
+
 Run candidate and baseline in alternating order. Repeat a surprising result. Report medians and
 the full range across repetitions. Label these results as native wall time.
 
