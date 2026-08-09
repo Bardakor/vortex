@@ -209,6 +209,11 @@ Replacing numeric dispatch's two-element `Vec<ArrayRef>` with a stack-backed bor
 an allocation but does not improve the repeated matrix. Do not keep that change without a smaller
 benchmark that shows the allocation itself matters.
 
+Skipping `Array::validity` for inputs whose dtype is non-nullable is also not a measured fast path.
+Five focused native comparisons move non-nullable and constant cases by less than 1%. Nullable
+controls move by a similar amount even though their executed logic is unchanged. Treat those
+differences as linked-layout noise and keep the uniform validity fold.
+
 A 32-times-larger batch separates fixed setup from loop throughput. The benchmark-only ablation
 changes `LEN` from 32,768 to 1,048,576 and keeps `target-cpu=native`:
 

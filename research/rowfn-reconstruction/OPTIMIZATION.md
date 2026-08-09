@@ -329,6 +329,10 @@ loops use AVX-512 broadcasts and packed arithmetic.
 Changing numeric dispatch from a two-element `Vec<ArrayRef>` to a stack-backed borrowed argument
 view does not improve repeated timings. Removing that allocation is not a measured remedy.
 
+Skipping each encoding's validity function when its dtype is non-nullable also moves focused
+native cases by less than 1%. Nullable controls move by a similar amount without a call-path
+change. This is linked-layout noise, not evidence for a second batch-planning path.
+
 A benchmark-only 1,048,576-row ablation reduces the remaining differences to within 1% for
 `mul_u16_nonnull`, `add_i32_nonnull`, and constant `i64` add and subtract. Constant `i32` multiply
 is 2.0% faster than develop, and varying `i64` multiply is 3.7% faster.
