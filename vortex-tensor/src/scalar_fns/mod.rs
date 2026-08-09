@@ -6,7 +6,7 @@
 pub mod cosine_similarity;
 pub mod inner_product;
 pub mod l2_norm;
-pub mod row;
+pub(crate) mod row;
 
 #[cfg(test)]
 mod tests;

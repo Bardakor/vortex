@@ -4,6 +4,7 @@
 //! Nullable execution strategies derived from a concrete row dispatch.
 
 use crate::dtype::DType;
+use crate::dtype::Nullability;
 use crate::scalar_fn::ElementTuple;
 use crate::scalar_fn::SinkResult;
 
@@ -20,7 +21,7 @@ impl BatchPlan {
     /// Return the output dtype widened with strict input nullability.
     pub fn result_dtype(&self, args: &[DType]) -> DType {
         let nullability = self.output_dtype.nullability()
-            | crate::dtype::Nullability::from(args.iter().any(DType::is_nullable));
+            | Nullability::from(args.iter().any(DType::is_nullable));
 
         self.output_dtype.with_nullability(nullability)
     }

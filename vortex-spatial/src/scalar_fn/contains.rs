@@ -642,7 +642,7 @@ mod tests {
 
     /// Nullable geometry operands conjoin their validity before computing containment.
     #[test]
-    fn test_contains_nullable_geometries_conjoins_validity() -> VortexResult<()> {
+    fn contains_nullable_geometries_conjoins_validity() -> VortexResult<()> {
         let session = vortex_array::array_session();
         let mut ctx = session.create_execution_ctx();
 
@@ -669,7 +669,7 @@ mod tests {
 
     /// Geometry types without a null-tolerant decode fall back to filtering valid rows.
     #[test]
-    fn test_contains_unsupported_geometry_falls_back_to_filter() -> VortexResult<()> {
+    fn contains_unsupported_geometry_falls_back_to_filter() -> VortexResult<()> {
         let session = vortex_array::array_session();
         let mut ctx = session.create_execution_ctx();
 

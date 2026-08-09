@@ -112,6 +112,10 @@ where
     let AllOr::Some(valid) = valid.bit_buffer() else {
         vortex_bail!("execute_sink_valid_rows requires a mixed mask");
     };
+    vortex_ensure!(
+        valid.len() == row_count,
+        "the validity mask does not address exactly {row_count} rows",
+    );
 
     {
         let mut rows = sink.rows();

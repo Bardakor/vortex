@@ -49,8 +49,8 @@ pub trait OutputSink: 'static + Sized {
 
     /// Proof that a successful row closure left its row handle initialized.
     ///
-    /// Use `()` for initialized row handles. A sink exposing uninitialized storage uses an
-    /// unforgeable token returned after initialization.
+    /// Use `()` for initialized row handles. A sink exposing uninitialized storage uses a distinct
+    /// token returned after initialization.
     type WriteToken: 'static;
 
     /// The dtype of the column this sink builds, given the function's input dtypes.

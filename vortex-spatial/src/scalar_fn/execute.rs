@@ -8,7 +8,6 @@ mod unary;
 pub(crate) use unary::dispatch_unary;
 use vortex_array::ArrayRef;
 use vortex_array::scalar::Scalar;
-use vortex_mask::Mask;
 
 /// A non-null operand presented to a geometry kernel.
 pub(crate) enum Operand {
@@ -19,7 +18,7 @@ pub(crate) enum Operand {
 }
 
 /// Shared batch state presented to a null-propagating geometry kernel with `N` operands.
-pub(crate) struct Execution<const N: usize, V = Mask> {
+pub(crate) struct Execution<const N: usize, V> {
     /// Constant/column shape of each operand.
     pub(crate) operands: [Operand; N],
     /// Validity state required by the kernel.

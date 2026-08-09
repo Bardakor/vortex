@@ -22,6 +22,7 @@ use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
 use vortex_error::VortexResult;
+use vortex_error::vortex_ensure;
 use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
 use vortex_session::VortexSession;
@@ -100,6 +101,11 @@ impl RowFn for L2Norm {
         }
         let element_ptype = validate_tensor_float_input(input.dtype())?.element_ptype();
         let (_, norms) = extract_normalized_children(input);
+        vortex_ensure!(
+            norms.dtype().is_primitive(),
+            "normalized norms must be primitive, got {}",
+            norms.dtype(),
+        );
         vortex_ensure_eq!(norms.dtype().as_ptype(), element_ptype);
         Ok(Some(norms))
     }

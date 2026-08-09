@@ -6,6 +6,7 @@ use std::fmt::Formatter;
 use std::sync::Arc;
 
 use num_traits::AsPrimitive;
+use num_traits::Zero;
 use vortex_buffer::BufferMut;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -269,10 +270,6 @@ impl ListData {
 
         Ok(())
     }
-    // TODO(connor)[ListView]: Create 2 functions `reset_offsets` and `recursive_reset_offsets`,
-    // where `reset_offsets` is infallible.
-    // Also, `reset_offsets` can be made more efficient by replacing `sub_scalar` with a match on
-    // the offset type and manual subtraction and fast path where `offsets[0] == 0`.
 }
 
 pub trait ListArrayExt: ListArraySlotsExt {
@@ -344,14 +341,20 @@ pub trait ListArrayExt: ListArraySlotsExt {
 
         let offsets = self.offsets().clone().execute::<PrimitiveArray>(ctx)?;
         let adjusted_offsets = match_each_integer_ptype!(offsets.ptype(), |P| {
-            let offsets = offsets.as_slice::<P>();
-            let first_offset = offsets[0];
-            let adjusted = offsets
-                .iter()
-                .map(|offset| *offset - first_offset)
-                .collect::<BufferMut<P>>();
+            let offset_values = offsets.as_slice::<P>();
+            let first_offset = offset_values[0];
+            if first_offset == P::zero() {
+                offsets.clone().into_array()
+            } else {
+                // ListData validation requires sorted offsets, so every offset is at least the
+                // first offset.
+                let adjusted = offset_values
+                    .iter()
+                    .map(|offset| *offset - first_offset)
+                    .collect::<BufferMut<P>>();
 
-            PrimitiveArray::new(adjusted, Validity::NonNullable).into_array()
+                PrimitiveArray::new(adjusted, Validity::NonNullable).into_array()
+            }
         });
 
         // SAFETY: By resetting the offsets we simply "shift" everything left and discard trailing garbage, so all invariants remain the same.

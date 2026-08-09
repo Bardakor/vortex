@@ -136,11 +136,10 @@ fn like_per_row_distinct_patterns(bencher: Bencher) {
     bench_per_row_patterns(bencher, patterns);
 }
 
-/// A distinct three-letter lowercase infix per row, so `ARRAY_SIZE` rows never repeat a pattern
-/// while every pattern keeps the same shape and compiles the same way.
+/// A distinct three-letter lowercase infix for each index below 26³.
 fn distinct_trigram(i: usize) -> String {
-    let letter = |shift: usize| char::from(b'a' + u8::try_from((i >> shift) % 26).unwrap());
-    [letter(0), letter(5), letter(10)].iter().collect()
+    let letter = |place: usize| char::from(b'a' + u8::try_from((i / place) % 26).unwrap());
+    [letter(1), letter(26), letter(26 * 26)].iter().collect()
 }
 
 #[divan::bench]

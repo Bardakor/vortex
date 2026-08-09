@@ -250,7 +250,7 @@ impl Batch {
         Ok(ResolvedMask::Mixed(valid))
     }
 
-    /// Resolve validity, try unfiltered execution when worthwhile, then fall back to filtering.
+    /// Resolve validity, try unfiltered execution, then fall back to filtering.
     fn execute_valid_only(
         &self,
         kernel: impl Fn(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,

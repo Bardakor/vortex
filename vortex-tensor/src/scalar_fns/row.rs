@@ -89,12 +89,21 @@ impl<T: Float + NativePType> InputElement for TensorRow<T> {
         let list_size = validate_tensor_float_input(array.dtype())?.list_size() as usize;
         let ext: ExtensionArray = array.execute(ctx)?;
         let flat = extract_flat_elements(ext.storage_array(), list_size, ctx)?;
+        let list_size = flat.list_size();
+        let stride = flat.row_stride();
+        let elements = flat.into_buffer::<T>();
+
+        debug_assert!(if stride == 0 {
+            elements.len() == list_size
+        } else {
+            stride == list_size && rows.checked_mul(stride) == Some(elements.len())
+        });
 
         Ok(TensorRows {
+            elements,
             rows,
-            list_size: flat.list_size(),
-            stride: flat.row_stride(),
-            elements: flat.into_buffer::<T>(),
+            list_size,
+            stride,
         })
     }
 
@@ -124,7 +133,8 @@ impl<T: Float + NativePType> InputElement for TensorRow<T> {
     {
         let start = index * column.stride;
 
-        // SAFETY: the caller guarantees that `index` addresses a complete row.
+        // SAFETY: decode established one complete stored row for stride 0, or `rows` contiguous
+        // `list_size`-element rows otherwise. The caller guarantees `index < rows`.
         unsafe {
             std::slice::from_raw_parts(
                 column.elements.as_slice().as_ptr().add(start),
