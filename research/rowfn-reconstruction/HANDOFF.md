@@ -466,6 +466,17 @@ performed for these two binaries.
 These measurements are local wall-time evidence. They contain no CodSpeed instruction, cache, or
 memory counters and do not predict a CodSpeed simulation result.
 
+The full CodSpeed workflow for `9bed9c9` completed successfully on all nine CPU shards. Its PR
+report compares against `66d096b`, because CodSpeed had no successful run for the newer develop
+head. It reports 36 improvements, 45 regressions, and 30 new benchmarks. The regressions include
+unrelated expression, FastLanes, compact, and file benchmarks, while the local comparison A/B above
+is at parity or faster for every selected production path. This disagreement is CodSpeed simulation
+evidence, not native wall-time evidence. The report does not expose instruction, cache, or memory
+counters in the PR comment, so it does not establish a cause for those movements.
+
+- [CodSpeed workflow](https://github.com/vortex-data/vortex/actions/runs/31341241599)
+- [CodSpeed PR report](https://github.com/vortex-data/vortex/pull/9255#issuecomment-5211040550)
+
 ## Recommended next steps
 
 1. Use pinned, alternating local x86 runs for performance decisions and retain the raw per-run

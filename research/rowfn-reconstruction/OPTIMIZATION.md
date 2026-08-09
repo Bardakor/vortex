@@ -610,6 +610,12 @@ a normalized machine-code comparison shows otherwise.
 The benchmark source, commands, and representative medians are in `HANDOFF.md`. These results use
 local wall time, not CodSpeed CPU simulation.
 
+The completed CodSpeed run for `9bed9c9` moved many benchmarks outside this comparison path. Its PR
+report has 36 improvements and 45 regressions, including expression, FastLanes, compact, and file
+benchmarks. It also fell back to `66d096b` rather than the newer develop head. Without the simulated
+instruction, cache, and memory counters, this broad movement cannot distinguish changed work from
+linked-layout costs. Do not use it to override the focused native A/B above.
+
 ## Current unresolved work
 
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
