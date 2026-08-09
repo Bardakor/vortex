@@ -411,6 +411,61 @@ The small uncached cases move from 4.149 to 4.049 microseconds at 256 rows and f
 This result is native wall-time evidence for the early return. It is not CodSpeed simulation
 evidence and does not explain earlier CodSpeed movement.
 
+## Primitive comparison RowFn
+
+The primitive comparison port has two commits on `ct/row-fn`. The first expands `compare` with
+lane-width, equality, nullability, and constant-operand cases. The second routes the primitive
+comparison loop through RowFn.
+
+The local A/B used the default bench profile on an AMD Ryzen 9 7950X. Each run used the OS timer,
+100 samples, a one-second minimum per case, and 65,536-row inputs. No benchmark measurements ran in
+parallel. The baseline and final measurements used the same benchmark source.
+
+```bash
+cargo bench -p vortex-array --bench compare -- \
+  compare_i32 compare_u8 compare_int compare_float compare_u64 compare_f32 \
+  --timer os --sample-count 100 --min-time 1 --color never
+```
+
+Representative medians are:
+
+| Case | Columnar baseline | Final | Change |
+| --- | ---: | ---: | ---: |
+| `compare_u8` | 39.07 us | 3.419 us | 91.2% faster |
+| `compare_u8_constant` | 31.35 us | 3.349 us | 89.3% faster |
+| `compare_i32` | 19.07 us | 7.419 us | 61.1% faster |
+| `compare_f32` | 33.16 us | 14.40 us | 56.6% faster |
+| `compare_int_eq` | 21.68 us | 19.47 us | 10.2% faster |
+| `compare_u64` | 27.22 us | 24.33 us | 10.6% faster |
+| `compare_float_eq` | 21.71 us | 19.40 us | 10.6% faster |
+| `compare_int` | 27.14 us | 27.12 us | parity |
+| `compare_float` | 49.31 us | 49.66 us | parity |
+| `compare_u64_constant` | 23.18 us | 23.25 us | parity |
+
+Two baseline runs and two final runs covered the original matrix. Their medians remained within
+1%. The extended `u64` and floating-point baseline used one run. The final extended matrix used
+two runs.
+
+The direct RowFn experiment did not keep all cases. It made ordered `i64` 25% slower, nullable
+ordered `i64` 28% slower, and ordered `f64` 11% slower. Constant ordered `u64` was 34% slower.
+Equality remained faster at each measured wide type, and varying ordered `u64` improved by 11%.
+
+Packing 65,536 materialized `bool` values into a `BitBuffer` has a 570-nanosecond median. This is
+less than 2% of the direct RowFn `i64` time. The wide ordered regression therefore comes from the
+generated comparison loop, not the separate packing pass.
+
+The final x86 path keeps fused comparison and bit-packing for ordered `i64`, ordered `f64`, and
+constant ordered `u64`. It uses RowFn for the other primitive shapes. The fallback only
+instantiates columnar kernels for `i64`, `u64`, and `f64`.
+
+Pruning the eight unreachable fallback type instantiations moved the `compare_u8` median from
+approximately 3.06 to 3.42 microseconds. The selected source path did not change. This is
+consistent with native linked-layout sensitivity, but no normalized machine-code comparison was
+performed for these two binaries.
+
+These measurements are local wall-time evidence. They contain no CodSpeed instruction, cache, or
+memory counters and do not predict a CodSpeed simulation result.
+
 ## Recommended next steps
 
 1. Use pinned, alternating local x86 runs for performance decisions and retain the raw per-run

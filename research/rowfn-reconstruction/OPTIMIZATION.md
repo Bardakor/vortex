@@ -579,6 +579,37 @@ from 4.379 to 4.299 microseconds.
 This isolated result supports the code change, but it remains native wall-time evidence. It does
 not provide CodSpeed instruction, cache, or memory counters.
 
+### Select primitive comparison output by measured code generation
+
+Primitive comparisons expose a second output trade-off. The owned RowFn path writes one `bool` per
+row, then `OutputElement for bool` packs the values into a `BitBuffer`. The old columnar path fuses
+the predicate and bit-packing loop.
+
+The separate pack is cheap on the current x86 host. Packing 65,536 values takes 570 nanoseconds.
+The comparison loop determines the larger differences:
+
+- RowFn improves measured `u8`, `i32`, `f32`, equality, and varying `u64` cases by 10% to 92%.
+- The fused path remains faster for ordered `i64`, ordered `f64`, and constant ordered `u64`.
+- A direct RowFn port regresses those cases by 11% to 34%.
+
+Dispatch each operator to a separate RowFn closure. This keeps the operator match outside the row
+loop and gives LLVM one predicate per monomorph. Do not move the operator match into the closure.
+
+On x86, select the fused path before RowFn planning for the measured wide ordered cases. A
+`reduce_encoded` prototype recovered the loop but repeated planning and validity work. Nullable
+`i64` remained 5.7% slower. Selecting at the primitive entry point restores parity.
+
+Keep the fallback instantiation set narrow. Only `i64`, `u64`, and `f64` can reach it, so a full
+`match_each_native_ptype!` adds unused columnar monomorphs. Explicit dispatch avoids that code-size
+cost.
+
+This pruning moved the local `u8` median from approximately 3.06 to 3.42 microseconds without
+changing its selected source path. Treat this as layout sensitivity, not a loop regression, until
+a normalized machine-code comparison shows otherwise.
+
+The benchmark source, commands, and representative medians are in `HANDOFF.md`. These results use
+local wall time, not CodSpeed CPU simulation.
+
 ## Current unresolved work
 
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
