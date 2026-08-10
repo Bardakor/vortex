@@ -24,7 +24,9 @@ use crate::extension::is_native_geometry;
 /// column is *some* native geometry.
 pub struct GeometryRow;
 
-impl InputElement for GeometryRow {
+// SAFETY: the varying view is the decoded geometry slice, and its reported length is that slice's
+// length.
+unsafe impl InputElement for GeometryRow {
     type Column = Vec<Geometry<f64>>;
     type Varying<'a> = &'a [Geometry<f64>];
     type Elem<'a> = &'a Geometry<f64>;

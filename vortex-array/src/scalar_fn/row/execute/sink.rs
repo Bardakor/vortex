@@ -42,7 +42,6 @@ where
     let varying = Args::varying(&columns);
     ensure_decoded_lengths::<Args>(&columns, varying.as_ref(), row_count)?;
     let mut accumulated = ApplyResult::Accumulated::default();
-
     {
         // Borrow the sink once so its shape and buffer descriptor remain loop invariants. This
         // scope releases the borrow before `finish_sink` consumes the sink.
@@ -92,12 +91,6 @@ where
     Sink: OutputSink,
     ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
 {
-    // Batch execution needs a full-length result before applying the validity mask. Decline when
-    // the sink cannot leave legal placeholders in positions this loop skips.
-    if !Sink::SUPPORTS_SKIPPED_ROWS {
-        return Ok(None);
-    }
-
     // Null-tolerant decoding exposes values behind nulls without filtering the inputs first. An
     // element representation may decline when it cannot provide those values safely.
     let Some(columns) = Args::decode_null_tolerant(args, ctx)? else {
@@ -107,7 +100,6 @@ where
     let row_count = args.row_count();
     let mut sink = Sink::with_capacity(row_count, sink_dtype)?;
     let mut accumulated = ApplyResult::Accumulated::default();
-
     // Batch execution resolves all-valid and all-null inputs before selecting this path.
     let AllOr::Some(valid) = valid.bit_buffer() else {
         vortex_bail!("execute_sink_valid_rows requires a mixed mask");
@@ -129,7 +121,9 @@ where
 
         // The loop writes only valid indices, but the sink still finishes a full-length output.
         // Initialize placeholders now; batch execution masks them before the result escapes.
-        Sink::initialize_skipped_rows(&mut rows);
+        if !Sink::initialize_skipped_rows(&mut rows) {
+            return Ok(None);
+        }
 
         // Mask traversal is callback-based and cannot return a `VortexResult`. Record the first
         // immediate error, turn later callbacks into no-ops, and return before finishing the sink.
@@ -175,7 +169,9 @@ fn finish_sink<S: OutputSink>(
     sink: S,
     deferred_error: DeferredError,
 ) -> VortexResult<RowExecution> {
-    match sink.finish(deferred_error) {
+    // SAFETY: callers reach this helper only after successful traversal. Dense traversal visited
+    // every addressable row; skipped-row traversal initialized every row before visiting its mask.
+    match unsafe { sink.finish(deferred_error) } {
         Ok(output) => Ok(RowExecution::Output(output)),
         Err(error) if deferred_error.occurred() => Ok(RowExecution::DeferredError(error)),
         Err(error) => Err(error),

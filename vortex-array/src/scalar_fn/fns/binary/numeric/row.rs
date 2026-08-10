@@ -56,6 +56,11 @@ impl RowFn for NumericBinary {
     const FALLIBLE: bool = true;
 
     fn id(&self) -> ScalarFnId {
+        // This private helper is never registered or serialized. It executes the registered
+        // `Binary` operation's primitive path directly, so reusing that public ID keeps errors and
+        // first-use interning attributed to the function the caller invoked. Privacy is the guard:
+        // making this type registrable requires giving it an independent ID and persistence
+        // contract first.
         ScalarFnVTable::id(&Binary)
     }
 

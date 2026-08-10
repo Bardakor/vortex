@@ -136,7 +136,7 @@ impl OutputSink for I64Sink {
         &mut rows[index]
     }
 
-    fn finish(self, _error: DeferredError) -> VortexResult<ArrayRef> {
+    unsafe fn finish(self, _error: DeferredError) -> VortexResult<ArrayRef> {
         Ok(PrimitiveArray::new(self.0.freeze(), Validity::NonNullable).into_array())
     }
 }

@@ -55,7 +55,9 @@ pub struct TensorRows<T> {
     stride: usize,
 }
 
-impl<T: Float + NativePType> InputElement for TensorRow<T> {
+// SAFETY: `TensorRows` records the row count validated during decode, and both checked and
+// unchecked access use the same stride and row width.
+unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
     type Column = TensorRows<T>;
     type Varying<'a> = &'a TensorRows<T>;
     type Elem<'a> = &'a [T];

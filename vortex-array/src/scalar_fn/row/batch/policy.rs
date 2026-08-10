@@ -61,12 +61,9 @@ impl RowPolicy {
 
     /// The policy one concrete dispatch executes nullable rows under.
     ///
-    /// This deliberately ignores [`OutputSink::SUPPORTS_SKIPPED_ROWS`]. Batch execution always
-    /// tries [`reduce_encoded`](crate::scalar_fn::RowFn::reduce_encoded) against the original
-    /// arrays before it tries the sink or filters the inputs. Skipping that probe can change the
-    /// result of an encoding-aware function.
-    ///
-    /// [`OutputSink::SUPPORTS_SKIPPED_ROWS`]: crate::scalar_fn::OutputSink::SUPPORTS_SKIPPED_ROWS
+    /// Batch execution always tries [`reduce_encoded`](crate::scalar_fn::RowFn::reduce_encoded)
+    /// against the original arrays before it tries the sink or filters the inputs. Skipping that
+    /// probe can change the result of an encoding-aware function.
     pub const fn for_sink<Args: ElementTuple, ApplyResult: SinkResult>() -> Self {
         if Args::DENSE_SAFE && !Args::DECODE_FALLIBLE && !ApplyResult::FALLIBLE {
             if ApplyResult::DEFERRED {
