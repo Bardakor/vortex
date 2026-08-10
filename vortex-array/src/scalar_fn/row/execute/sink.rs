@@ -92,6 +92,12 @@ where
     Sink: OutputSink,
     ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
 {
+    // Decline before input decoding or sink allocation when this sink cannot initialize rows that
+    // the mask skips. The capability and the operation are the same function pointer.
+    let Some(initialize_skipped_rows) = Sink::SKIPPED_ROWS_INITIALIZER else {
+        return Ok(None);
+    };
+
     // Null-tolerant decoding exposes values behind nulls without filtering the inputs first. An
     // element representation may decline when it cannot provide those values safely.
     let Some(columns) = Args::decode_null_tolerant(args, ctx)? else {
@@ -123,9 +129,7 @@ where
 
         // The loop writes only valid indices, but the sink still finishes a full-length output.
         // Initialize placeholders now; batch execution masks them before the result escapes.
-        if !Sink::initialize_skipped_rows(&mut rows) {
-            return Ok(None);
-        }
+        initialize_skipped_rows(&mut rows);
 
         // Mask traversal is callback-based and cannot return a `VortexResult`. Record the first
         // immediate error, turn later callbacks into no-ops, and return before finishing the sink.
@@ -179,3 +183,6 @@ fn finish_sink<S: OutputSink>(
         Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+mod tests;
