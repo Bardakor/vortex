@@ -42,6 +42,7 @@ where
     let varying = Args::varying(&columns);
     ensure_decoded_lengths::<Args>(&columns, varying.as_ref(), row_count)?;
     let mut accumulated = ApplyResult::Accumulated::default();
+
     {
         // Borrow the sink once so its shape and buffer descriptor remain loop invariants. This
         // scope releases the borrow before `finish_sink` consumes the sink.
@@ -100,6 +101,7 @@ where
     let row_count = args.row_count();
     let mut sink = Sink::with_capacity(row_count, sink_dtype)?;
     let mut accumulated = ApplyResult::Accumulated::default();
+
     // Batch execution resolves all-valid and all-null inputs before selecting this path.
     let AllOr::Some(valid) = valid.bit_buffer() else {
         vortex_bail!("execute_sink_valid_rows requires a mixed mask");

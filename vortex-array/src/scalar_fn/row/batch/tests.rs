@@ -7,6 +7,7 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_err;
 use vortex_session::registry::CachedId;
 
+use super::super::execute::RowExecution;
 use super::Batch;
 use super::BatchPlan;
 use super::RowPolicy;
@@ -184,16 +185,8 @@ fn test_strategy_matrix(#[case] policy: RowPolicy) -> VortexResult<()> {
 
     let actual = batch.execute(
         |_args, _ctx| Ok(None),
-        |args, _ctx| {
-            Ok(super::super::execute::RowExecution::Output(
-                args.arrays[0].clone(),
-            ))
-        },
-        |args, _valid, _ctx| {
-            Ok(Some(super::super::execute::RowExecution::Output(
-                args.arrays[0].clone(),
-            )))
-        },
+        |args, _ctx| Ok(RowExecution::Output(args.arrays[0].clone())),
+        |args, _valid, _ctx| Ok(Some(RowExecution::Output(args.arrays[0].clone()))),
         &mut ctx,
     )?;
 

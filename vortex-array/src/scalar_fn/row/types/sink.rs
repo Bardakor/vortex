@@ -56,8 +56,7 @@ pub trait OutputSink: 'static + Sized {
     fn sink_dtype(args: &[DType]) -> VortexResult<DType>;
 
     /// Allocate a sink for `rows` rows of `dtype`, which is this sink's own
-    /// [`sink_dtype`](Self::sink_dtype). Called once per batch with whether any deferred row error
-    /// occurred.
+    /// [`sink_dtype`](Self::sink_dtype). Called once per batch.
     fn with_capacity(rows: usize, dtype: &DType) -> VortexResult<Self>;
 
     /// Borrow all output rows for the hot loop.
@@ -82,7 +81,8 @@ pub trait OutputSink: 'static + Sized {
     fn row<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a>;
 
     /// Finish into the built column, whose dtype **must** be this sink's
-    /// [`sink_dtype`](Self::sink_dtype). Called once per batch.
+    /// [`sink_dtype`](Self::sink_dtype). Called once per batch with whether any deferred row error
+    /// occurred.
     ///
     /// # Safety
     ///
