@@ -7,30 +7,33 @@ Platform: Apple Silicon `arm64`, macOS 15.7.3, Rust 1.91.0, LLVM 21.1.2. This ma
 128-bit NEON and cannot reproduce or compare the pinned Ryzen wall-clock results. This
 investigation uses optimized LLVM IR and correctness tests only.
 
-Baseline: `833632aaa3cab59fb4a7d4f001df26975b2267a1` on `ct/row-fn`.
+Round 1 baseline: `833632aaa3cab59fb4a7d4f001df26975b2267a1` on `ct/row-fn`.
+
+Round 2 target baselines: `84837ad36f` on `origin/ct/row-fn-api` and `32ad0bf3b7` on
+`origin/ct/row-fn-numeric`.
 
 ## Result
 
-| # | Verdict | Evidence and status |
-| ---: | --- | --- |
-| 1 | Fixed, not upstreamed | `44457b7654` makes `OutputSink::finish` unsafe. The zero-unsafe external reproduction changes from reading allocator contents to `E0133`. All gate items pass, but the local `ct/row-fn-api` ref contains divergent unpushed history and was not overwritten. |
-| 2 | Fixed, not upstreamed | `InputElement` is an unsafe trait with local safety proofs. `ElementTuple` and `IndexedElementTuple` remain sealed framework traits. Same upstream status as #1. |
-| 3 | Fixed, not upstreamed | The existing unsafe `InitializedElement::write` token remains unchanged. Unsafe publication now belongs to `OutputSink::finish`, and the generic executor owns the proof. Same upstream status as #1. |
-| 4 | Fixed, not upstreamed | `initialize_skipped_rows` now returns its capability result. A separate support constant cannot disagree with a no-op default. Same upstream status as #1. |
-| 5 | Fixed, not upstreamed | `5204fb2be5` documents totality and probes original inputs once. Gate item 3 fails because the batch refactor adds an owned mixed-path bounds edge. |
-| 6 | Not started | The requested redesign was out of scope. A temporary manual implementation reproduced `E0119`. The options analysis is below. |
-| 7 | Fixed, not upstreamed | `44457b7654` documents why private `NumericBinary` borrows the registered `Binary` ID and makes privacy the registration guard. Same upstream status as #1. |
-| 8 | Fixed, not upstreamed | `5204fb2be5` validates every input length in `Batch::new`. The regression test fails before the fix. Gate item 3 fails as described for #5. |
-| 9 | Refuted | `MaskedArray::try_new` enforces an all-valid child, and null `ConstantArray` validity is `AllInvalid`. Both couplings are constructor invariants. |
-| 10 | Fixed, not upstreamed | `5204fb2be5` probes once before retry. The regression test fails before the fix and passes after it. Gate item 3 fails as described for #5. |
-| 11 | Investigated, needs x86 | The path is unreachable because no sink sets `ERRORS_ARE_DEFERRED`. Deleting it perturbed arithmetic IR, so no change remains. |
-| 12 | Refuted | Filtering preserves every constant shape recognized by `batch_constant`: literal `Constant`, constant `Masked` child, and constant `Extension` storage. `ConstElems` stays consistent. |
-| 13 | Fixed, not upstreamed | `5204fb2be5` runs the encoding probe before one-row broadcast, against the original arrays. Gate item 3 fails as described for #5. |
-| 14 | Investigated, needs x86 | The five deferred word implementations are unreachable. Their deletion changed codegen-unit placement and owned-loop IR, so the machinery remains. |
-| 15 | Refuted | Mixed `i64` add/sub and `i32` multiply contain broadcast vector loops on `arm64`. They do not fall back to scalar row execution. |
-| 16 | Investigated, needs x86 | Full-row skipped initialization and non-breaking mask traversal are independent costs. The proposed API and early-exit split are below. |
-| 17 | Investigated, needs x86 | `scatter_valid` allocates one `u64` per original row. The cited `vortex-spatial/src/scalar_fn/execute/geo_types.rs` path does not exist at this revision. |
-| 18 | Refuted | No consumer requires row output to retain 256-byte physical alignment. Alignment-sensitive consumers call `ensure_aligned`. Any performance change still needs x86 evidence. |
+| # | Verdict | Gate branch | Evidence and status |
+| ---: | --- | --- | --- |
+| 1 | Fixed, not upstreamed | API target plus downstream numeric target | `OutputSink::finish(self)` is unsafe. The zero-unsafe external reproduction changes from reading allocator contents to `E0133`. Publication awaits approval for the combined API commit. |
+| 2 | Fixed, not upstreamed | API target plus downstream numeric target | `InputElement` is an unsafe trait with local safety proofs. `ElementTuple` and `IndexedElementTuple` remain sealed framework traits. Publication awaits approval for the combined API commit. |
+| 3 | Mitigated | API target plus downstream numeric target | Unsafe publication belongs to `OutputSink::finish`, and each successful callback must return the sink's write token. The token is not type-tied to the exact row handle; misuse now requires violating an unsafe sink/input contract rather than safe client code. |
+| 4 | Fixed, not upstreamed | API target plus downstream numeric target | `SKIPPED_ROWS_INITIALIZER: Option<fn>` makes capability and operation one fact while restoring decline before decode and allocation. Publication awaits approval for the combined API commit. |
+| 5 | Fixed, not upstreamed | API target plus downstream numeric target | `reduce_encoded` probes original inputs once and returns `RowExecution`, so encoded reductions can defer errors behind nulls through the same validity path as row execution. Publication awaits approval for the combined API commit. |
+| 6 | Investigated | Design only | A temporary manual implementation still reproduces `E0119`. A public `execute_rows` free function is the recommended redesign; it is not implemented in this pass. |
+| 7 | Fixed, not upstreamed | Numeric target | Private `NumericBinary` deliberately borrows the registered `Binary` ID and is guarded by privacy. Publication awaits the API commit. |
+| 8 | Fixed, not upstreamed | API target plus downstream numeric target | `Batch::new` validates each input length directly. The regression test fails before the fix. Publication awaits approval for the combined API commit. |
+| 9 | Refuted | API target spot-check | `MaskedArray::try_new` enforces an all-valid child, and null `ConstantArray` validity is `AllInvalid`. Both couplings remain constructor invariants. |
+| 10 | Fixed, not upstreamed | API target plus downstream numeric target | The encoding probe runs once before retry. The regression test fails before the fix and passes after it. Publication awaits approval for the combined API commit. |
+| 11 | Fixed, not upstreamed | API target plus downstream numeric target | No sink can defer errors. The unreachable `finish_sink` retry classification and deferred finish argument are deleted. Publication awaits explicit approval for this deletion. |
+| 12 | Refuted | API target tests and source spot-check | Filtering preserves literal, masked-child, and extension-storage constants recognized by `batch_constant`; new masked and extension tests pin the behavior. |
+| 13 | Fixed, not upstreamed | API target plus downstream numeric target | The encoding probe runs before one-row broadcast and sees the original arrays. Publication awaits approval for the combined API commit. |
+| 14 | Fixed, not upstreamed | API target plus downstream numeric target | The five unreachable deferred `SinkResult` word implementations and their capability pairing are deleted. Publication awaits explicit approval for this deletion. |
+| 15 | Refuted | Downstream numeric target IR | Mixed `i64` add/sub and `i32` multiply contain broadcast vector loops on `arm64`; they are not scalar fallbacks. |
+| 16 | Investigated, needs x86 | Analysis only | Full-row skipped initialization and non-breaking mask traversal remain independent costs. No performance change is made. |
+| 17 | Investigated, needs x86 | API target source | `scatter_valid` still allocates one `u64` per original row. Whether replacing the gather pays for itself is a standalone benchmark question. |
+| 18 | Refuted | API target source spot-check | No consumer requires row output to retain 256-byte physical alignment. Alignment-sensitive consumers call `ensure_aligned`; a performance change would still need x86 evidence. |
 
 ## Reproductions
 
@@ -68,6 +71,14 @@ The first proposed reproduction required every filtered input to become `Constan
 a one-row `PrimitiveArray` keeps it primitive, so that version did not exercise the defect. The
 one-row encoding probe establishes the same retry violation without assuming a filter encoding.
 
+Round 2 adds `test_reduce_encoded_defers_errors_behind_nulls`. An encoded reducer reports a
+`RowExecution::DeferredError`; mixed validity reruns only observable rows, all-valid validity makes
+the error fatal, and all-invalid validity produces the declared all-null result.
+
+The early-decline regression uses a sink whose `with_capacity` returns an error. Before the round 2
+fix, `execute_sink_valid_rows` reaches that allocation before declining. The candidate observes the
+absent initializer and returns `None` before decoding inputs or constructing the sink.
+
 ## API options for the blanket vtable
 
 ### `RowFnAdaptor<F>`
@@ -77,12 +88,15 @@ Registration and expression construction must wrap every function. Existing call
 the concrete function type also change. Arithmetic can delegate to the same generic row executor,
 but the wrapper changes monomorph identities and requires the full IR gate.
 
-### Public `execute_rows`
+### Public `execute_rows` (recommended)
 
-A public free function lets each adopter implement `ScalarFnVTable` and delegate only execution.
-It preserves all five vtable hooks but repeats arity, child naming, return dtype, strictness, and
-fallibility boilerplate in each implementation. The arithmetic row loop can remain the same helper
-monomorph. The surrounding vtable implementation still requires IR verification.
+A public free function lets each adopter keep its `ScalarFnVTable` implementation and delegate only
+execution. `Binary` keeps `coerce_args`, both simplifiers, and `fmt_sql`; `Between` and `Like` keep
+their SQL formatting; the other concrete functions keep their existing encoded and validity hooks.
+This is the least disruptive path for functions that already have a vtable. Its call-site cost is
+one explicit `execute` delegation per adopter. Simple RowFn-only functions lose the blanket
+one-line adoption story unless a separate opt-in adaptor is also provided. The arithmetic row loop
+can remain the same helper monomorph, but the surrounding delegation still needs the full IR gate.
 
 ### Hooks on `RowFn`
 
@@ -91,7 +105,18 @@ The blanket implementation can forward them. This keeps call sites unchanged but
 `ScalarFnVTable` surface and creates two contracts for each hook. Default hook forwarding remains
 outside the arithmetic loop, but the public trait change still requires the full IR gate.
 
-No option is implemented here.
+`RowFnAdaptor<F>` changes registration and expression construction to name a wrapper and changes
+monomorph identities. Re-declaring the hooks on `RowFn` duplicates the `ScalarFnVTable` contract.
+Neither cost is justified merely to preserve the blanket implementation. No redesign is implemented
+here.
+
+## Coverage added in round 2
+
+The new tests cover array-backed validity resolution, filter/scatter finalization, one-row constant
+broadcast, output dtype and length validation, masked and extension constant unwrapping, all three
+`RowPolicy` constructors, early decline for non-skipping sinks, dense-retry suppression, and all
+three prepared visitor forms with both constant and varying inputs. `prepare` is asserted to run
+once per batch.
 
 ## Performance findings
 
@@ -104,9 +129,14 @@ loop-carried vector phi and rich error construction remains outside the loop. Se
 
 ### Skipped rows
 
-`UninitElementSink::initialize_skipped_rows` writes `T::default()` to every row because its API has
-no mask. A mask-aware API can accept `&Mask` and initialize only unset positions. This is a public
-sink API change and needs x86 measurement for sparse and dense masks.
+`UninitElementSink::SKIPPED_ROWS_INITIALIZER` writes `T::default()` to every row because the
+initializer receives no mask. A mask-aware API can accept `&Mask` and initialize only unset
+positions. This is a public sink API change and needs x86 measurement for sparse and dense masks.
+
+The function-pointer option restores a compile-time capability fact without creating a second
+boolean that can disagree with the operation. `RowPolicy::for_sink` does not need it: policy decides
+whether dense execution is semantically legal, while skip support decides whether the later
+valid-row sink attempt proceeds or falls back to filter-and-scatter.
 
 The early-exit problem is separable. A fallible or breakable mask iterator can stop after the first
 row error without changing `OutputSink`. `Mask::indices()` is not an equivalent production fix
@@ -115,9 +145,11 @@ because it can materialize indices. No change is made here.
 ### Scatter
 
 `scatter_valid` allocates `vec![0u64; valid.len()]`, fills ranks for set-bit runs, performs `take`,
-and applies validity. A run-based scatter can copy dense value ranges directly into a pre-sized
-output. That design is encoding-sensitive and needs a focused x86 benchmark. The spatial precedent
-named in the finding is absent from this revision.
+and applies validity. The cited spatial helper does exist on the target branches, but its typed
+primitive/bool output construction is not a reusable implementation for arbitrary `ArrayRef`
+encodings. A run-based scatter can copy dense value ranges directly into a pre-sized output, but
+that design is encoding-sensitive. Whether avoiding the eight-byte-per-row gather index matters
+needs a focused x86 benchmark.
 
 ### Alignment
 
@@ -128,27 +160,47 @@ assumes 256-byte alignment. This is not a correctness requirement.
 
 ## Code generation gate
 
-The API-only commit preserves the six owned arithmetic monomorphs and both `i64` division sink
-paths. No new closure call, loop bounds check, vector loss, failure spill, or in-loop error
-construction appears. See `codegen/api-contract-summary.md`.
+Round 1's gate was measured on `ct/row-fn`, not on either branch that would receive the change.
+Round 2 starts from exact `origin/ct/row-fn-api` and `origin/ct/row-fn-numeric` tips. The API branch
+does not instantiate the production arithmetic monomorphs, so its candidate is compiled through
+the numeric branch after rebasing the two numeric commits onto it.
 
-The batch correctness commit adds one `panic_bounds_check` site for `output[index]` in the mixed
-owned branch even though `owned.rs` is unchanged. The vector loops remain, but gate item 3 fails.
-The commit stays on `ct/row-fn` and needs an x86 rerun before any upstream attempt.
+On that target lineage, the `5204fb2` `output[index]` bounds regression does not reproduce. Owned
+arithmetic has two bounds sites after the candidate rather than three at the numeric baseline. The
+candidate and the separate deferred-sink deletion preserve inlining, vector factors, loop-carried
+failure phis, overflow checks, and out-of-loop error construction. The deletion changes codegen-unit
+placement but none of the stated loop properties. See
+`codegen/target-branch-round2-summary.md`.
+
+Staged capture found that the `RowExecution` reducer signature alone restores the third bounds
+edge. The required coverage and final safety comment change placement again and remove it in the
+final combined tree. Do not upstream or benchmark the reducer-signature commit in isolation.
+
+The exact tested trees were consolidated without changing their contents:
+
+- API candidate `f759998dcefa69b11d11b281e3bbebb6b88584e4`, based on `84837ad36f`.
+- Numeric candidate `b4900072c1300238d246d395d986466db21583f6`, based on the API candidate.
+
+Both remote tips still matched the recorded baselines after the final fetch. The candidates remain
+unpublished because publishing the combined API commit, including the broad deferred-sink
+deletion, requires explicit approval.
 
 ## Do not do this
 
-Do not delete the unreachable deferred sink machinery as semantically inert cleanup. The deletion
-changed codegen-unit placement and the optimized owned arithmetic IR. It was reverted.
+Do not use a `ct/row-fn` IR result as the upstream gate. Every hot-path file and the linked numeric
+code differ on the target branches; round 1's bounds regression does not reproduce there.
 
-Do not move the `reduce_encoded` probe without checking the owned mixed-path bounds edge. The
-correctness fix is valid, but the current source shape does not pass the arithmetic IR gate.
+Do not call the deferred-sink deletion byte-identical. It changes codegen-unit placement on the
+numeric target even though the arithmetic loop structure passes the gate.
+
+Do not cherry-pick the `RowExecution` reducer-signature change without its required coverage and
+the final target-tree gate. Its isolated target build reintroduces the owned mixed-path bounds edge.
 
 The investigation did not challenge any guardrail in the task. `owned.rs`, numeric primitive
 inlining policy, the numeric `Vec<ArrayRef>`, `BorrowedExecutionArgs`, and LLVM loop flags remain
 unchanged.
 
-## Verification
+## Round 1 verification
 
 ```text
 cargo nextest run -p vortex-array -p vortex-spatial -p vortex-tensor
@@ -166,3 +218,38 @@ PYO3_PYTHON=.venv/bin/python cargo clippy --all-targets --all-features
 
 The first clippy run selected `/usr/bin/python3` 3.9 and stopped because `abi3-py311` requires
 Python 3.11. Rerunning with the repository virtual environment completed cleanly.
+
+## Round 2 verification
+
+API candidate:
+
+```text
+cargo nextest run -p vortex-array -p vortex-spatial -p vortex-tensor
+  3757 passed, 1 skipped
+
+cargo test --doc -p vortex-array
+  73 passed, 13 ignored
+
+cargo +nightly fmt --all
+  passed
+
+PYO3_PYTHON=/Users/connor/spiral/vortex-data/vortex1/.venv/bin/python \
+  cargo clippy --all-targets --all-features
+  passed
+```
+
+Downstream numeric candidate:
+
+```text
+cargo nextest run -p vortex-array
+  3401 passed, 1 skipped
+
+cargo test --doc -p vortex-array
+  73 passed, 13 ignored
+
+cargo +nightly fmt --all
+  passed
+
+PYO3_PYTHON=.venv/bin/python cargo clippy -p vortex-array --all-targets --all-features
+  passed
+```
