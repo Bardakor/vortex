@@ -67,7 +67,10 @@ impl RowFn for SpatialDistance {
         visitor: V,
     ) -> VortexResult<V::VisitResult> {
         visitor.visit_into::<(GeometryRow, GeometryRow), UninitElementSink<f64>, _>(
-            |(a, b), output| InitializedElement::write(output, Euclidean.distance(a, b)),
+            |(a, b), output| {
+                // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                unsafe { InitializedElement::write(output, Euclidean.distance(a, b)) }
+            },
         )
     }
 }

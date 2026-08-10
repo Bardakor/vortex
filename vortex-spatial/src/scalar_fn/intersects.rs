@@ -77,7 +77,8 @@ impl RowFn for SpatialIntersects {
                 ConstBboxes::new(a, b)
             },
             |bboxes, (a, b), output| {
-                InitializedElement::write(output, intersects_row_prepared(bboxes, a, b))
+                // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                unsafe { InitializedElement::write(output, intersects_row_prepared(bboxes, a, b)) }
             },
         )
     }

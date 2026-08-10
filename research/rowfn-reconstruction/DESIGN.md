@@ -91,7 +91,7 @@ arrays and runs the matching loop.
 
 ## Visit capabilities
 
-The visitor has six entry points. Three unprepared methods delegate to three prepared methods.
+The visitor has six entry points.
 
 | Method | Output model | Row error model | Preparation |
 | --- | --- | --- | --- |
@@ -348,17 +348,23 @@ trait OutputSink {
 The executor borrows `Rows` once before the loop. This keeps the sink descriptor and shape as loop
 invariants. The closure receives only the row handle.
 
-`UninitElementSink<T>` avoids zero-initializing dense primitive output. Its row handle is
-`&mut MaybeUninit<T>`. Safe code must prove that it wrote the slot:
+`OutputSink::WriteToken` ties each sink to the result from its row closure. Initialized sinks use
+`()`. `UninitElementSink<T>` requires `InitializedElement` and exposes each row as
+`&mut MaybeUninit<T>`:
 
 ```rust
-let token = InitializedElement::write(output, value);
-Ok(token)
+visitor.visit_into::<Args, UninitElementSink<T>, _>(|args, output| {
+    let value = apply(args);
+
+    // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+    unsafe { InitializedElement::write(output, value) }
+})
 ```
 
-`InitializedElement` is a zero-sized, unforgeable write token. The sink can call `Vec::set_len`
-only after every successful row returns this token. A valid-only loop initializes placeholders
-before it skips rows.
+`InitializedElement` is zero-sized write evidence. Only unsafe code can construct it. The caller
+must write the current callback's row and return the token from that callback. The sink calls
+`Vec::set_len` only after every successful row returns this evidence. A valid-only loop initializes
+placeholders before it skips rows.
 
 ## Failure models
 

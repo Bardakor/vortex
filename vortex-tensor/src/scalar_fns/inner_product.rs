@@ -76,7 +76,10 @@ impl RowFn for InnerProduct {
     ) -> VortexResult<V::VisitResult> {
         match_each_float_ptype!(tensor_element_ptype(args)?, |T| {
             visitor.visit_into::<(TensorRow<T>, TensorRow<T>), UninitElementSink<T>, _>(
-                |(lhs, rhs), output| InitializedElement::write(output, inner_product_row(lhs, rhs)),
+                |(lhs, rhs), output| {
+                    // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                    unsafe { InitializedElement::write(output, inner_product_row(lhs, rhs)) }
+                },
             )
         })
     }

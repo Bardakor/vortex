@@ -50,7 +50,8 @@ impl RowFn for L1Norm {
     ) -> VortexResult<V::VisitResult> {
         match_each_float_ptype!(tensor_element_ptype(args)?, |T| {
             visitor.visit_into::<(TensorRow<T>,), UninitElementSink<T>, _>(|(row,), output| {
-                InitializedElement::write(output, l1_norm_row(row))
+                // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                unsafe { InitializedElement::write(output, l1_norm_row(row)) }
             })
         })
     }

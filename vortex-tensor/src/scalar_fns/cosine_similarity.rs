@@ -99,10 +99,13 @@ impl RowFn for CosineSimilarity {
                     }
                 },
                 |norms, (lhs, rhs), output| {
-                    InitializedElement::write(
-                        output,
-                        cosine_similarity_row_prepared(norms, lhs, rhs),
-                    )
+                    // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                    unsafe {
+                        InitializedElement::write(
+                            output,
+                            cosine_similarity_row_prepared(norms, lhs, rhs),
+                        )
+                    }
                 },
             )
         })

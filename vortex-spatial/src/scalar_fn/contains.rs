@@ -86,7 +86,8 @@ impl RowFn for SpatialContains {
                 }
             },
             |operands, (a, b), output| {
-                InitializedElement::write(output, contains_row_prepared(operands, a, b))
+                // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                unsafe { InitializedElement::write(output, contains_row_prepared(operands, a, b)) }
             },
         )
     }

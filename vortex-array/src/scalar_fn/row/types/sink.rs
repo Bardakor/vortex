@@ -50,7 +50,9 @@ pub trait OutputSink: 'static + Sized {
     /// Proof that a successful row closure left its row handle initialized.
     ///
     /// Use `()` for initialized row handles. A sink exposing uninitialized storage uses a distinct
-    /// token returned after initialization.
+    /// token returned after initialization. A sink that uses this token to justify unsafe code
+    /// **must** prevent safe construction that does not establish the invariant. Make construction
+    /// unsafe when Rust cannot tie the token to the supplied row handle.
     type WriteToken: 'static;
 
     /// The dtype of the column this sink builds, given the function's input dtypes.
@@ -90,14 +92,20 @@ pub trait OutputSink: 'static + Sized {
 /// Proof that one uninitialized element row was initialized.
 #[must_use = "return this token from the row closure to prove that it initialized the output"]
 pub struct InitializedElement(
-    /// Private so safe code can only obtain this token by writing an uninitialized row.
+    /// Private so constructing initialization evidence requires an unsafe operation.
     (),
 );
 
 impl InitializedElement {
     /// Write `value` into an uninitialized row and return its proof token.
+    ///
+    /// # Safety
+    ///
+    /// `row` must be the [`UninitElementSink`] row supplied to the current callback. The caller must
+    /// return the token from that callback. Using another row or returning the token from another
+    /// callback can cause undefined behavior.
     #[inline]
-    pub fn write<T>(row: &mut MaybeUninit<T>, value: T) -> Self {
+    pub unsafe fn write<T>(row: &mut MaybeUninit<T>, value: T) -> Self {
         row.write(value);
 
         Self(())
@@ -156,9 +164,10 @@ impl<T: OutputElement + Copy + Default> OutputSink for UninitElementSink<T> {
     }
 
     fn finish(mut self, _error: DeferredError) -> VortexResult<ArrayRef> {
-        // SAFETY: dense execution reaches `finish` only after every row returned the token from
-        // `InitializedElement::write`. Skip-invalid execution initializes every row before
-        // overwriting valid ones. The allocation reserved every slot in `0..row_count`.
+        // SAFETY: the `WriteToken` equality requires each successful dense callback to return an
+        // `InitializedElement`. Its unsafe constructor requires initialization of that callback's
+        // row. Skip-invalid execution initializes every row before overwriting valid ones.
+        // `with_capacity` reserved every slot in `0..row_count`.
         unsafe { self.values.set_len(self.row_count) };
 
         Ok(T::build(self.values))

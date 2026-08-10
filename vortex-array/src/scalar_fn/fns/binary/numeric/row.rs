@@ -118,7 +118,8 @@ where
             return Err(numeric_error(<CheckedDiv as CheckedPrimitiveOp<T>>::ERROR));
         }
 
-        Ok(InitializedElement::write(output, value))
+        // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+        Ok(unsafe { InitializedElement::write(output, value) })
     })
 }
 
