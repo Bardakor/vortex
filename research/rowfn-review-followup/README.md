@@ -16,20 +16,20 @@ Round 2 target baselines: `84837ad36f` on `origin/ct/row-fn-api` and `32ad0bf3b7
 
 | # | Verdict | Gate branch | Evidence and status |
 | ---: | --- | --- | --- |
-| 1 | Fixed, not upstreamed | API target plus downstream numeric target | `OutputSink::finish(self)` is unsafe. The zero-unsafe external reproduction changes from reading allocator contents to `E0133`. Publication awaits approval for the combined API commit. |
-| 2 | Fixed, not upstreamed | API target plus downstream numeric target | `InputElement` is an unsafe trait with local safety proofs. `ElementTuple` and `IndexedElementTuple` remain sealed framework traits. Publication awaits approval for the combined API commit. |
+| 1 | Resolved | `ct/row-fn-api` at `f759998dce` | `OutputSink::finish(self)` is unsafe. The zero-unsafe external reproduction changes from reading allocator contents to `E0133`. |
+| 2 | Resolved | `ct/row-fn-api` at `f759998dce` | `InputElement` is an unsafe trait with local safety proofs. `ElementTuple` and `IndexedElementTuple` remain sealed framework traits. |
 | 3 | Mitigated | API target plus downstream numeric target | Unsafe publication belongs to `OutputSink::finish`, and each successful callback must return the sink's write token. The token is not type-tied to the exact row handle; misuse now requires violating an unsafe sink/input contract rather than safe client code. |
-| 4 | Fixed, not upstreamed | API target plus downstream numeric target | `SKIPPED_ROWS_INITIALIZER: Option<fn>` makes capability and operation one fact while restoring decline before decode and allocation. Publication awaits approval for the combined API commit. |
-| 5 | Fixed, not upstreamed | API target plus downstream numeric target | `reduce_encoded` probes original inputs once and returns `RowExecution`, so encoded reductions can defer errors behind nulls through the same validity path as row execution. Publication awaits approval for the combined API commit. |
+| 4 | Resolved | `ct/row-fn-api` at `f759998dce` | `SKIPPED_ROWS_INITIALIZER: Option<fn>` makes capability and operation one fact while restoring decline before decode and allocation. |
+| 5 | Resolved | `ct/row-fn-api` at `f759998dce` | `reduce_encoded` probes original inputs once and returns `RowExecution`, so encoded reductions can defer errors behind nulls through the same validity path as row execution. |
 | 6 | Investigated | Design only | A temporary manual implementation still reproduces `E0119`. A public `execute_rows` free function is the recommended redesign; it is not implemented in this pass. |
-| 7 | Fixed, not upstreamed | Numeric target | Private `NumericBinary` deliberately borrows the registered `Binary` ID and is guarded by privacy. Publication awaits the API commit. |
-| 8 | Fixed, not upstreamed | API target plus downstream numeric target | `Batch::new` validates each input length directly. The regression test fails before the fix. Publication awaits approval for the combined API commit. |
+| 7 | Resolved | `ct/row-fn-numeric` at `b4900072c1` | Private `NumericBinary` deliberately borrows the registered `Binary` ID and is guarded by privacy. |
+| 8 | Resolved | `ct/row-fn-api` at `f759998dce` | `Batch::new` validates each input length directly. The regression test fails before the fix. |
 | 9 | Refuted | API target spot-check | `MaskedArray::try_new` enforces an all-valid child, and null `ConstantArray` validity is `AllInvalid`. Both couplings remain constructor invariants. |
-| 10 | Fixed, not upstreamed | API target plus downstream numeric target | The encoding probe runs once before retry. The regression test fails before the fix and passes after it. Publication awaits approval for the combined API commit. |
-| 11 | Fixed, not upstreamed | API target plus downstream numeric target | No sink can defer errors. The unreachable `finish_sink` retry classification and deferred finish argument are deleted. Publication awaits explicit approval for this deletion. |
+| 10 | Resolved | `ct/row-fn-api` at `f759998dce` | The encoding probe runs once before retry. The regression test fails before the fix and passes after it. |
+| 11 | Resolved | `ct/row-fn-api` at `f759998dce` | No sink can defer errors. The unreachable `finish_sink` retry classification and deferred finish argument are deleted. |
 | 12 | Refuted | API target tests and source spot-check | Filtering preserves literal, masked-child, and extension-storage constants recognized by `batch_constant`; new masked and extension tests pin the behavior. |
-| 13 | Fixed, not upstreamed | API target plus downstream numeric target | The encoding probe runs before one-row broadcast and sees the original arrays. Publication awaits approval for the combined API commit. |
-| 14 | Fixed, not upstreamed | API target plus downstream numeric target | The five unreachable deferred `SinkResult` word implementations and their capability pairing are deleted. Publication awaits explicit approval for this deletion. |
+| 13 | Resolved | `ct/row-fn-api` at `f759998dce` | The encoding probe runs before one-row broadcast and sees the original arrays. |
+| 14 | Resolved | `ct/row-fn-api` at `f759998dce` | The five unreachable deferred `SinkResult` word implementations and their capability pairing are deleted. |
 | 15 | Refuted | Downstream numeric target IR | Mixed `i64` add/sub and `i32` multiply contain broadcast vector loops on `arm64`; they are not scalar fallbacks. |
 | 16 | Investigated, needs x86 | Analysis only | Full-row skipped initialization and non-breaking mask traversal remain independent costs. No performance change is made. |
 | 17 | Investigated, needs x86 | API target source | `scatter_valid` still allocates one `u64` per original row. Whether replacing the gather pays for itself is a standalone benchmark question. |
@@ -176,14 +176,13 @@ Staged capture found that the `RowExecution` reducer signature alone restores th
 edge. The required coverage and final safety comment change placement again and remove it in the
 final combined tree. Do not upstream or benchmark the reducer-signature commit in isolation.
 
-The exact tested trees were consolidated without changing their contents:
+The exact tested trees were consolidated without changing their contents and upstreamed:
 
-- API candidate `f759998dcefa69b11d11b281e3bbebb6b88584e4`, based on `84837ad36f`.
-- Numeric candidate `b4900072c1300238d246d395d986466db21583f6`, based on the API candidate.
+- `ct/row-fn-api` at `f759998dcefa69b11d11b281e3bbebb6b88584e4`, based on `84837ad36f`.
+- `ct/row-fn-numeric` at `b4900072c1300238d246d395d986466db21583f6`, based on the API commit.
 
-Both remote tips still matched the recorded baselines after the final fetch. The candidates remain
-unpublished because publishing the combined API commit, including the broad deferred-sink
-deletion, requires explicit approval.
+Both remote tips still matched the recorded baselines before publication. The numeric branch was
+updated with an exact lease on `32ad0bf3b7`.
 
 ## Do not do this
 
@@ -251,5 +250,21 @@ cargo +nightly fmt --all
   passed
 
 PYO3_PYTHON=.venv/bin/python cargo clippy -p vortex-array --all-targets --all-features
+  passed
+```
+
+Final `ct/row-fn` after applying the deferred-sink deletion:
+
+```text
+cargo nextest run -p vortex-array -p vortex-spatial -p vortex-tensor
+  3825 passed, 1 skipped
+
+cargo test --doc -p vortex-array
+  73 passed, 13 ignored
+
+cargo +nightly fmt --all
+  passed
+
+PYO3_PYTHON=.venv/bin/python cargo clippy --all-targets --all-features
   passed
 ```
