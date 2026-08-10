@@ -175,8 +175,9 @@ fn finish_sink<S: OutputSink>(
     sink: S,
     deferred_error: DeferredError,
 ) -> VortexResult<RowExecution> {
-    // SAFETY: callers reach this helper only after successful traversal. Dense traversal visited
-    // every addressable row; skipped-row traversal initialized every row before visiting its mask.
+    // SAFETY: callers reach this helper only after every completed callback returned the sink's
+    // write token. Skipped-row traversal also ran the sink's initializer before visiting its mask.
+    // The sink contract defines how that evidence establishes initialization of its row storage.
     match unsafe { sink.finish(deferred_error) } {
         Ok(output) => Ok(RowExecution::Output(output)),
         Err(error) if deferred_error.occurred() => Ok(RowExecution::DeferredError(error)),
