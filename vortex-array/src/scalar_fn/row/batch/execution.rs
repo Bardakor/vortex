@@ -80,9 +80,22 @@ impl Batch {
         args: &dyn ExecutionArgs,
         plan: impl FnOnce(&[DType]) -> VortexResult<BatchPlan>,
     ) -> VortexResult<Self> {
+        let row_count = args.row_count();
         let inputs: SmallVec<[ArrayRef; 4]> = (0..args.num_inputs())
             .map(|index| args.get(index))
             .collect::<VortexResult<_>>()?;
+        if let Some((index, input)) = inputs
+            .iter()
+            .enumerate()
+            .find(|(_, input)| input.len() != row_count)
+        {
+            vortex_ensure_eq!(
+                input.len(),
+                row_count,
+                "the {id} input {index} has {} rows but execution declares {row_count}",
+                input.len(),
+            );
+        }
 
         let arg_dtypes: SmallVec<[DType; 4]> =
             inputs.iter().map(|input| input.dtype().clone()).collect();
@@ -96,7 +109,7 @@ impl Batch {
 
         Ok(Self {
             id,
-            row_count: args.row_count(),
+            row_count,
             inputs,
             arg_dtypes,
             validity,
@@ -109,10 +122,12 @@ impl Batch {
     /// Add null propagation, constant folding, and strategy selection around `kernel`.
     ///
     /// The kernel may ignore input validity. It receives valid-only rows when required, and its
-    /// output **must** match the planned dtype up to nullability. `try_unfiltered` receives the
-    /// original inputs plus a mixed validity mask. `Ok(None)` selects filter-and-scatter.
+    /// output **must** match the planned dtype up to nullability. `reduce` receives the original
+    /// inputs exactly once. `try_unfiltered` receives the originals plus a mixed validity mask;
+    /// `Ok(None)` selects filter-and-scatter.
     pub fn execute(
         &self,
+        reduce: impl FnOnce(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<Option<ArrayRef>>,
         kernel: impl Fn(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
         try_unfiltered: impl FnOnce(
             KernelArgs<'_>,
@@ -129,6 +144,15 @@ impl Batch {
             .any(|input| input.as_constant().is_some_and(|scalar| scalar.is_null()))
         {
             return Ok(self.all_null());
+        }
+
+        // An all-null batch has no observable row work. Other batches offer the encoding-aware
+        // hook the original inputs once, before slicing or filtering can change their encodings.
+        if matches!(self.validity, Validity::AllInvalid) {
+            return Ok(self.all_null());
+        }
+        if let Some(values) = reduce(self.kernel_args(&self.inputs, self.row_count), ctx)? {
+            return self.finalize_reduced(values);
         }
 
         // All inputs constant, and their conjoined validity proves every row non-null. This sees
@@ -321,6 +345,18 @@ impl Batch {
     /// An all-null result of the function's declared return dtype.
     fn all_null(&self) -> ArrayRef {
         ConstantArray::new(Scalar::null(self.result_dtype.clone()), self.row_count).into_array()
+    }
+
+    /// Reconcile an encoding-aware result and apply the batch's strict input validity.
+    fn finalize_reduced(&self, values: ArrayRef) -> VortexResult<ArrayRef> {
+        match self.validity.clone() {
+            Validity::NonNullable | Validity::AllValid => {
+                self.finalize_output(values, self.row_count)
+            }
+            Validity::Array(valid) => self.finalize_output(values.mask(valid)?, self.row_count),
+            // Handled before the encoding-aware hook runs.
+            Validity::AllInvalid => Ok(self.all_null()),
+        }
     }
 
     /// Pair an input view with this batch's planning metadata.

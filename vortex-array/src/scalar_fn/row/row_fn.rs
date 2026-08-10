@@ -69,7 +69,12 @@ pub trait RowFn: 'static + Sized + Clone + Send + Sync {
     /// Try an encoding-aware implementation before decoding the inputs into row elements.
     ///
     /// `None` continues to the dispatched row loop. `Some(output)` skips that loop. The output can
-    /// remain encoded or lazy. Filter-and-scatter execution can pass compacted inputs.
+    /// remain encoded or lazy. For non-nullary functions, batch execution calls this hook at most
+    /// once with the original, unfiltered arrays; slices and compacted retries do not reach it.
+    ///
+    /// Like a dense row closure, this hook must be total over every stored payload, including
+    /// payloads behind null rows. An `Err` is immediately user-visible and is never suppressed or
+    /// retried through the row layer.
     ///
     /// # Requirements
     ///
