@@ -9,7 +9,6 @@ use vortex_error::VortexResult;
 
 use crate::ArrayRef;
 use crate::dtype::DType;
-use crate::scalar_fn::DeferredError;
 use crate::scalar_fn::OutputElement;
 
 /// A column allocated once per batch that a row closure writes into, one row at a time.
@@ -21,13 +20,6 @@ use crate::scalar_fn::OutputElement;
 /// skip-invalid execution can omit invalid rows when
 /// [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) is present.
 pub trait OutputSink: 'static + Sized {
-    /// Whether this sink accepts [`DeferredError`] from its row closure instead of requiring a
-    /// per-row [`VortexResult`].
-    ///
-    /// A supporting sink must return an error from [`finish`](Self::finish) when its deferred error
-    /// argument occurred.
-    const ERRORS_ARE_DEFERRED: bool = false;
-
     /// A loop-local view of all output rows.
     ///
     /// Borrowed once before execution so the sink's buffer descriptor and shape become loop
@@ -80,15 +72,14 @@ pub trait OutputSink: 'static + Sized {
     fn row<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a>;
 
     /// Finish into the built column, whose dtype **must** be this sink's
-    /// [`sink_dtype`](Self::sink_dtype). Called once per batch with whether any deferred row error
-    /// occurred.
+    /// [`sink_dtype`](Self::sink_dtype). Called once per batch.
     ///
     /// # Safety
     ///
     /// The executor must have completed every row callback successfully, and each callback must
     /// have returned this sink's [`WriteToken`](Self::WriteToken). When skipped rows are allowed,
     /// [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) must have run before traversal.
-    unsafe fn finish(self, error: DeferredError) -> VortexResult<ArrayRef>;
+    unsafe fn finish(self) -> VortexResult<ArrayRef>;
 }
 
 /// Proof that one uninitialized element row was initialized.
@@ -164,7 +155,7 @@ impl<T: OutputElement + Copy + Default> OutputSink for UninitElementSink<T> {
         &mut rows[index]
     }
 
-    unsafe fn finish(mut self, _error: DeferredError) -> VortexResult<ArrayRef> {
+    unsafe fn finish(mut self) -> VortexResult<ArrayRef> {
         // SAFETY: the caller guarantees every slot in `0..row_count` was initialized, and
         // `with_capacity` reserved every slot in that range.
         unsafe { self.values.set_len(self.row_count) };

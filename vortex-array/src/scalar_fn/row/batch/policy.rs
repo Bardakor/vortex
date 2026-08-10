@@ -66,11 +66,7 @@ impl RowPolicy {
     /// probe can change the result of an encoding-aware function.
     pub const fn for_sink<Args: ElementTuple, ApplyResult: SinkResult>() -> Self {
         if Args::DENSE_SAFE && !Args::DECODE_FALLIBLE && !ApplyResult::FALLIBLE {
-            if ApplyResult::DEFERRED {
-                Self::DenseWithRetry
-            } else {
-                Self::Dense
-            }
+            Self::Dense
         } else {
             Self::ValidOnly
         }

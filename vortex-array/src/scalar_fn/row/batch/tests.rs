@@ -28,7 +28,6 @@ use crate::assert_arrays_eq;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::Nullability;
-use crate::scalar_fn::DeferredError;
 use crate::scalar_fn::EmptyOptions;
 use crate::scalar_fn::OutputSink;
 use crate::scalar_fn::RowFn;
@@ -90,7 +89,7 @@ impl OutputSink for I64Sink {
         &mut rows[index]
     }
 
-    unsafe fn finish(self, _error: DeferredError) -> VortexResult<ArrayRef> {
+    unsafe fn finish(self) -> VortexResult<ArrayRef> {
         Ok(PrimitiveArray::new(self.0.freeze(), Validity::NonNullable).into_array())
     }
 }

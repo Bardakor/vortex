@@ -13,7 +13,6 @@ use crate::array_session;
 use crate::arrays::PrimitiveArray;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
-use crate::scalar_fn::DeferredError;
 use crate::scalar_fn::OutputSink;
 use crate::scalar_fn::VecExecutionArgs;
 use crate::validity::Validity;
@@ -43,7 +42,7 @@ impl OutputSink for NonSkippingSink {
 
     fn row<'a>(_rows: &'a mut Self::Rows<'_>, _index: usize) -> Self::Row<'a> {}
 
-    unsafe fn finish(self, _error: DeferredError) -> VortexResult<ArrayRef> {
+    unsafe fn finish(self) -> VortexResult<ArrayRef> {
         Err(vortex_err!("a non-skipping sink must not finish"))
     }
 }
