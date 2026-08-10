@@ -482,8 +482,9 @@ The focused numeric profile shows another fixed cost. `CachedId::deref` increase
 call.
 
 `NumericBinary` is not registered. It executes the registered `Binary` operation's primitive path.
-Commit `df8fcbe1a` on `ct/row-fn-api` therefore reuses `Binary`'s existing ID. This removes a second
-interner initialization and makes internal errors name the public function.
+Commit `f9dfde730` on the monolithic branch therefore reuses `Binary`'s existing ID. The cleaned
+focused implementation is commit `2aae5992d` on `ct/row-fn-numeric`. This removes a second interner
+initialization and makes internal errors name the public function.
 
 This change does not alter dispatch or the row loop. The cost occurs on first execution, so it is
 separate from per-row vectorization. The [numeric ID check] validates the result:
@@ -621,8 +622,10 @@ linked-layout costs. Do not use it to override the focused native A/B above.
 - Reduce the mixed-constant LLVM sensitivity while preserving the production monomorph.
 - Reduce fixed RowFn batch overhead if 32,768-row numeric calls are latency-critical.
 - Profile the isolated `mul_u8_nonnull` case with native performance counters.
-- Choose between the direct typed offset fix and PR #9299's materialize-once design based on API
-  maintenance and correctness. Both are native wins, but they are different implementations.
+- Reconcile `61410ef21` with PR #9299 before merging the monolithic branch. PR #9299 identifies the
+  double execution of lazy reset offsets and materializes them once in `list_view_from_list`.
+  `61410ef21` makes `reset_offsets` eager, which also prevents the second execution. Remove the
+  direct fix if PR #9299 makes it redundant, then repeat the focused native comparison.
 - Identify the spatial `envelope` regression that begins when numeric RowFn code enters the linked
   binary.
 - Repeat the key local results on a second x86 machine and compiler version before filing a

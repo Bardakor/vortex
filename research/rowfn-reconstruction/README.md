@@ -7,8 +7,8 @@ This guide explains the RowFn design without requiring access to its source. It 
 model, execution model, performance constraints, implementation order, and benchmark procedure.
 The goal is to let a new contributor reconstruct the branch and understand each unusual choice.
 
-The guide describes commit `4c936447a` on `ct/row-fn`. Its comparison revision is develop commit
-`66d096b5d`.
+The guide describes the implementation through `443aed0b9` on `ct/row-fn`. Historical CodSpeed
+comparisons use develop commit `66d096b5d`.
 
 ## Reading order
 

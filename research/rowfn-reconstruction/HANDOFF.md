@@ -10,22 +10,26 @@ read [`DESIGN.md`](DESIGN.md), [`OPTIMIZATION.md`](OPTIMIZATION.md), and
 ## Branch state
 
 - Branch: `ct/row-fn`.
-- Last RowFn code commit: `4c936447a`.
+- Current RowFn code head: `443aed0b9`.
 - Documentation head before the offsets fix: `bdf95a77e`.
 - Comparison revision: develop at `66d096b5d`.
 - Direct offsets fix: `61410ef21`.
-- Numeric helper ID fix: `f9dfde730` on this branch and `df8fcbe1a` on `ct/row-fn-api`.
+- Numeric helper ID fix: `f9dfde730`.
 - Masked tensor decode fix: `7baa9fab7`.
-- Cleaned `ct/row-fn-api` head: `6dd500f59`.
+- Primitive comparison implementation: `8128137cc`.
+- Cleaned `ct/row-fn-api` head: `29e3db1b8`.
+- Cleaned `ct/row-fn-numeric` head: `2aae5992d`.
 - PR #9299 head measured locally: `d97e53e66`.
 
-The API branch was rewritten with an exact force-with-lease from seven commits to five:
+The focused branches now separate the framework from primitive numeric arithmetic:
 
-1. `71c3e7a58` adds the framework, refined contracts, and self-contained arguments.
-2. `6e864bf8b` moves primitive numeric operators to RowFn and reuses `Binary`'s ID.
-3. `41bb10143` adds focused executor benchmarks.
-4. `266350488` removes validated input bounds checks.
-5. `6dd500f59` restores mixed-constant performance.
+1. `7b9cf51ea` adds the cleaned framework to `ct/row-fn-api`.
+2. `29e3db1b8` adds the focused executor benchmarks to `ct/row-fn-api`.
+3. `2aae5992d` adds primitive numeric RowFn execution on `ct/row-fn-numeric`.
+
+Both focused branches use develop commit `7ec7ffbae` as their base. The API branch contains no
+primitive numeric implementation. The numeric branch differs from it in seven numeric source and
+benchmark files. All three local branch tips match their `origin` refs.
 
 Two temporary remote refs remain for the CodSpeed ablation:
 
@@ -35,6 +39,32 @@ Two temporary remote refs remain for the CodSpeed ablation:
 Both refs contain exact historical code. Temporary draft PR #9298 supplied the pull-request context
 for the focused comparisons. It is now closed, and its `ct/row-fn-codspeed-take-filter` head branch
 has been deleted.
+
+## Final output-sink safety contract
+
+`443aed0b9` keeps `RowVisitor::visit_into` and `RowVisitor::visit_prepared_into` safe. The selected
+`SinkResult::WriteToken` must match `OutputSink::WriteToken`, so
+`UninitElementSink<T>` requires an `InitializedElement` for every successful row.
+
+`InitializedElement::write` is the unsafe boundary. Its caller must write the
+`UninitElementSink<T>` row from the current callback and return that token from the same callback.
+The token has no safe constructor. Ordinary initialized sinks use `()` and require no unsafe code.
+
+The final API has no `visit_uninit`, `try_visit_uninit`, or `visit_prepared_uninit` wrappers.
+`UninitElementSink<T>` remains public and uses the generic `visit_into` path. This keeps the unsafe
+operation inside each uninitialized-output closure without making the visitor API unsafe.
+
+The final validation completed these commands:
+
+```bash
+cargo +nightly fmt --all
+cargo nextest run -p vortex-array -p vortex-tensor -p vortex-spatial
+cargo test --doc -p vortex-array -p vortex-tensor -p vortex-spatial
+cargo clippy --all-targets --all-features
+```
+
+The targeted run passed 3,884 tests. The cleaned numeric branch also passed all 3,460
+`vortex-array` tests and `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ## Corrected CodSpeed history
 
@@ -153,7 +183,8 @@ constant cases exposed a separate source-placement regression:
 | `sub_i64_constant` | 8.319 us | 36.19 us | +335.0% |
 | `mul_i32_constant` | 26.43 us | 41.91 us | +58.6% |
 
-Commit `6dd500f59` keeps each length proof in the branch that consumes it. After the fix,
+The measured API revision `6dd500f59` keeps each length proof in the branch that consumes it. After
+the fix,
 `add_i64_constant` measures 9.269 microseconds, `sub_i64_constant` measures 9.199 microseconds, and
 `mul_i32_constant` measures 18.91 microseconds. The first two retain about 11% overhead; multiply
 is 28.5% faster than develop.
@@ -165,7 +196,7 @@ Ten one-second alternating runs isolate a stable native regression:
 | Binary | Median | Observed range |
 | --- | ---: | ---: |
 | Develop `66d096b5d` | 2.229 us | 2.229 to 2.239 us |
-| Clean API `6dd500f59` | 2.809 us | 2.799 to 2.829 us |
+| Measured API revision `6dd500f59` | 2.809 us | 2.799 to 2.829 us |
 | `-C llvm-args=-align-loops=64` diagnostic | 2.449 us | 2.439 to 2.499 us |
 
 The develop and RowFn steady-state loops have the same normalized instruction sequence: two
@@ -330,9 +361,10 @@ The focused numeric profile also found 6.820 microseconds of new inclusive cost 
 Develop's ID lookup costs 0.702 microseconds total. The numeric RowFn revision costs 7.522
 microseconds.
 
-`NumericBinary` is an internal helper for the registered `Binary` function. Commit `df8fcbe1a` on
-`ct/row-fn-api` reuses `Binary`'s ID. This removes the second interner initialization and gives
-errors the public function's name. It does not change the arithmetic loop or the public API.
+`NumericBinary` is an internal helper for the registered `Binary` function. Commit `f9dfde730` on
+this branch reuses `Binary`'s ID. The cleaned focused implementation is commit `2aae5992d` on
+`ct/row-fn-numeric`. This removes the second interner initialization and gives errors the public
+function's name. It does not change the arithmetic loop or the public API.
 
 This is a first-execution cost, not a per-row cost. The [numeric ID check] validates it:
 
