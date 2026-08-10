@@ -40,6 +40,9 @@ struct NullarySeven;
 #[derive(Clone)]
 struct OriginalInputReducer;
 
+#[derive(Clone)]
+struct DeferredOriginalReducer;
+
 struct I64Sink(BufferMut<i64>);
 
 impl OutputSink for I64Sink {
@@ -128,9 +131,11 @@ impl RowFn for RetryConstantAdd {
         _options: &Self::Options,
         args: &[ArrayRef],
         _ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
+    ) -> VortexResult<Option<RowExecution>> {
         if args[0].len() == 1 {
-            return Ok(Some(ConstantArray::new(0u8, args[0].len()).into_array()));
+            return Ok(Some(RowExecution::Output(
+                ConstantArray::new(0u8, args[0].len()).into_array(),
+            )));
         }
 
         Ok(None)
@@ -161,12 +166,46 @@ impl RowFn for OriginalInputReducer {
         _options: &Self::Options,
         args: &[ArrayRef],
         _ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
+    ) -> VortexResult<Option<RowExecution>> {
         if args[0].len() == 3 {
-            return Ok(Some(ConstantArray::new(42_i64, 3).into_array()));
+            return Ok(Some(RowExecution::Output(
+                ConstantArray::new(42_i64, 3).into_array(),
+            )));
         }
 
         Ok(None)
+    }
+}
+
+impl RowFn for DeferredOriginalReducer {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+    const FALLIBLE: bool = true;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.deferred_original_reducer");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit::<(i64,), i64>(|(value,)| value)
+    }
+
+    fn reduce_encoded(
+        &self,
+        _options: &Self::Options,
+        _args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<RowExecution>> {
+        Ok(Some(RowExecution::DeferredError(vortex_err!(
+            InvalidArgument: "encoded payload failed"
+        ))))
     }
 }
 
@@ -198,6 +237,34 @@ fn test_dense_retry_does_not_reduce_filtered_inputs() -> VortexResult<()> {
     let result = ScalarFnVTable::execute(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx);
 
     assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_dense_retry_suppresses_null_row_failure() -> VortexResult<()> {
+    let lhs =
+        PrimitiveArray::new(vec![1, u8::MAX], Validity::from_iter([true, false])).into_array();
+    let rhs = ConstantArray::new(1_u8, 2).into_array();
+    let args = VecExecutionArgs::new(vec![lhs, rhs], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = ScalarFnVTable::execute(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx)?;
+    let expected = PrimitiveArray::new(vec![2_u8, 0], Validity::from_iter([true, false]));
+
+    assert_arrays_eq!(&actual, expected.as_ref(), &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_reduce_encoded_defers_errors_behind_nulls() -> VortexResult<()> {
+    let input =
+        PrimitiveArray::new(vec![10_i64, 20], Validity::from_iter([true, false])).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = ScalarFnVTable::execute(&DeferredOriginalReducer, &EmptyOptions, &args, &mut ctx)?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
     Ok(())
 }
 

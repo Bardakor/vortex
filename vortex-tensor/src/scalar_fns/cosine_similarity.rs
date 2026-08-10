@@ -18,6 +18,7 @@ use vortex_array::dtype::NativePType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar_fn::EmptyOptions;
 use vortex_array::scalar_fn::InitializedElement;
+use vortex_array::scalar_fn::RowExecution;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
@@ -122,18 +123,18 @@ impl RowFn for CosineSimilarity {
         _options: &Self::Options,
         args: &[ArrayRef],
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
+    ) -> VortexResult<Option<RowExecution>> {
         let lhs = args[0].clone();
         let rhs = args[1].clone();
 
         match NormalizedOrientation::classify(&lhs, &rhs) {
-            NormalizedOrientation::Both { lhs, rhs } => {
-                cosine_both_normalized(lhs, rhs, ctx).map(Some)
-            }
+            NormalizedOrientation::Both { lhs, rhs } => cosine_both_normalized(lhs, rhs, ctx)
+                .map(|output| Some(RowExecution::Output(output))),
             NormalizedOrientation::One {
                 normalized_array,
                 plain,
-            } => cosine_one_normalized(normalized_array, plain, ctx).map(Some),
+            } => cosine_one_normalized(normalized_array, plain, ctx)
+                .map(|output| Some(RowExecution::Output(output))),
             NormalizedOrientation::Neither => Ok(None),
         }
     }

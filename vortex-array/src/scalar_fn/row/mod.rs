@@ -14,6 +14,7 @@
 //! batch.
 
 mod execute;
+pub use execute::RowExecution;
 
 mod batch;
 

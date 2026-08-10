@@ -16,6 +16,7 @@ use vortex_array::dtype::NativePType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar_fn::EmptyOptions;
 use vortex_array::scalar_fn::InitializedElement;
+use vortex_array::scalar_fn::RowExecution;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
@@ -95,7 +96,7 @@ impl RowFn for InnerProduct {
         _options: &Self::Options,
         args: &[ArrayRef],
         _ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
+    ) -> VortexResult<Option<RowExecution>> {
         let len = args[0].len();
 
         Ok(match NormalizedOrientation::classify(&args[0], &args[1]) {
@@ -119,7 +120,8 @@ impl RowFn for InnerProduct {
                 Some(dot.binary(norms, Operator::Mul)?)
             }
             NormalizedOrientation::Neither => None,
-        })
+        }
+        .map(RowExecution::Output))
     }
 }
 

@@ -16,6 +16,7 @@ use vortex_array::dtype::proto::dtype as pb;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar_fn::EmptyOptions;
 use vortex_array::scalar_fn::InitializedElement;
+use vortex_array::scalar_fn::RowExecution;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
@@ -95,7 +96,7 @@ impl RowFn for L2Norm {
         _options: &Self::Options,
         args: &[ArrayRef],
         _ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
+    ) -> VortexResult<Option<RowExecution>> {
         let input = &args[0];
         if !input.is::<Normalized>() {
             return Ok(None);
@@ -108,7 +109,7 @@ impl RowFn for L2Norm {
             norms.dtype(),
         );
         vortex_ensure_eq!(norms.dtype().as_ptype(), element_ptype);
-        Ok(Some(norms))
+        Ok(Some(RowExecution::Output(norms)))
     }
 }
 

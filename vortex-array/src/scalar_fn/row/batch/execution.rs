@@ -4,6 +4,7 @@
 //! Null propagation, constant folding, and strategy execution for one columnar batch.
 
 use smallvec::SmallVec;
+use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
@@ -125,7 +126,7 @@ impl Batch {
     /// validity mask; `Ok(None)` selects filter-and-scatter.
     pub fn execute(
         &self,
-        reduce: impl FnOnce(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<Option<ArrayRef>>,
+        reduce: impl FnOnce(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<Option<RowExecution>>,
         kernel: impl Fn(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
         try_unfiltered: impl FnOnce(
             KernelArgs<'_>,
@@ -147,8 +148,13 @@ impl Batch {
 
         // The function-owned encoded path takes precedence over the generic all-constant
         // broadcast and sees the original inputs before slicing or filtering changes them.
-        if let Some(values) = reduce(self.kernel_args(&self.inputs, self.row_count), ctx)? {
-            return self.finalize_reduced(values);
+        if let Some(execution) = reduce(self.kernel_args(&self.inputs, self.row_count), ctx)? {
+            match execution {
+                RowExecution::Output(values) => return self.finalize_reduced(values),
+                RowExecution::DeferredError(error) => {
+                    return self.resolve_reduced_error(error, kernel, try_unfiltered, ctx);
+                }
+            }
         }
 
         // All inputs constant, and their conjoined validity proves every row non-null. This sees
@@ -348,6 +354,34 @@ impl Batch {
             // Handled before the encoding-aware hook runs.
             Validity::AllInvalid => Ok(self.all_null()),
         }
+    }
+
+    /// Resolve deferred evidence from the encoded path by executing only observable rows.
+    fn resolve_reduced_error(
+        &self,
+        error: VortexError,
+        kernel: impl Fn(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
+        try_unfiltered: impl FnOnce(
+            KernelArgs<'_>,
+            &Mask,
+            &mut ExecutionCtx,
+        ) -> VortexResult<Option<RowExecution>>,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        let valid = self.validity.clone().execute_mask(self.row_count, ctx)?;
+
+        if valid.all_true() {
+            return Err(error);
+        }
+        if valid.all_false() {
+            return Ok(self.all_null());
+        }
+
+        if let Some(result) = self.try_execute_unfiltered(try_unfiltered, &valid, ctx)? {
+            return Ok(result);
+        }
+
+        self.filter_and_scatter(kernel, &valid, ctx)
     }
 
     /// Pair an input view with this batch's planning metadata.
