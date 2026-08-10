@@ -118,7 +118,12 @@ impl BoundLambda {
     }
 
     /// Return this lambda with a different body, keeping its parameters and their dtypes.
-    pub fn with_body(&self, body: BoundExpression) -> Self {
+    ///
+    /// Crate-private because it cannot check that `body` was bound under this lambda's frame — a
+    /// body referencing an unrelated variable would silently produce a `BoundLambda` that was never
+    /// type-checked as a whole. The only caller rebuilds a body that was just taken from this same
+    /// lambda. Exposing it needs a scope-aware rebuilding API that can re-validate.
+    pub(crate) fn with_body(&self, body: BoundExpression) -> Self {
         Self {
             frame: self.frame.clone(),
             body: Arc::new(body),
