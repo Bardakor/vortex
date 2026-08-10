@@ -84,15 +84,12 @@ impl Batch {
         let inputs: SmallVec<[ArrayRef; 4]> = (0..args.num_inputs())
             .map(|index| args.get(index))
             .collect::<VortexResult<_>>()?;
-        if let Some((index, input)) = inputs
-            .iter()
-            .enumerate()
-            .find(|(_, input)| input.len() != row_count)
-        {
+
+        for (index, input) in inputs.iter().enumerate() {
             vortex_ensure_eq!(
                 input.len(),
                 row_count,
-                "the {id} input {index} has {} rows but execution declares {row_count}",
+                "the {id} input {index} must have {row_count} rows, got {}",
                 input.len(),
             );
         }
@@ -123,8 +120,9 @@ impl Batch {
     ///
     /// The kernel may ignore input validity. It receives valid-only rows when required, and its
     /// output **must** match the planned dtype up to nullability. `reduce` receives the original
-    /// inputs exactly once. `try_unfiltered` receives the originals plus a mixed validity mask;
-    /// `Ok(None)` selects filter-and-scatter.
+    /// inputs exactly once, before the generic all-constant broadcast, so a function-owned encoded
+    /// implementation takes precedence. `try_unfiltered` receives the originals plus a mixed
+    /// validity mask; `Ok(None)` selects filter-and-scatter.
     pub fn execute(
         &self,
         reduce: impl FnOnce(KernelArgs<'_>, &mut ExecutionCtx) -> VortexResult<Option<ArrayRef>>,
@@ -136,21 +134,19 @@ impl Batch {
         ) -> VortexResult<Option<RowExecution>>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
-        // Strictness: any null-constant input forces an all-null result without evaluating the
-        // kernel.
-        if self
-            .inputs
-            .iter()
-            .any(|input| input.as_constant().is_some_and(|scalar| scalar.is_null()))
+        // Strictness: an all-null batch has no observable row work. Keep the literal-constant
+        // check explicit alongside the conjoined validity invariant.
+        if matches!(self.validity, Validity::AllInvalid)
+            || self
+                .inputs
+                .iter()
+                .any(|input| input.as_constant().is_some_and(|scalar| scalar.is_null()))
         {
             return Ok(self.all_null());
         }
 
-        // An all-null batch has no observable row work. Other batches offer the encoding-aware
-        // hook the original inputs once, before slicing or filtering can change their encodings.
-        if matches!(self.validity, Validity::AllInvalid) {
-            return Ok(self.all_null());
-        }
+        // The function-owned encoded path takes precedence over the generic all-constant
+        // broadcast and sees the original inputs before slicing or filtering changes them.
         if let Some(values) = reduce(self.kernel_args(&self.inputs, self.row_count), ctx)? {
             return self.finalize_reduced(values);
         }
@@ -207,11 +203,6 @@ impl Batch {
         retry_deferred_error: bool,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
-        // Every row is null, so the kernel has nothing to contribute.
-        if matches!(self.validity, Validity::AllInvalid) {
-            return Ok(self.all_null());
-        }
-
         let values = match kernel(self.kernel_args(&self.inputs, self.row_count), ctx)? {
             RowExecution::Output(values) => values,
             RowExecution::DeferredError(error) if retry_deferred_error => {

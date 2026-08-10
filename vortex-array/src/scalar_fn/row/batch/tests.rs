@@ -37,6 +37,9 @@ struct RetryConstantAdd;
 #[derive(Clone)]
 struct NullarySeven;
 
+#[derive(Clone)]
+struct OriginalInputReducer;
+
 struct I64Sink(BufferMut<i64>);
 
 impl OutputSink for I64Sink {
@@ -134,6 +137,39 @@ impl RowFn for RetryConstantAdd {
     }
 }
 
+impl RowFn for OriginalInputReducer {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.original_input_reducer");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit::<(i64,), i64>(|(value,)| value)
+    }
+
+    fn reduce_encoded(
+        &self,
+        _options: &Self::Options,
+        args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        if args[0].len() == 3 {
+            return Ok(Some(ConstantArray::new(42_i64, 3).into_array()));
+        }
+
+        Ok(None)
+    }
+}
+
 #[test]
 fn test_batch_rejects_input_length_mismatch() -> VortexResult<()> {
     static ID: CachedId = CachedId::new("test.row_batch");
@@ -162,6 +198,19 @@ fn test_dense_retry_does_not_reduce_filtered_inputs() -> VortexResult<()> {
     let result = ScalarFnVTable::execute(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx);
 
     assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_reduce_encoded_precedes_constant_broadcast() -> VortexResult<()> {
+    let input = ConstantArray::new(7_i64, 3).into_array();
+    let args = VecExecutionArgs::new(vec![input], 3);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = ScalarFnVTable::execute(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
+    let expected = ConstantArray::new(42_i64, 3).into_array();
+
+    assert_arrays_eq!(&actual, &expected, &mut ctx);
     Ok(())
 }
 
