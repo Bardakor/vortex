@@ -74,8 +74,9 @@ where
         // When every input varies, the indexed source removes argument-shape dispatch from the hot
         // loop and lets the lane kernel optimize the traversal as one operation. Keep the varying
         // view and its length proof in this branch: hoisting them through the shared validation
-        // helper produces slower mixed-constant code with LLVM 21.1.2. See
-        // `research/rowfn-regressions-2026-08-08/README.md`.
+        // helper changed mixed-constant add, subtract, and multiply from 9.219, 9.229, and 18.94 us
+        // to 30.46, 31.11, and 37.73 us on a Ryzen 9 7950X with rustc 1.91.0 and LLVM 21.1.2.
+        // Restoring this placement recovered the fast code under the 16-CGU, no-LTO bench profile.
         if let Some(varying) = Args::varying(&columns) {
             vortex_ensure!(
                 Args::varying_len_matches(&varying, row_count),
