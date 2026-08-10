@@ -76,3 +76,79 @@ impl RowPolicy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use vortex_error::VortexResult;
+
+    use super::RowPolicy;
+    use crate::ArrayRef;
+    use crate::ExecutionCtx;
+    use crate::dtype::DType;
+    use crate::scalar_fn::InputElement;
+
+    struct SparseFallibleElement;
+
+    // SAFETY: the varying view reports length zero, so no index satisfies the unchecked-read
+    // precondition.
+    unsafe impl InputElement for SparseFallibleElement {
+        type Column = ();
+        type Varying<'a> = ();
+        type Elem<'a> = ();
+
+        const DENSE_SAFE: bool = false;
+        const DECODE_FALLIBLE: bool = true;
+
+        fn validate(_dtype: &DType) -> VortexResult<()> {
+            Ok(())
+        }
+
+        fn decode(_array: ArrayRef, _ctx: &mut ExecutionCtx) -> VortexResult<Self::Column> {
+            Ok(())
+        }
+
+        fn get(_column: &Self::Column, _index: usize) -> Self::Elem<'_> {}
+
+        fn varying(_column: &Self::Column) -> Self::Varying<'_> {}
+
+        fn varying_len(_column: &Self::Varying<'_>) -> usize {
+            0
+        }
+
+        fn get_varying<'a>(_column: &Self::Varying<'a>, _index: usize) -> Self::Elem<'a> {}
+    }
+
+    #[test]
+    fn test_owned_output_policy() {
+        assert_eq!(RowPolicy::for_owned_output::<(i64,)>(), RowPolicy::Dense);
+        assert_eq!(
+            RowPolicy::for_owned_output::<(SparseFallibleElement,)>(),
+            RowPolicy::ValidOnly,
+        );
+    }
+
+    #[test]
+    fn test_deferred_output_policy() {
+        assert_eq!(
+            RowPolicy::for_deferred_output::<(i64,)>(),
+            RowPolicy::DenseWithRetry,
+        );
+        assert_eq!(
+            RowPolicy::for_deferred_output::<(SparseFallibleElement,)>(),
+            RowPolicy::ValidOnly,
+        );
+    }
+
+    #[test]
+    fn test_sink_policy() {
+        assert_eq!(RowPolicy::for_sink::<(i64,), ()>(), RowPolicy::Dense);
+        assert_eq!(
+            RowPolicy::for_sink::<(i64,), VortexResult<()>>(),
+            RowPolicy::ValidOnly,
+        );
+        assert_eq!(
+            RowPolicy::for_sink::<(SparseFallibleElement,), ()>(),
+            RowPolicy::ValidOnly,
+        );
+    }
+}

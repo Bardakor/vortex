@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
 use rstest::rstest;
 use vortex_buffer::BufferMut;
 use vortex_error::VortexResult;
@@ -11,16 +15,19 @@ use super::super::execute::RowExecution;
 use super::Batch;
 use super::BatchPlan;
 use super::RowPolicy;
+use super::finalize_kernel_output;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
 use crate::array_session;
+use crate::arrays::BoolArray;
 use crate::arrays::ConstantArray;
 use crate::arrays::PrimitiveArray;
 use crate::assert_arrays_eq;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
+use crate::dtype::Nullability;
 use crate::scalar_fn::DeferredError;
 use crate::scalar_fn::EmptyOptions;
 use crate::scalar_fn::OutputSink;
@@ -42,6 +49,19 @@ struct OriginalInputReducer;
 
 #[derive(Clone)]
 struct DeferredOriginalReducer;
+
+#[derive(Clone)]
+struct PreparedAdd {
+    visit: PreparedVisit,
+    prepares: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Copy)]
+enum PreparedVisit {
+    Owned,
+    Sink,
+    Deferred,
+}
 
 struct I64Sink(BufferMut<i64>);
 
@@ -209,6 +229,55 @@ impl RowFn for DeferredOriginalReducer {
     }
 }
 
+impl RowFn for PreparedAdd {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = true;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.prepared_add");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        let prepares = Arc::clone(&self.prepares);
+        let prepare = move |(_lhs, rhs): (Option<i64>, Option<i64>)| {
+            prepares.fetch_add(1, Ordering::Relaxed);
+            rhs
+        };
+
+        match self.visit {
+            PreparedVisit::Owned => visitor
+                .visit_prepared::<(i64, i64), i64, _>(prepare, |constant_rhs, (lhs, rhs)| {
+                    lhs.wrapping_add(constant_rhs.unwrap_or(rhs))
+                }),
+            PreparedVisit::Sink => visitor.visit_prepared_into::<(i64, i64), I64Sink, _, ()>(
+                prepare,
+                |constant_rhs, (lhs, rhs), output| {
+                    *output = lhs.wrapping_add(constant_rhs.unwrap_or(rhs));
+                },
+            ),
+            PreparedVisit::Deferred => visitor.visit_prepared_deferred::<(i64, i64), i64, _, bool>(
+                prepare,
+                |constant_rhs, (lhs, rhs)| lhs.overflowing_add(constant_rhs.unwrap_or(rhs)),
+                |failed| {
+                    if failed {
+                        return Err(vortex_err!(InvalidArgument: "prepared add overflowed"));
+                    }
+
+                    Ok(())
+                },
+            ),
+        }
+    }
+}
+
 #[test]
 fn test_batch_rejects_input_length_mismatch() -> VortexResult<()> {
     static ID: CachedId = CachedId::new("test.row_batch");
@@ -278,6 +347,132 @@ fn test_reduce_encoded_precedes_constant_broadcast() -> VortexResult<()> {
     let expected = ConstantArray::new(42_i64, 3).into_array();
 
     assert_arrays_eq!(&actual, &expected, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_constant_input_broadcasts_one_row() -> VortexResult<()> {
+    let input = ConstantArray::new(7_i64, 2).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = ScalarFnVTable::execute(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[rstest]
+#[case::all_valid([true, true])]
+#[case::all_invalid([false, false])]
+fn test_resolve_validity_array_masks(#[case] validity: [bool; 2]) -> VortexResult<()> {
+    static ID: CachedId = CachedId::new("test.resolve_validity");
+
+    let validity = Validity::Array(BoolArray::from_iter(validity).into_array());
+    let input = PrimitiveArray::new(vec![4_i64, 5], validity).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 2);
+    let batch = Batch::new(*ID, &args, |_| {
+        Ok(BatchPlan {
+            output_dtype: DType::from(i64::PTYPE),
+            policy: RowPolicy::ValidOnly,
+        })
+    })?;
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = batch.execute(
+        |_args, _ctx| Ok(None),
+        |args, _ctx| Ok(RowExecution::Output(args.arrays[0].clone())),
+        |_args, _valid, _ctx| Ok(None),
+        &mut ctx,
+    )?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_valid_only_filters_and_scatters() -> VortexResult<()> {
+    static ID: CachedId = CachedId::new("test.filter_and_scatter");
+
+    let input = PrimitiveArray::new(
+        vec![10_i64, 20, 30, 40],
+        Validity::from_iter([true, false, true, false]),
+    )
+    .into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 4);
+    let batch = Batch::new(*ID, &args, |_| {
+        Ok(BatchPlan {
+            output_dtype: DType::from(i64::PTYPE),
+            policy: RowPolicy::ValidOnly,
+        })
+    })?;
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = batch.execute(
+        |_args, _ctx| Ok(None),
+        |args, _ctx| Ok(RowExecution::Output(args.arrays[0].clone())),
+        |_args, _valid, _ctx| Ok(None),
+        &mut ctx,
+    )?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_finalize_kernel_output_validates_shape_and_dtype() -> VortexResult<()> {
+    static ID: CachedId = CachedId::new("test.finalize_kernel_output");
+
+    let values = PrimitiveArray::from_iter([1_i64, 2]).into_array();
+    let result_dtype = DType::Primitive(i64::PTYPE, Nullability::Nullable);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = finalize_kernel_output(*ID, &result_dtype, 2, values.clone())?;
+    let expected = PrimitiveArray::new(vec![1_i64, 2], Validity::AllValid).into_array();
+    assert_eq!(actual.dtype(), &result_dtype);
+    assert_arrays_eq!(&actual, &expected, &mut ctx);
+
+    assert!(finalize_kernel_output(*ID, &result_dtype, 3, values).is_err());
+
+    let bools = BoolArray::from_iter([true, false]).into_array();
+    assert!(finalize_kernel_output(*ID, &result_dtype, 2, bools).is_err());
+    Ok(())
+}
+
+#[rstest]
+#[case::owned_constant(PreparedVisit::Owned, true)]
+#[case::owned_varying(PreparedVisit::Owned, false)]
+#[case::sink_constant(PreparedVisit::Sink, true)]
+#[case::sink_varying(PreparedVisit::Sink, false)]
+#[case::deferred_constant(PreparedVisit::Deferred, true)]
+#[case::deferred_varying(PreparedVisit::Deferred, false)]
+fn test_prepared_visits(
+    #[case] visit: PreparedVisit,
+    #[case] constant_rhs: bool,
+) -> VortexResult<()> {
+    let lhs = PrimitiveArray::from_iter([1_i64, 2]).into_array();
+    let rhs = if constant_rhs {
+        ConstantArray::new(3_i64, 2).into_array()
+    } else {
+        PrimitiveArray::from_iter([3_i64, 4]).into_array()
+    };
+    let args = VecExecutionArgs::new(vec![lhs, rhs], 2);
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let function = PreparedAdd {
+        visit,
+        prepares: Arc::clone(&prepares),
+    };
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = ScalarFnVTable::execute(&function, &EmptyOptions, &args, &mut ctx)?;
+    let expected = if constant_rhs {
+        PrimitiveArray::from_iter([4_i64, 5]).into_array()
+    } else {
+        PrimitiveArray::from_iter([4_i64, 6]).into_array()
+    };
+
+    assert_arrays_eq!(&actual, &expected, &mut ctx);
+    assert_eq!(prepares.load(Ordering::Relaxed), 1);
     Ok(())
 }
 
