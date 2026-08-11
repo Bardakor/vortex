@@ -106,50 +106,7 @@ impl RowFn for LazyDouble {
     }
 }
 
-impl ScalarFnVTable for LazyDouble {
-    type Options = EmptyOptions;
-
-    fn id(&self) -> ScalarFnId {
-        RowFn::id(self)
-    }
-
-    fn arity(&self, _options: &Self::Options) -> Arity {
-        Arity::Exact(Self::ARG_NAMES.len())
-    }
-
-    fn child_name(&self, _options: &Self::Options, child_index: usize) -> ChildName {
-        ChildName::from(Self::ARG_NAMES[child_index])
-    }
-
-    fn return_dtype(&self, options: &Self::Options, args: &[DType]) -> VortexResult<DType> {
-        vortex_array::scalar_fn::row_fn_return_dtype(self, options, args)
-    }
-
-    fn execute(
-        &self,
-        options: &Self::Options,
-        args: &dyn ExecutionArgs,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<ArrayRef> {
-        vortex_array::scalar_fn::execute_rows(self, options, args, ctx)
-    }
-
-    fn validity(
-        &self,
-        _options: &Self::Options,
-        expression: &Expression,
-    ) -> VortexResult<Option<Expression>> {
-        union_child_validities(expression)
-    }
-
-    fn is_strict(&self, _options: &Self::Options) -> bool {
-        true
-    }
-
-    fn is_fallible(&self, _options: &Self::Options) -> bool {
-        Self::FALLIBLE
-    }
-}
+vortex_array::impl_row_fn_vtable!(LazyDouble);
 
 /// The same function, applying validity the way the adapter used to: materialize a mask first.
 #[derive(Clone)]
