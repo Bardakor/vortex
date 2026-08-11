@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 //! Fused comparison and bit-packing for wide primitive lanes.
+//!
+//! Production uses this implementation only for measured x86 paths. Keeping it portable lets the
+//! semantic tests exercise the RowFn and fused paths on every target.
 
 use vortex_buffer::BitBuffer;
 use vortex_error::VortexResult;

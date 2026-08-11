@@ -96,6 +96,9 @@ impl RowFn for PrimitiveCompare {
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
 
     fn id(&self) -> ScalarFnId {
+        // `PrimitiveCompare` is a private implementation detail of `Binary`: it is never registered
+        // or serialized independently. Reusing the public ID keeps execution errors attributed to
+        // `Binary`. If this type becomes registrable, it needs its own ID and persistence contract.
         ScalarFnVTable::id(&Binary)
     }
 
