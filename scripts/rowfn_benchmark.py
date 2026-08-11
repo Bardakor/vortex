@@ -66,6 +66,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def toolchain_record(worktree: Path) -> dict[str, str]:
+    """Capture the tools selected from a revision's working directory."""
+
+    def version(*command: str) -> str:
+        result = subprocess.run(
+            command,
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    return {"rustc": version("rustc", "-vV"), "cargo": version("cargo", "-V")}
+
+
 def revision_record(worktree: Path, target: Path, binaries: Iterable[str]) -> dict[str, object]:
     """Describe the exact revision, dirty patch, targets, and benchmark executables."""
 
@@ -104,6 +120,96 @@ def revision_record(worktree: Path, target: Path, binaries: Iterable[str]) -> di
         "target": str(target.resolve()),
         "binaries": executable_records,
     }
+
+
+def build_identity(worktree: Path, target: Path, settings: dict[str, str]) -> dict[str, object]:
+    revision = revision_record(worktree, target, [])
+    revision.pop("binaries")
+    return {
+        "settings": settings,
+        "toolchain": toolchain_record(worktree),
+        "revision": revision,
+    }
+
+
+def binary_records(entries: Iterable[str]) -> dict[str, object]:
+    records: dict[str, object] = {}
+    for entry in entries:
+        label, separator, raw_path = entry.partition("=")
+        if not separator:
+            raise ValueError(f"expected LABEL=PATH for benchmark binary, got {entry!r}")
+        path = Path(raw_path).resolve()
+        records[label] = {
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
+        }
+    return records
+
+
+def write_build_record(args: argparse.Namespace) -> None:
+    output = Path(args.output)
+    worktree = Path(args.worktree)
+    target = Path(args.target)
+    settings = dict(setting.split("=", 1) for setting in args.setting)
+    identity = build_identity(worktree, target, settings)
+    binaries = binary_records(args.binary)
+
+    if output.exists():
+        previous = json.loads(output.read_text(encoding="utf-8"))
+        previous_identity = {key: previous.get(key) for key in identity}
+        if previous_identity == identity:
+            binaries = {**previous.get("binaries", {}), **binaries}
+
+    record = {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        **identity,
+        "binaries": binaries,
+    }
+    output.write_text(f"{json.dumps(record, indent=2, sort_keys=True)}\n", encoding="utf-8")
+
+
+def validated_build_binaries(args: argparse.Namespace) -> dict[str, str]:
+    metadata = Path(args.metadata)
+    if not metadata.is_file():
+        raise ValueError(f"build metadata does not exist: {metadata}")
+
+    record = json.loads(metadata.read_text(encoding="utf-8"))
+    if record.get("schema_version") != 1:
+        raise ValueError(f"unsupported build metadata schema in {metadata}")
+
+    settings = dict(setting.split("=", 1) for setting in args.setting)
+    identity = build_identity(Path(args.worktree), Path(args.target), settings)
+    mismatches = [key for key in identity if record.get(key) != identity[key]]
+    if mismatches:
+        fields = ", ".join(mismatches)
+        raise ValueError(f"stale benchmark build metadata ({fields} changed): {metadata}")
+
+    binaries = record.get("binaries", {})
+    resolved: dict[str, str] = {}
+    for suite in args.suite:
+        stored = binaries.get(suite)
+        if stored is None:
+            raise ValueError(f"benchmark suite {suite!r} was not recorded in {metadata}")
+        path = Path(stored["path"])
+        if not path.is_file():
+            raise ValueError(f"recorded benchmark binary does not exist: {path}")
+        current = {
+            "path": str(path.resolve()),
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
+        }
+        if current != stored:
+            raise ValueError(f"recorded benchmark binary changed: {path}")
+        resolved[suite] = str(path.resolve())
+
+    return resolved
+
+
+def validate_build_record(args: argparse.Namespace) -> None:
+    for suite, path in validated_build_binaries(args).items():
+        print(f"{suite}={path}")
 
 
 def write_manifest(args: argparse.Namespace) -> None:
@@ -340,6 +446,22 @@ def argument_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--candidate-binary", action="append", default=[])
     manifest.set_defaults(function=write_manifest)
 
+    record_build = subparsers.add_parser("record-build", help="record reusable benchmark binaries")
+    record_build.add_argument("--output", required=True)
+    record_build.add_argument("--worktree", required=True)
+    record_build.add_argument("--target", required=True)
+    record_build.add_argument("--setting", action="append", default=[])
+    record_build.add_argument("--binary", action="append", default=[])
+    record_build.set_defaults(function=write_build_record)
+
+    validate_build = subparsers.add_parser("validate-build", help="validate a reusable build")
+    validate_build.add_argument("--metadata", required=True)
+    validate_build.add_argument("--worktree", required=True)
+    validate_build.add_argument("--target", required=True)
+    validate_build.add_argument("--setting", action="append", default=[])
+    validate_build.add_argument("--suite", action="append", default=[])
+    validate_build.set_defaults(function=validate_build_record)
+
     summary = subparsers.add_parser("summarize", help="write ratios.csv and summary.md")
     summary.add_argument("output_directory")
     summary.set_defaults(function=summarize_directory)
@@ -348,8 +470,12 @@ def argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = argument_parser().parse_args()
-    args.function(args)
+    parser = argument_parser()
+    args = parser.parse_args()
+    try:
+        args.function(args)
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        parser.error(str(error))
 
 
 if __name__ == "__main__":

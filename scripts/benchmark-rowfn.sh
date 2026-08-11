@@ -14,8 +14,13 @@ Usage: benchmark-rowfn.sh [OPTIONS] <baseline-worktree> <candidate-worktree> <ne
 Options:
   --suite NAME           Select a preset or benchmark label. Repeatable; defaults to full.
   --filter PATTERN       Pass a Divan benchmark filter. Repeatable.
+  --build-only           Build and record benchmark executables without measuring.
+  --measure-only         Measure previously recorded benchmark executables without building.
   --config NAME          primary (1 CGU/fat LTO) or repository (16 CGUs/no LTO).
-  --target-root PATH     New directory for separate baseline and candidate Cargo targets.
+  --target-root PATH     Parent for reusable baseline and candidate Cargo targets.
+  --baseline-target PATH Reusable Cargo target for the baseline revision.
+  --candidate-target PATH
+                         Reusable Cargo target for the candidate revision.
   --codegen-units N      Override the selected configuration.
   --lto VALUE            Override LTO with false, thin, or fat.
   --rustflags FLAGS      Override RUSTFLAGS; defaults to -C target-cpu=native.
@@ -51,8 +56,12 @@ suite_catalog=(
 
 requested_suites=()
 filters=()
+run_build=true
+run_measure=true
 configuration=primary
 target_root=
+baseline_target_override=
+candidate_target_override=
 codegen_units_override=
 lto_override=
 rustflags_override=
@@ -69,8 +78,26 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --suite) requested_suites+=("$2"); shift 2 ;;
         --filter) filters+=("$2"); shift 2 ;;
+        --build-only)
+            if [[ $run_build == false ]]; then
+                echo "--build-only and --measure-only are mutually exclusive." >&2
+                exit 1
+            fi
+            run_measure=false
+            shift
+            ;;
+        --measure-only)
+            if [[ $run_measure == false ]]; then
+                echo "--build-only and --measure-only are mutually exclusive." >&2
+                exit 1
+            fi
+            run_build=false
+            shift
+            ;;
         --config) configuration=$2; shift 2 ;;
         --target-root) target_root=$2; shift 2 ;;
+        --baseline-target) baseline_target_override=$2; shift 2 ;;
+        --candidate-target) candidate_target_override=$2; shift 2 ;;
         --codegen-units) codegen_units_override=$2; shift 2 ;;
         --lto) lto_override=$2; shift 2 ;;
         --rustflags) rustflags_override=$2; shift 2 ;;
@@ -105,7 +132,9 @@ if ((build_jobs < 1 || build_jobs > 8)); then
     echo "--build-jobs must be between 1 and 8 so two builds cannot exceed 16 jobs." >&2
     exit 1
 fi
-command -v flock >/dev/null || { echo "benchmark-rowfn.sh requires flock." >&2; exit 1; }
+if [[ $run_measure == true ]]; then
+    command -v flock >/dev/null || { echo "benchmark-rowfn.sh requires flock." >&2; exit 1; }
+fi
 
 baseline=$(realpath "$1")
 candidate=$(realpath "$2")
@@ -176,18 +205,28 @@ fi
 
 common_git_dir=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir)
 repository_root=$(dirname "$common_git_dir")
+if [[ -n $target_root && (-n $baseline_target_override || -n $candidate_target_override) ]]; then
+    echo "--target-root cannot be combined with revision-specific target paths." >&2
+    exit 1
+fi
 if [[ -z $target_root ]]; then
     target_root="$repository_root/target/rowfn-benchmark/$(basename "$output")"
 fi
 target_root=$(realpath -m "$target_root")
-if [[ -e $target_root ]]; then
-    echo "Target root already exists: $target_root" >&2
+baseline_target=$(realpath -m "${baseline_target_override:-$target_root/baseline}")
+candidate_target=$(realpath -m "${candidate_target_override:-$target_root/candidate}")
+if [[ $baseline_target == "$candidate_target" ]]; then
+    echo "Baseline and candidate must use different Cargo target directories." >&2
     exit 1
 fi
 
-mkdir -p "$output/build" "$output/warm" "$output/measured" "$target_root"
-baseline_target="$target_root/baseline"
-candidate_target="$target_root/candidate"
+mkdir -p "$output"
+if [[ $run_build == true ]]; then
+    mkdir -p "$output/build" "$baseline_target" "$candidate_target"
+fi
+if [[ $run_measure == true ]]; then
+    mkdir -p "$output/warm" "$output/measured"
+fi
 parser="$script_directory/rowfn_benchmark.py"
 
 {
@@ -208,8 +247,11 @@ parser="$script_directory/rowfn_benchmark.py"
         printf 'Skipped one-sided benchmark target: %s\n' "${skipped_suites[@]}"
     fi
     echo
-    rustc -vV
-    cargo -V
+    echo "Baseline toolchain:"
+    (cd "$baseline" && rustc -vV && cargo -V)
+    echo
+    echo "Candidate toolchain:"
+    (cd "$candidate" && rustc -vV && cargo -V)
     echo
     lscpu
     echo
@@ -233,25 +275,37 @@ build_revision() {
         export CARGO_PROFILE_BENCH_CODEGEN_UNITS=$codegen_units
         export CARGO_PROFILE_BENCH_LTO=$lto
         export RUSTFLAGS=$rustflags
-        for entry in "${selected_suites[@]}"; do
-            IFS='|' read -r _ package bench _ <<<"$entry"
-            cargo bench --no-run -j "$build_jobs" -p "$package" --bench "$bench"
+        for package in vortex-array vortex-tensor vortex-spatial; do
+            local command=(cargo bench --no-run -j "$build_jobs" -p "$package")
+            local has_bench=false
+            for entry in "${selected_suites[@]}"; do
+                IFS='|' read -r _ suite_package bench _ <<<"$entry"
+                if [[ $suite_package == "$package" ]]; then
+                    command+=(--bench "$bench")
+                    has_bench=true
+                fi
+            done
+            if [[ $has_bench == true ]]; then
+                "${command[@]}"
+            fi
         done
     ) >"$log" 2>&1
 }
 
-echo "Building baseline and candidate with $build_jobs jobs each."
-build_revision "$baseline" "$baseline_target" "$output/build/baseline.txt" &
-baseline_pid=$!
-build_revision "$candidate" "$candidate_target" "$output/build/candidate.txt" &
-candidate_pid=$!
-baseline_status=0
-candidate_status=0
-wait "$baseline_pid" || baseline_status=$?
-wait "$candidate_pid" || candidate_status=$?
-if [[ $baseline_status -ne 0 || $candidate_status -ne 0 ]]; then
-    echo "Benchmark build failed; see $output/build/." >&2
-    exit 1
+if [[ $run_build == true ]]; then
+    echo "Building baseline and candidate with $build_jobs jobs each."
+    build_revision "$baseline" "$baseline_target" "$output/build/baseline.txt" &
+    baseline_pid=$!
+    build_revision "$candidate" "$candidate_target" "$output/build/candidate.txt" &
+    candidate_pid=$!
+    baseline_status=0
+    candidate_status=0
+    wait "$baseline_pid" || baseline_status=$?
+    wait "$candidate_pid" || candidate_status=$?
+    if [[ $baseline_status -ne 0 || $candidate_status -ne 0 ]]; then
+        echo "Benchmark build failed; see $output/build/." >&2
+        exit 1
+    fi
 fi
 
 find_benchmark() {
@@ -267,6 +321,73 @@ find_benchmark() {
 
 declare -A baseline_binaries=()
 declare -A candidate_binaries=()
+build_settings=(
+    --setting "configuration=$configuration"
+    --setting "codegen_units=$codegen_units"
+    --setting "lto=$lto"
+    --setting "rustflags=$rustflags"
+)
+
+record_build() {
+    local revision=$1
+    local worktree=$2
+    local target=$3
+    local metadata="$target/rowfn-benchmark-build.json"
+    local arguments=(
+        record-build
+        --output "$metadata"
+        --worktree "$worktree"
+        --target "$target"
+        "${build_settings[@]}"
+    )
+
+    for entry in "${selected_suites[@]}"; do
+        IFS='|' read -r label _ bench _ <<<"$entry"
+        local binary
+        binary=$(find_benchmark "$target" "$bench")
+        arguments+=(--binary "$label=$binary")
+    done
+    python3 "$parser" "${arguments[@]}"
+    echo "Recorded $revision build metadata: $metadata"
+}
+
+if [[ $run_build == true ]]; then
+    record_build baseline "$baseline" "$baseline_target"
+    record_build candidate "$candidate" "$candidate_target"
+fi
+
+load_binaries() {
+    local worktree=$1
+    local target=$2
+    local metadata="$target/rowfn-benchmark-build.json"
+    local arguments=(
+        validate-build
+        --metadata "$metadata"
+        --worktree "$worktree"
+        --target "$target"
+        "${build_settings[@]}"
+    )
+
+    for entry in "${selected_suites[@]}"; do
+        IFS='|' read -r label _ _ _ <<<"$entry"
+        arguments+=(--suite "$label")
+    done
+    python3 "$parser" "${arguments[@]}"
+}
+
+baseline_binary_output=$(load_binaries "$baseline" "$baseline_target")
+candidate_binary_output=$(load_binaries "$candidate" "$candidate_target")
+mapfile -t baseline_binary_records <<<"$baseline_binary_output"
+mapfile -t candidate_binary_records <<<"$candidate_binary_output"
+for record in "${baseline_binary_records[@]}"; do
+    label=${record%%=*}
+    baseline_binaries[$label]=${record#*=}
+done
+for record in "${candidate_binary_records[@]}"; do
+    label=${record%%=*}
+    candidate_binaries[$label]=${record#*=}
+done
+
 manifest_args=(
     manifest
     --output "$output/manifest.json"
@@ -290,9 +411,7 @@ for filter in "${filters[@]}"; do
     manifest_args+=(--filter "$filter")
 done
 for entry in "${selected_suites[@]}"; do
-    IFS='|' read -r label _ bench _ <<<"$entry"
-    baseline_binaries[$label]=$(find_benchmark "$baseline_target" "$bench")
-    candidate_binaries[$label]=$(find_benchmark "$candidate_target" "$bench")
+    IFS='|' read -r label _ _ _ <<<"$entry"
     manifest_args+=(
         --suite "$label"
         --baseline-binary "$label=${baseline_binaries[$label]}"
@@ -300,6 +419,13 @@ for entry in "${selected_suites[@]}"; do
     )
 done
 python3 "$parser" "${manifest_args[@]}"
+
+if [[ $run_measure == false ]]; then
+    echo "Build evidence: $output"
+    echo "Baseline target: $baseline_target"
+    echo "Candidate target: $candidate_target"
+    exit 0
+fi
 
 run_suite() {
     local revision=$1

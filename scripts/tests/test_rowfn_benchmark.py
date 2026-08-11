@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "rowfn_benchmark.py"
@@ -128,6 +130,67 @@ class RowFnBenchmarkTest(unittest.TestCase):
         self.assertEqual(differences, [("numeric", "candidate only", "candidate")])
         markdown = (self.directory / "summary.md").read_text(encoding="utf-8")
         self.assertIn("`numeric/candidate`: candidate only.", markdown)
+
+    def test_build_record_validates_identity_and_executable(self) -> None:
+        target = self.directory / "target"
+        target.mkdir()
+        binary = target / "binary_ops-123"
+        binary.write_bytes(b"first binary")
+        metadata = target / "rowfn-benchmark-build.json"
+        identity = {
+            "settings": {"codegen_units": "1", "lto": "fat"},
+            "toolchain": {"rustc": "rustc 1.97.1", "cargo": "cargo 1.97.1"},
+            "revision": {"head": "abc123", "dirty_state_sha256": "clean"},
+        }
+        arguments = SimpleNamespace(
+            output=str(metadata),
+            worktree=str(self.directory),
+            target=str(target),
+            setting=["codegen_units=1", "lto=fat"],
+            binary=[f"numeric={binary}"],
+        )
+
+        with mock.patch.object(self.module, "build_identity", return_value=identity):
+            self.module.write_build_record(arguments)
+
+        validation = SimpleNamespace(
+            metadata=str(metadata),
+            worktree=str(self.directory),
+            target=str(target),
+            setting=["codegen_units=1", "lto=fat"],
+            suite=["numeric"],
+        )
+        with mock.patch.object(self.module, "build_identity", return_value=identity):
+            self.assertEqual(
+                self.module.validated_build_binaries(validation),
+                {"numeric": str(binary.resolve())},
+            )
+
+        changed_identities = {
+            "settings": {**identity, "settings": {"codegen_units": "16", "lto": "false"}},
+            "toolchain": {
+                **identity,
+                "toolchain": {"rustc": "rustc 1.98.0", "cargo": "cargo 1.98.0"},
+            },
+            "revision": {
+                **identity,
+                "revision": {"head": "def456", "dirty_state_sha256": "changed"},
+            },
+        }
+        for field, changed_identity in changed_identities.items():
+            with (
+                self.subTest(field=field),
+                mock.patch.object(self.module, "build_identity", return_value=changed_identity),
+                self.assertRaisesRegex(ValueError, f"{field} changed"),
+            ):
+                self.module.validated_build_binaries(validation)
+
+        binary.write_bytes(b"second binary")
+        with (
+            mock.patch.object(self.module, "build_identity", return_value=identity),
+            self.assertRaisesRegex(ValueError, "binary changed"),
+        ):
+            self.module.validated_build_binaries(validation)
 
 
 if __name__ == "__main__":
