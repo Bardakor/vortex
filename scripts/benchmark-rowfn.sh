@@ -5,6 +5,8 @@
 
 set -Eeu -o pipefail
 
+script_directory=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+
 usage() {
     cat >&2 <<'EOF'
 Usage: benchmark-rowfn.sh [OPTIONS] <baseline-worktree> <candidate-worktree> <new-output-directory>
@@ -145,6 +147,33 @@ for request in "${requested_suites[@]}"; do
     fi
 done
 
+common_suites=()
+skipped_suites=()
+for entry in "${selected_suites[@]}"; do
+    IFS='|' read -r label package bench _ <<<"$entry"
+    baseline_source="$baseline/$package/benches/$bench.rs"
+    candidate_source="$candidate/$package/benches/$bench.rs"
+
+    if [[ -f $baseline_source && -f $candidate_source ]]; then
+        common_suites+=("$entry")
+    elif [[ -f $baseline_source ]]; then
+        skipped_suites+=("$label (baseline only)")
+    elif [[ -f $candidate_source ]]; then
+        skipped_suites+=("$label (candidate only)")
+    else
+        skipped_suites+=("$label (missing from both revisions)")
+    fi
+done
+if ((${#common_suites[@]} == 0)); then
+    echo "No requested benchmark targets exist in both revisions; no comparison is possible." >&2
+    printf 'Skipped: %s\n' "${skipped_suites[@]}" >&2
+    exit 1
+fi
+selected_suites=("${common_suites[@]}")
+if ((${#skipped_suites[@]} != 0)); then
+    printf 'Skipping one-sided benchmark target: %s\n' "${skipped_suites[@]}" >&2
+fi
+
 common_git_dir=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir)
 repository_root=$(dirname "$common_git_dir")
 if [[ -z $target_root ]]; then
@@ -159,7 +188,7 @@ fi
 mkdir -p "$output/build" "$output/warm" "$output/measured" "$target_root"
 baseline_target="$target_root/baseline"
 candidate_target="$target_root/candidate"
-parser="$candidate/scripts/rowfn_benchmark.py"
+parser="$script_directory/rowfn_benchmark.py"
 
 {
     echo "RowFn benchmark machine record"
@@ -173,6 +202,11 @@ parser="$candidate/scripts/rowfn_benchmark.py"
     echo "Warm runs: $warm_runs"
     echo "Measured pairs: $measured_pairs"
     echo "Divan: TSC timer, $sample_count samples, min $min_time s, max $max_time s"
+    if ((${#skipped_suites[@]} == 0)); then
+        echo "Skipped one-sided benchmark targets: none"
+    else
+        printf 'Skipped one-sided benchmark target: %s\n' "${skipped_suites[@]}"
+    fi
     echo
     rustc -vV
     cargo -V
