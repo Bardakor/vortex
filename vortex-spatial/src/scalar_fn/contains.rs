@@ -128,7 +128,7 @@ impl PreparedOperand {
     fn new(geometry: &Geometry<f64>) -> Self {
         Self {
             geometry: geometry.clone(),
-            bbox: geometry.bounding_rect(),
+            bbox: finite_bounding_rect(geometry),
             prepared: OnceCell::new(),
         }
     }
@@ -138,6 +138,22 @@ impl PreparedOperand {
         self.prepared
             .get_or_init(|| PreparedGeometry::from(self.geometry.clone()))
     }
+}
+
+/// Returns a bounding rectangle only when ordered comparisons can conservatively reject a row.
+///
+/// Geo permits non-finite coordinates. A rectangle containing NaN cannot prove non-containment,
+/// because its ordered comparisons can return false even when the exact algorithm accepts the
+/// geometry.
+fn finite_bounding_rect(geometry: &Geometry<f64>) -> Option<Rect<f64>> {
+    let bbox = geometry.bounding_rect()?;
+    let min = bbox.min();
+    let max = bbox.max();
+
+    [min.x, min.y, max.x, max.y]
+        .into_iter()
+        .all(f64::is_finite)
+        .then_some(bbox)
 }
 
 /// How geo's `a.contains(b)` computes its verdict for a pairing.
@@ -298,10 +314,9 @@ fn contains_row_prepared(operands: &ConstOperands, a: &Geometry<f64>, b: &Geomet
             .is_some_and(|(bbox_a, bbox_b)| !bbox_a.contains(&bbox_b)),
         (Some(const_a), None) => const_a
             .bbox
-            .zip(b.bounding_rect())
+            .zip(finite_bounding_rect(b))
             .is_some_and(|(bbox_a, bbox_b)| !bbox_a.contains(&bbox_b)),
-        (None, Some(const_b)) => a
-            .bounding_rect()
+        (None, Some(const_b)) => finite_bounding_rect(a)
             .zip(const_b.bbox)
             .is_some_and(|(bbox_a, bbox_b)| !bbox_a.contains(&bbox_b)),
     };
@@ -426,6 +441,21 @@ mod tests {
         let container = geometry_constant(&Geometry::Polygon(rect_polygon(0.0, 0.0, 4.0, 4.0)), 3)?;
         let other = geometry_constant(&Geometry::Polygon(other), 3)?;
         assert_contains(container, other, [expected; 3])
+    }
+
+    /// A non-finite bounding rectangle cannot reject a containment that the exact geometry
+    /// algorithm accepts.
+    #[test]
+    fn nan_bounding_rect_does_not_reject_containment() {
+        let container = multipoint(vec![(f64::NAN, f64::NAN), (1.0, 1.0)]);
+        let contained = point(1.0, 1.0);
+        let operands = ConstOperands {
+            a: Some(PreparedOperand::new(&container)),
+            b: Some(PreparedOperand::new(&contained)),
+        };
+
+        assert!(container.contains(&contained));
+        assert!(contains_row_prepared(&operands, &container, &contained));
     }
 
     /// Partially overlapping polygons contain each other in neither direction.
