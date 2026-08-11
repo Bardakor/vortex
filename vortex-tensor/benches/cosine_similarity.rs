@@ -21,6 +21,7 @@ use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::FixedSizeListArray;
+use vortex_array::arrays::MaskedArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
 use vortex_array::dtype::DType;
@@ -43,15 +44,11 @@ fn main() {
 }
 
 /// Total `f64` elements per operand, held constant across widths: the row count is
-/// `ELEMENTS / width`. This budget is a quarter of the one the other tensor benches use, because
-/// the constant arms recompute the broadcast vector's norm per row and cost roughly ten times the
-/// column arms per element. It is what keeps every arm inside the 1 ms per-iteration limit from
-/// `docs/developer-guide/benchmarking.md`, measured against CodSpeed's CPU simulation.
+/// `ELEMENTS / width`. The smaller budget keeps the wider cosine kernels inside the 1 ms
+/// per-iteration limit from `docs/developer-guide/benchmarking.md` under CodSpeed simulation.
 const ELEMENTS: usize = 2_048;
 
-/// Widths chosen to separate the two costs, as in `l2_norm.rs`: the redundant norm pass is
-/// `O(rows * width)`, one third of the closure's arithmetic, so wide tensors show the hoist
-/// while a narrow one is dominated by per-row framework costs.
+/// Widths that expose both fixed row-framework costs and the `O(width)` kernel work.
 const WIDTHS: &[usize] = &[2, 32, 256];
 
 /// `ELEMENTS / width` vectors of `width` `f64` elements, non-nullable. `seed` offsets the values so
@@ -106,6 +103,22 @@ fn column_x_column(bencher: Bencher, width: usize) {
 #[divan::bench(args = WIDTHS)]
 fn column_x_constant(bencher: Bencher, width: usize) {
     bench_cosine(bencher, vectors(width, 0), constant_vector(width));
+}
+
+/// The lhs is a broadcast query vector, whose norm is the same in every row.
+#[divan::bench(args = WIDTHS)]
+fn constant_x_column(bencher: Bencher, width: usize) {
+    bench_cosine(bencher, constant_vector(width), vectors(width, 31));
+}
+
+/// A nullable broadcast rhs exercises constant preparation and output validity together.
+#[divan::bench(args = WIDTHS)]
+fn column_x_nullable_constant(bencher: Bencher, width: usize) {
+    let validity = Validity::from_iter((0..ELEMENTS / width).map(|i| i % 8 != 0));
+    let rhs = MaskedArray::try_new(constant_vector(width), validity)
+        .unwrap()
+        .into_array();
+    bench_cosine(bencher, vectors(width, 0), rhs);
 }
 
 /// One query vector represented as an extension array over constant storage.

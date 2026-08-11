@@ -6,6 +6,7 @@
 use num_traits::Float;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
+use vortex_array::arrays::ScalarFnArray;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayView;
 use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
 use vortex_array::arrays::scalar_fn::plugin::ScalarFnArrayParts;
@@ -20,6 +21,7 @@ use vortex_array::scalar_fn::RowExecution;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
+use vortex_array::scalar_fn::TypedScalarFnInstance;
 use vortex_array::scalar_fn::UninitElementSink;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::serde::ArrayChildren;
@@ -46,6 +48,24 @@ use crate::utils::extract_normalized_children;
 /// [`Vector`]: crate::vector::Vector
 #[derive(Clone, Debug, Default)]
 pub struct InnerProduct;
+
+impl InnerProduct {
+    /// Creates a new [`TypedScalarFnInstance`] wrapping the inner product operation.
+    pub fn new() -> TypedScalarFnInstance<Self> {
+        TypedScalarFnInstance::new(Self, EmptyOptions)
+    }
+
+    /// Constructs a [`ScalarFnArray`] that lazily computes the inner product between `lhs` and
+    /// `rhs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the array cannot be constructed, such as when the input dtypes are
+    /// unsupported.
+    pub fn try_new_array(lhs: ArrayRef, rhs: ArrayRef) -> VortexResult<ScalarFnArray> {
+        ScalarFnArray::try_new(Self::new().erased(), vec![lhs, rhs])
+    }
+}
 
 impl RowFn for InnerProduct {
     type Options = EmptyOptions;

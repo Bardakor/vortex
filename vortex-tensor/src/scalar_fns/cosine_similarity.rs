@@ -9,6 +9,7 @@ use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::ScalarFnArray;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayView;
 use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
 use vortex_array::arrays::scalar_fn::plugin::ScalarFnArrayParts;
@@ -22,6 +23,7 @@ use vortex_array::scalar_fn::RowExecution;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
+use vortex_array::scalar_fn::TypedScalarFnInstance;
 use vortex_array::scalar_fn::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
 use vortex_array::validity::Validity;
@@ -60,6 +62,24 @@ use crate::utils::l2_norm_row;
 /// [`Normalized`]: crate::encodings::normalized::Normalized
 #[derive(Clone, Debug, Default)]
 pub struct CosineSimilarity;
+
+impl CosineSimilarity {
+    /// Creates a new [`TypedScalarFnInstance`] wrapping the cosine similarity operation.
+    pub fn new() -> TypedScalarFnInstance<Self> {
+        TypedScalarFnInstance::new(Self, EmptyOptions)
+    }
+
+    /// Constructs a [`ScalarFnArray`] that lazily computes the cosine similarity between `lhs` and
+    /// `rhs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the array cannot be constructed, such as when the input dtypes are
+    /// unsupported.
+    pub fn try_new_array(lhs: ArrayRef, rhs: ArrayRef) -> VortexResult<ScalarFnArray> {
+        ScalarFnArray::try_new(Self::new().erased(), vec![lhs, rhs])
+    }
+}
 
 impl RowFn for CosineSimilarity {
     type Options = EmptyOptions;

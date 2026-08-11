@@ -29,6 +29,7 @@ use crate::utils::test_helpers::literal_vector_array;
 use crate::utils::test_helpers::normalized_array;
 use crate::utils::test_helpers::tensor_array;
 use crate::utils::test_helpers::vector_array;
+use crate::utils::test_helpers::zero_width_vector_array;
 
 /// Evaluates cosine similarity between two tensor arrays and returns the result as `Vec<f64>`.
 fn eval_cosine_similarity(lhs: ArrayRef, rhs: ArrayRef) -> VortexResult<Vec<f64>> {
@@ -37,6 +38,33 @@ fn eval_cosine_similarity(lhs: ArrayRef, rhs: ArrayRef) -> VortexResult<Vec<f64>
     let mut ctx = SESSION.create_execution_ctx();
     let prim: PrimitiveArray = result.into_array().execute(&mut ctx)?;
     Ok(prim.as_slice::<f64>().to_vec())
+}
+
+#[test]
+fn inherent_constructors_remain_available() -> VortexResult<()> {
+    let _scalar_fn = CosineSimilarity::new();
+    let lhs = tensor_array(&[1], &[2.0])?;
+    let rhs = tensor_array(&[1], &[3.0])?;
+    let array = CosineSimilarity::try_new_array(lhs, rhs)?;
+
+    assert_eq!(array.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn zero_width_and_empty_inputs() -> VortexResult<()> {
+    let lhs = zero_width_vector_array::<f64>(3)?;
+    let rhs = zero_width_vector_array::<f64>(3)?;
+    assert_close(&eval_cosine_similarity(lhs, rhs)?, &[0.0, 0.0, 0.0]);
+
+    let lhs = vector_array(2, &[] as &[f64])?;
+    let rhs = vector_array(2, &[] as &[f64])?;
+    assert!(eval_cosine_similarity(lhs, rhs)?.is_empty());
+
+    let lhs = Vector::constant_array::<f64>(&[], 3)?;
+    let rhs = zero_width_vector_array::<f64>(3)?;
+    assert_close(&eval_cosine_similarity(lhs, rhs)?, &[0.0, 0.0, 0.0]);
+    Ok(())
 }
 
 /// Like [`eval_cosine_similarity`], but returns the executed array for exact array comparisons.
@@ -410,8 +438,8 @@ fn both_constant_tensors() -> VortexResult<()> {
 
 #[test]
 fn constant_zero_norm_query() -> VortexResult<()> {
-    // A zero-norm constant query must produce `0.0` for every row via the zero-norm guard in
-    // `cosine_one_normalized` and `execute_both_normalized`.
+    // A zero-norm constant query must produce `0.0` through the prepared row kernel's
+    // zero-denominator guard.
     let lhs = constant_tensor_array(&[3], &[0.0, 0.0, 0.0], 3)?;
     let rhs = tensor_array(
         &[3],
@@ -427,9 +455,7 @@ fn constant_zero_norm_query() -> VortexResult<()> {
 
 #[test]
 fn constant_self_similarity_nonunit() -> VortexResult<()> {
-    // A non-unit constant query compared to itself must produce `1.0`. This exercises the
-    // helper's division: after normalization, both sides must be exactly unit so the
-    // Normalized fast path's inner product yields 1.
+    // The prepared path hoists both norms and computes the same dot product for every row.
     let lhs = constant_tensor_array(&[3], &[3.0, 4.0, 0.0], 5)?;
     let rhs = constant_tensor_array(&[3], &[3.0, 4.0, 0.0], 5)?;
     assert_close(&eval_cosine_similarity(lhs, rhs)?, &[1.0; 5]);
@@ -437,9 +463,7 @@ fn constant_self_similarity_nonunit() -> VortexResult<()> {
 }
 
 /// An extension array over constant storage (what [`Vector::constant_array`] builds) is a batch
-/// constant like any other: the row layer sees through the wrapper, so `prepare` hoists its norm
-/// exactly as it does for the literal shape. This used to be intercepted by a hand-written
-/// `reduce_encoded` rewrite into `Normalized`, deleted in favor of the framework path.
+/// constant like any other. The row layer sees through the wrapper, so `prepare` hoists its norm.
 #[test]
 fn vector_constant_matches_plain() -> VortexResult<()> {
     let lhs = Vector::constant_array(&[1.0, 2.0, 2.0], 4)?;
@@ -465,11 +489,8 @@ fn vector_constant_matches_plain() -> VortexResult<()> {
     Ok(())
 }
 
-/// The literal-constant shape (a [`ConstantArray`] over a [`Vector`] extension scalar, what a
-/// `lit(query)` expression produces) reaches the row loop, unlike an extension-wrapped constant,
-/// which `reduce_encoded` rewrites into `Normalized`. There the prepared kernel hoists the query's
-/// norm once per batch, and the result must be exactly the result of expanding the same query
-/// into a full column, which hoists nothing.
+/// Both literal and extension-wrapped constant storage reach the prepared row path. The probe
+/// ensures that the literal query remains a batch constant instead of becoming a varying column.
 ///
 /// [`ConstantArray`]: vortex_array::arrays::ConstantArray
 #[test]

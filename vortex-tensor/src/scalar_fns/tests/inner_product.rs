@@ -19,10 +19,12 @@ use vortex_error::VortexResult;
 use crate::encodings::normalized::Normalized;
 use crate::scalar_fns::inner_product::InnerProduct;
 use crate::tests::SESSION;
+use crate::types::vector::Vector;
 use crate::utils::test_helpers::assert_close;
 use crate::utils::test_helpers::normalized_array;
 use crate::utils::test_helpers::tensor_array;
 use crate::utils::test_helpers::vector_array;
+use crate::utils::test_helpers::zero_width_vector_array;
 
 /// Evaluates inner product between two tensor arrays and returns the result as `Vec<f64>`.
 fn eval_inner_product(lhs: ArrayRef, rhs: ArrayRef) -> VortexResult<Vec<f64>> {
@@ -31,6 +33,33 @@ fn eval_inner_product(lhs: ArrayRef, rhs: ArrayRef) -> VortexResult<Vec<f64>> {
     let mut ctx = SESSION.create_execution_ctx();
     let prim: PrimitiveArray = result.into_array().execute(&mut ctx)?;
     Ok(prim.as_slice::<f64>().to_vec())
+}
+
+#[test]
+fn inherent_constructors_remain_available() -> VortexResult<()> {
+    let _scalar_fn = InnerProduct::new();
+    let lhs = tensor_array(&[1], &[2.0])?;
+    let rhs = tensor_array(&[1], &[3.0])?;
+    let array = InnerProduct::try_new_array(lhs, rhs)?;
+
+    assert_eq!(array.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn zero_width_and_empty_inputs() -> VortexResult<()> {
+    let lhs = zero_width_vector_array::<f64>(3)?;
+    let rhs = zero_width_vector_array::<f64>(3)?;
+    assert_close(&eval_inner_product(lhs, rhs)?, &[0.0, 0.0, 0.0]);
+
+    let lhs = vector_array(2, &[] as &[f64])?;
+    let rhs = vector_array(2, &[] as &[f64])?;
+    assert!(eval_inner_product(lhs, rhs)?.is_empty());
+
+    let lhs = Vector::constant_array::<f64>(&[], 3)?;
+    let rhs = zero_width_vector_array::<f64>(3)?;
+    assert_close(&eval_inner_product(lhs, rhs)?, &[0.0, 0.0, 0.0]);
+    Ok(())
 }
 
 /// Single-row inner product for various vector pairs.
