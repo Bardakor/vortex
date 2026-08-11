@@ -150,7 +150,7 @@ impl Batch {
         // broadcast and sees the original inputs before slicing or filtering changes them.
         if let Some(execution) = reduce(self.kernel_args(&self.inputs, self.row_count), ctx)? {
             match execution {
-                RowExecution::Output(values) => return self.finalize_reduced(values),
+                RowExecution::Output(values) => return self.finalize_reduced(values, ctx),
                 RowExecution::DeferredError(error) => {
                     return self.resolve_reduced_error(error, kernel, try_unfiltered, ctx);
                 }
@@ -347,15 +347,25 @@ impl Batch {
     }
 
     /// Reconcile an encoding-aware result and apply the batch's strict input validity.
-    fn finalize_reduced(&self, values: ArrayRef) -> VortexResult<ArrayRef> {
-        match self.validity.clone() {
-            Validity::NonNullable | Validity::AllValid => {
-                self.finalize_output(values, self.row_count)
-            }
-            Validity::Array(valid) => self.finalize_output(values.mask(valid)?, self.row_count),
+    fn finalize_reduced(&self, values: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+        validate_output(self.id, &self.result_dtype, self.row_count, &values)?;
+
+        let input_valid = self.validity.execute_mask(self.row_count, ctx)?;
+        let output_valid = values.validity()?.execute_mask(self.row_count, ctx)?;
+        vortex_ensure!(
+            input_valid.bitand_not(&output_valid).all_false(),
+            "the {} encoded reduction produced nulls for valid rows",
+            self.id,
+        );
+
+        let values = match self.validity.clone() {
+            Validity::NonNullable | Validity::AllValid => values,
+            Validity::Array(valid) => values.mask(valid)?,
             // Handled before the encoding-aware hook runs.
-            Validity::AllInvalid => Ok(self.all_null()),
-        }
+            Validity::AllInvalid => return Ok(self.all_null()),
+        };
+
+        cast_output_nullability(&self.result_dtype, values)
     }
 
     /// Resolve deferred evidence from the encoded path by executing only observable rows.

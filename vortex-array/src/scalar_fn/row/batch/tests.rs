@@ -262,7 +262,7 @@ impl RowFn for OriginalInputReducer {
 }
 
 impl RowFn for InvalidEncodedReduction {
-    type Options = EmptyOptions;
+    type Options = usize;
 
     const ARG_NAMES: &'static [&'static str] = &["value"];
 
@@ -282,12 +282,16 @@ impl RowFn for InvalidEncodedReduction {
 
     fn reduce_encoded(
         &self,
-        _options: &Self::Options,
+        null_index: &Self::Options,
         _args: &[ArrayRef],
         _ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<RowExecution>> {
         Ok(Some(RowExecution::Output(
-            PrimitiveArray::new(vec![10_i64, 20], Validity::from_iter([false, true])).into_array(),
+            PrimitiveArray::new(
+                vec![10_i64, 20],
+                Validity::from_iter((0..2).map(|index| index != *null_index)),
+            )
+            .into_array(),
         )))
     }
 }
@@ -480,7 +484,7 @@ fn test_reduce_encoded_rejects_nulls_on_valid_rows(#[case] validity: Validity) -
     let args = VecExecutionArgs::new(vec![input], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let error = match execute_rows(&InvalidEncodedReduction, &EmptyOptions, &args, &mut ctx) {
+    let error = match execute_rows(&InvalidEncodedReduction, &0, &args, &mut ctx) {
         Err(error) => error,
         Ok(_) => vortex_bail!("an encoded reduction introduced a null on a valid row"),
     };
@@ -494,6 +498,19 @@ fn test_reduce_encoded_rejects_nulls_on_valid_rows(#[case] validity: Validity) -
         error.contains("encoded reduction produced nulls for valid rows"),
         "the boundary error must identify invalid reduced output, got {error}",
     );
+    Ok(())
+}
+
+#[test]
+fn test_reduce_encoded_preserves_input_nulls() -> VortexResult<()> {
+    let input =
+        PrimitiveArray::new(vec![10_i64, 20], Validity::from_iter([true, false])).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = execute_rows(&InvalidEncodedReduction, &1, &args, &mut ctx)?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
     Ok(())
 }
 
