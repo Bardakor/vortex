@@ -29,7 +29,9 @@ use crate::scalar_fn::ScalarFnId;
 /// [`row_fn_return_dtype`](crate::scalar_fn::row_fn_return_dtype), and delegates `execute` to
 /// [`execute_rows`](crate::scalar_fn::execute_rows). Explicit adoption leaves the function free to
 /// provide custom coercion, simplification, reduction, or formatting hooks. Implement only
-/// `ScalarFnVTable` when the natural kernel is columnar rather than row-oriented.
+/// `ScalarFnVTable` when the natural kernel is columnar rather than row-oriented. A serializable
+/// adopter also delegates the vtable's `serialize` and `deserialize` methods to the matching
+/// methods below; an internal or non-serializable adopter can keep the vtable defaults.
 pub trait RowFn: 'static + Sized + Clone + Send + Sync {
     /// Options for this function, if any. Use [`EmptyOptions`](crate::scalar_fn::EmptyOptions)
     /// for none.
