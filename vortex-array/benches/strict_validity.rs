@@ -106,8 +106,6 @@ impl RowFn for LazyDouble {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(LazyDouble);
-
 /// The same function, applying validity the way the adapter used to: materialize a mask first.
 #[derive(Clone)]
 struct EagerDouble;
