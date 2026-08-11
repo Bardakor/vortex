@@ -60,7 +60,7 @@ pub struct TensorRows<T> {
 // unchecked access use the same stride and row width.
 unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
     type Column = TensorRows<T>;
-    type Varying<'a> = &'a TensorRows<T>;
+    type View<'a> = &'a TensorRows<T>;
     type Elem<'a> = &'a [T];
 
     // Tensor storage is a fully materialized non-nullable primitive buffer, so the elements behind
@@ -102,7 +102,7 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
             vortex_ensure_eq!(
                 stride,
                 list_size,
-                "varying tensor row stride must equal its width, got {stride}",
+                "per-row tensor stride must equal its width, got {stride}",
             );
             let Some(expected_elements) = rows.checked_mul(stride) else {
                 vortex_bail!(
@@ -132,34 +132,31 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
         &column.elements.as_slice()[start..start + column.list_size]
     }
 
-    fn varying(column: &Self::Column) -> Self::Varying<'_> {
+    fn view(column: &Self::Column) -> Self::View<'_> {
         column
     }
 
-    fn varying_len(column: &Self::Varying<'_>) -> usize {
-        column.rows
+    fn view_len(view: &Self::View<'_>) -> usize {
+        view.rows
     }
 
-    fn get_varying<'a>(column: &Self::Varying<'a>, index: usize) -> &'a [T]
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> &'a [T]
     where
         Self: 'a,
     {
-        Self::get(column, index)
+        Self::get(view, index)
     }
 
-    unsafe fn get_varying_unchecked<'a>(column: &Self::Varying<'a>, index: usize) -> &'a [T]
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> &'a [T]
     where
         Self: 'a,
     {
-        let start = index * column.stride;
+        let start = index * view.stride;
 
         // SAFETY: decode established one complete stored row for stride 0, or `rows` contiguous
         // `list_size`-element rows otherwise. The caller guarantees `index < rows`.
         unsafe {
-            std::slice::from_raw_parts(
-                column.elements.as_slice().as_ptr().add(start),
-                column.list_size,
-            )
+            std::slice::from_raw_parts(view.elements.as_slice().as_ptr().add(start), view.list_size)
         }
     }
 }
