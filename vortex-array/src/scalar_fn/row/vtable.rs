@@ -85,6 +85,7 @@ impl<F: RowFn> ScalarFnVTable for F {
                 &result_dtype,
                 args.row_count(),
                 values,
+                ctx,
             );
         }
 

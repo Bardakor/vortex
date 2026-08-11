@@ -26,6 +26,7 @@ use crate::arrays::BoolArray;
 use crate::arrays::ConstantArray;
 use crate::arrays::PrimitiveArray;
 use crate::assert_arrays_eq;
+use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::Nullability;
@@ -467,15 +468,15 @@ fn test_finalize_kernel_output_validates_shape_and_dtype() -> VortexResult<()> {
     let result_dtype = DType::Primitive(i64::PTYPE, Nullability::Nullable);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = finalize_kernel_output(*ID, &result_dtype, 2, values.clone())?;
+    let actual = finalize_kernel_output(*ID, &result_dtype, 2, values.clone(), &mut ctx)?;
     let expected = PrimitiveArray::new(vec![1_i64, 2], Validity::AllValid).into_array();
     assert_eq!(actual.dtype(), &result_dtype);
     assert_arrays_eq!(&actual, &expected, &mut ctx);
 
-    assert!(finalize_kernel_output(*ID, &result_dtype, 3, values).is_err());
+    assert!(finalize_kernel_output(*ID, &result_dtype, 3, values, &mut ctx).is_err());
 
     let bools = BoolArray::from_iter([true, false]).into_array();
-    assert!(finalize_kernel_output(*ID, &result_dtype, 2, bools).is_err());
+    assert!(finalize_kernel_output(*ID, &result_dtype, 2, bools, &mut ctx).is_err());
     Ok(())
 }
 
@@ -575,8 +576,8 @@ fn test_strategy_matrix(#[case] policy: RowPolicy) -> VortexResult<()> {
 
     let actual = batch.execute(
         |_args, _ctx| Ok(None),
-        |args, _ctx| Ok(RowExecution::Output(args.arrays[0].clone())),
-        |args, _valid, _ctx| Ok(Some(RowExecution::Output(args.arrays[0].clone()))),
+        |args, _ctx| Ok(RowExecution::Output(args.arrays[0].fill_null(0_i64)?)),
+        |args, _valid, _ctx| Ok(Some(RowExecution::Output(args.arrays[0].fill_null(0_i64)?))),
         &mut ctx,
     )?;
 

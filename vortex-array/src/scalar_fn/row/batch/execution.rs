@@ -193,7 +193,9 @@ impl Batch {
             .collect::<VortexResult<_>>()?;
 
         let result = VortexResult::from(kernel(self.kernel_args(&one_row, 1), ctx)?)?;
-        let scalar = self.finalize_output(result, 1)?.execute_scalar(0, ctx)?;
+        let result = self.validate_kernel_output(result, 1, ctx)?;
+        let result = self.finalize_output(result, 1)?;
+        let scalar = result.execute_scalar(0, ctx)?;
 
         Ok(ConstantArray::new(scalar, self.row_count).into_array())
     }
@@ -230,6 +232,7 @@ impl Batch {
             }
             RowExecution::DeferredError(error) => return Err(error),
         };
+        let values = self.validate_kernel_output(values, self.row_count, ctx)?;
 
         match self.validity.clone() {
             Validity::NonNullable | Validity::AllValid => {
@@ -253,15 +256,12 @@ impl Batch {
         // Check all-true before all-false: an empty mask is both, and must not be treated as
         // all-null (a zero-length non-nullable execution keeps its non-nullable dtype).
         if valid.all_true() {
-            return self
-                .finalize_output(
-                    VortexResult::from(kernel(
-                        self.kernel_args(&self.inputs, self.row_count),
-                        ctx,
-                    )?)?,
-                    self.row_count,
-                )
-                .map(ResolvedMask::Decided);
+            let values =
+                VortexResult::from(kernel(self.kernel_args(&self.inputs, self.row_count), ctx)?)?;
+            let values = self.validate_kernel_output(values, self.row_count, ctx)?;
+            let values = self.finalize_output(values, self.row_count)?;
+
+            return Ok(ResolvedMask::Decided(values));
         }
 
         if valid.all_false() {
@@ -311,6 +311,7 @@ impl Batch {
             return Ok(None);
         };
         let values = VortexResult::from(execution)?;
+        let values = self.validate_kernel_output(values, valid.len(), ctx)?;
 
         let mask = BoolArray::new(valid.to_bit_buffer(), Validity::NonNullable).into_array();
         self.finalize_output(values.mask(mask)?, valid.len())
@@ -335,6 +336,7 @@ impl Batch {
             self.kernel_args(&filtered, valid.true_count()),
             ctx,
         )?)?;
+        let values = self.validate_kernel_output(values, valid.true_count(), ctx)?;
 
         self.finalize_output(self.scatter_valid(values, valid)?, valid.len())
     }
@@ -396,7 +398,17 @@ impl Batch {
 
     /// Finalize an output against this batch's expected length and declared return dtype.
     fn finalize_output(&self, values: ArrayRef, expected_len: usize) -> VortexResult<ArrayRef> {
-        finalize_kernel_output(self.id, &self.result_dtype, expected_len, values)
+        reconcile_output(self.id, &self.result_dtype, expected_len, values)
+    }
+
+    /// Validate the output from a row kernel before batch validity is attached.
+    fn validate_kernel_output(
+        &self,
+        values: ArrayRef,
+        expected_len: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        finalize_kernel_output(self.id, &self.output_dtype, expected_len, values, ctx)
     }
 
     /// Scatter `values` (one per set bit of `valid`, in order) back to the positions of the set
@@ -448,17 +460,46 @@ impl Batch {
     }
 }
 
-/// Validate a kernel output, then cast it to the row function's declared nullability.
+/// Validate the output produced directly by a row kernel.
 ///
 /// `values` **must** contain `expected_len` rows. Its dtype must match `result_dtype` when ignoring
-/// nullability. The kernel may omit nullability because batch execution owns strict null
-/// propagation, so a nullability-only difference is cast to `result_dtype`.
+/// nullability, and every produced row **must** be valid. Batch execution owns strict null
+/// propagation and attaches input-derived validity only after this boundary.
 pub fn finalize_kernel_output(
     id: ScalarFnId,
     result_dtype: &DType,
     expected_len: usize,
     values: ArrayRef,
+    ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
+    validate_output(id, result_dtype, expected_len, &values)?;
+    vortex_ensure!(
+        values.all_valid(ctx)?,
+        "the {id} row kernel produced nulls for valid rows",
+    );
+
+    cast_output_nullability(result_dtype, values)
+}
+
+/// Reconcile an output with the function's declared shape and nullability.
+fn reconcile_output(
+    id: ScalarFnId,
+    result_dtype: &DType,
+    expected_len: usize,
+    values: ArrayRef,
+) -> VortexResult<ArrayRef> {
+    validate_output(id, result_dtype, expected_len, &values)?;
+
+    cast_output_nullability(result_dtype, values)
+}
+
+/// Validate an output's shape and logical dtype without executing a nullability cast.
+fn validate_output(
+    id: ScalarFnId,
+    result_dtype: &DType,
+    expected_len: usize,
+    values: &ArrayRef,
+) -> VortexResult<()> {
     vortex_ensure_eq!(
         values.len(),
         expected_len,
@@ -471,6 +512,11 @@ pub fn finalize_kernel_output(
         values.dtype(),
     );
 
+    Ok(())
+}
+
+/// Cast only the output nullability after its shape, dtype, and validity are accepted.
+fn cast_output_nullability(result_dtype: &DType, values: ArrayRef) -> VortexResult<ArrayRef> {
     if values.dtype() == result_dtype {
         Ok(values)
     } else {
