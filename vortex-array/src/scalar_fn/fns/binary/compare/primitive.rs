@@ -122,17 +122,17 @@ fn use_columnar_comparison(
     rhs: &ArrayRef,
     op: CompareOperator,
 ) -> VortexResult<bool> {
-    if matches!(op, CompareOperator::Eq | CompareOperator::NotEq) {
-        return Ok(false);
-    }
-
     let ptype = PType::try_from(lhs.dtype())?;
-    Ok(match ptype {
+    Ok(match (ptype, op) {
+        // Equality bit-packs efficiently for every type supported by the columnar path.
+        (PType::I64 | PType::U64 | PType::F64, CompareOperator::Eq | CompareOperator::NotEq) => {
+            true
+        }
         // The fused comparison and bit-packing loop produces better x86 code for signed 64-bit
         // integers and f64. The RowFn byte-output loop remains faster for narrower lanes.
-        PType::I64 | PType::F64 => true,
+        (PType::I64 | PType::F64, _) => true,
         // LLVM vectorizes varying u64 inputs, but not the mixed-constant RowFn loop.
-        PType::U64 => lhs.as_constant().is_some() || rhs.as_constant().is_some(),
+        (PType::U64, _) => lhs.as_constant().is_some() || rhs.as_constant().is_some(),
         _ => false,
     })
 }

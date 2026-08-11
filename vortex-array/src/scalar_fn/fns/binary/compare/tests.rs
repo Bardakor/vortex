@@ -433,10 +433,15 @@ fn float_total_order() {
 }
 
 #[rstest]
-#[case::row(PrimitiveComparisonPath::Row)]
-#[case::columnar(PrimitiveComparisonPath::Columnar)]
+#[case::row_eq(PrimitiveComparisonPath::Row, CompareOperator::Eq)]
+#[case::row_not_eq(PrimitiveComparisonPath::Row, CompareOperator::NotEq)]
+#[case::row_lt(PrimitiveComparisonPath::Row, CompareOperator::Lt)]
+#[case::columnar_eq(PrimitiveComparisonPath::Columnar, CompareOperator::Eq)]
+#[case::columnar_not_eq(PrimitiveComparisonPath::Columnar, CompareOperator::NotEq)]
+#[case::columnar_lt(PrimitiveComparisonPath::Columnar, CompareOperator::Lt)]
 fn test_primitive_comparison_paths_preserve_semantics_and_encoding(
     #[case] path: PrimitiveComparisonPath,
+    #[case] op: CompareOperator,
 ) -> VortexResult<()> {
     let lhs = PrimitiveArray::new(
         vec![
@@ -474,14 +479,25 @@ fn test_primitive_comparison_paths_preserve_semantics_and_encoding(
     .into_array();
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = compare_primitive_with_path(&lhs, &rhs, CompareOperator::Lt, path, &mut ctx)?;
-    let expected = BoolArray::from_iter([
-        Some(false), //
-        None,        //
-        Some(true),  //
-        Some(true),  //
-        None,        //
-    ]);
+    let actual = compare_primitive_with_path(&lhs, &rhs, op, path, &mut ctx)?;
+    let expected = match op {
+        CompareOperator::Eq => [
+            Some(true),  // Equal NaNs.
+            None,        // Null on the left.
+            Some(false), // Distinct signed zeroes.
+            Some(false), // A finite value and NaN.
+            None,        // Null on the right.
+        ],
+        CompareOperator::NotEq | CompareOperator::Lt => [
+            Some(false), // Equal NaNs.
+            None,        // Null on the left.
+            Some(true),  // Distinct signed zeroes.
+            Some(true),  // A finite value and NaN.
+            None,        // Null on the right.
+        ],
+        _ => unreachable!(),
+    };
+    let expected = BoolArray::from_iter(expected);
 
     assert_arrays_eq!(&actual, &expected, &mut ctx);
     assert_eq!(actual.dtype(), &DType::Bool(Nullability::Nullable));
@@ -493,6 +509,61 @@ fn test_primitive_comparison_paths_preserve_semantics_and_encoding(
         PrimitiveComparisonPath::Row => assert!(actual.as_opt::<ScalarFn>().is_some()),
         PrimitiveComparisonPath::Auto => unreachable!(),
     }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+#[rstest]
+#[case::i64_eq(
+    buffer![1_i64, 2, 3].into_array(),
+    buffer![1_i64, 4, 3].into_array(),
+    CompareOperator::Eq,
+    [true, false, true]
+)]
+#[case::i64_not_eq(
+    buffer![1_i64, 2, 3].into_array(),
+    buffer![1_i64, 4, 3].into_array(),
+    CompareOperator::NotEq,
+    [false, true, false]
+)]
+#[case::u64_eq(
+    buffer![1_u64, 2, 3].into_array(),
+    buffer![1_u64, 4, 3].into_array(),
+    CompareOperator::Eq,
+    [true, false, true]
+)]
+#[case::u64_not_eq(
+    buffer![1_u64, 2, 3].into_array(),
+    buffer![1_u64, 4, 3].into_array(),
+    CompareOperator::NotEq,
+    [false, true, false]
+)]
+#[case::f64_eq(
+    buffer![1_f64, 2.0, 3.0].into_array(),
+    buffer![1_f64, 4.0, 3.0].into_array(),
+    CompareOperator::Eq,
+    [true, false, true]
+)]
+#[case::f64_not_eq(
+    buffer![1_f64, 2.0, 3.0].into_array(),
+    buffer![1_f64, 4.0, 3.0].into_array(),
+    CompareOperator::NotEq,
+    [false, true, false]
+)]
+fn test_primitive_equality_auto_uses_columnar_for_supported_ptype(
+    #[case] lhs: ArrayRef,
+    #[case] rhs: ArrayRef,
+    #[case] op: CompareOperator,
+    #[case] expected: [bool; 3],
+) -> VortexResult<()> {
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual =
+        compare_primitive_with_path(&lhs, &rhs, op, PrimitiveComparisonPath::Auto, &mut ctx)?;
+
+    assert_eq!(actual.encoding_id(), Bool.id());
+    assert_arrays_eq!(actual, BoolArray::from_iter(expected), &mut ctx);
+
     Ok(())
 }
 
