@@ -206,6 +206,10 @@ macro_rules! impl_checked_signed {
             let kept = wide as $ty;
             let discarded = (wide >> <$ty>::BITS) as $ty;
 
+            // A product fits exactly when its discarded half is the sign extension of the kept
+            // half. XOR reduces that comparison to zero evidence for success and nonzero evidence
+            // for overflow without converting the wide product to a branch.
+
             (discarded ^ (kept >> (<$ty>::BITS - 1))) as $failure
         });
     };
@@ -294,23 +298,25 @@ impl_checked_float!(f16, f32, f64);
 mod tests {
     use super::CheckedArithmetic;
 
+    /// Values around zero, signed extrema, and 32- and 64-bit boundaries where the discarded
+    /// multiplication half or its sign extension changes.
     const PROBES: &[i64] = &[
-        0,
-        1,
-        -1,
-        2,
-        -2,
-        3,
-        i64::MIN,
-        i64::MIN + 1,
-        i64::MAX,
-        i64::MAX - 1,
-        1 << 31,
-        1 << 32,
-        1 << 62,
-        -(1 << 62),
-        0x7FFF_FFFF,
-        -0x8000_0000,
+        0,            // Additive identity.
+        1,            // Smallest positive value.
+        -1,           // All sign bits set.
+        2,            // Small positive power of two.
+        -2,           // Small negative power of two.
+        3,            // Small non-power of two.
+        i64::MIN,     // Minimum signed value.
+        i64::MIN + 1, // Minimum signed value's neighbor.
+        i64::MAX,     // Maximum signed value.
+        i64::MAX - 1, // Maximum signed value's neighbor.
+        1 << 31,      // First positive value outside i32.
+        1 << 32,      // First value with bit 32 set.
+        1 << 62,      // Largest positive power of two in i64.
+        -(1 << 62),   // Negative counterpart of the largest power of two.
+        0x7FFF_FFFF,  // Maximum i32 represented as i64.
+        -0x8000_0000, // Minimum i32 represented as i64.
     ];
 
     #[track_caller]
