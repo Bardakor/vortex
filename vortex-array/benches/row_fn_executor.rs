@@ -24,7 +24,6 @@ use vortex_array::scalar_fn::OutputSink;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
-use vortex_array::scalar_fn::ScalarFnVTable;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_buffer::BufferMut;
@@ -168,10 +167,6 @@ impl RowFn for RowSinkWrappingAdd {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(RowWrappingAdd);
-vortex_array::impl_row_fn_vtable!(RowCheckedAdd);
-vortex_array::impl_row_fn_vtable!(RowSinkWrappingAdd);
-
 fn inputs() -> (ArrayRef, ArrayRef) {
     let lhs = (0..ROWS)
         .map(|index| index as i64)
@@ -208,7 +203,7 @@ fn nullable_inputs() -> (ArrayRef, ArrayRef) {
 
 fn bench_row_fn<F>(bencher: Bencher, function: F, make_inputs: fn() -> (ArrayRef, ArrayRef))
 where
-    F: RowFn<Options = EmptyOptions> + ScalarFnVTable<Options = EmptyOptions>,
+    F: RowFn<Options = EmptyOptions>,
 {
     bencher
         .with_inputs(make_inputs)
