@@ -10,6 +10,7 @@ use vortex_array::IntoArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::ScalarFnArray;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayView;
+use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
 use vortex_array::arrays::scalar_fn::plugin::ScalarFnArrayParts;
 use vortex_array::arrays::scalar_fn::plugin::ScalarFnArrayVTable;
 use vortex_array::dtype::DType;
@@ -144,8 +145,8 @@ impl ScalarFnVTable for CosineSimilarity {
         let validity = lhs_ref.validity()?.and(rhs_ref.validity()?)?;
 
         // Compute inner product and norms as columnar operations, and propagate the options.
-        let norm_lhs_arr = L2Norm::try_new_array(lhs_ref.clone())?;
-        let norm_rhs_arr = L2Norm::try_new_array(rhs_ref.clone())?;
+        let norm_lhs_arr = L2Norm.try_new_array(len, EmptyOptions, [lhs_ref.clone()])?;
+        let norm_rhs_arr = L2Norm.try_new_array(len, EmptyOptions, [rhs_ref.clone()])?;
         let dot_arr = InnerProduct::try_new_array(lhs_ref, rhs_ref)?;
 
         // Execute to get the inner product and norms of the arrays. We only fully decompress
@@ -288,7 +289,7 @@ impl CosineSimilarity {
 
         let normalized_norms: PrimitiveArray = normalized_norms.execute(ctx)?;
 
-        let norm_arr = L2Norm::try_new_array(plain_ref.clone())?;
+        let norm_arr = L2Norm.try_new_array(len, EmptyOptions, [plain_ref.clone()])?;
         let plain_norm: PrimitiveArray = norm_arr.into_array().execute(ctx)?;
 
         // TODO(connor): Ideally we would have a `SafeDiv` binary numeric operation.
