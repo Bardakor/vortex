@@ -39,22 +39,22 @@ static SESSION: LazyLock<VortexSession> = LazyLock::new(array_session);
 const LEN: usize = 32_768;
 
 const ROWFN_MATRIX_CASES: &[(usize, RowFnShape)] = &[
-    (128, RowFnShape::VaryingVarying),
-    (128, RowFnShape::VaryingConstant),
-    (128, RowFnShape::ConstantVarying),
-    (128, RowFnShape::VaryingNullableConstant),
-    (LEN, RowFnShape::VaryingVarying),
-    (LEN, RowFnShape::VaryingConstant),
-    (LEN, RowFnShape::ConstantVarying),
-    (LEN, RowFnShape::VaryingNullableConstant),
+    (128, RowFnShape::PerRowPerRow),
+    (128, RowFnShape::PerRowConstant),
+    (128, RowFnShape::ConstantPerRow),
+    (128, RowFnShape::PerRowNullableConstant),
+    (LEN, RowFnShape::PerRowPerRow),
+    (LEN, RowFnShape::PerRowConstant),
+    (LEN, RowFnShape::ConstantPerRow),
+    (LEN, RowFnShape::PerRowNullableConstant),
 ];
 
 #[derive(Clone, Copy, Debug)]
 enum RowFnShape {
-    VaryingVarying,
-    VaryingConstant,
-    ConstantVarying,
-    VaryingNullableConstant,
+    PerRowPerRow,
+    PerRowConstant,
+    ConstantPerRow,
+    PerRowNullableConstant,
 }
 
 /// Decimal Mul and Div cost far more per lane than Add, so they run over a shorter array to keep
@@ -77,16 +77,16 @@ fn rowfn_multiply(bencher: Bencher, &(len, shape): &(usize, RowFnShape)) {
 }
 
 fn bench_rowfn_shape(bencher: Bencher, len: usize, shape: RowFnShape, operator: Operator) {
-    let varying =
+    let per_row =
         || PrimitiveArray::from_iter((0..len).map(|index| (index % 1_024) as i64 + 1)).into_array();
     let constant = || ConstantArray::new(17_i64, len).into_array();
     let nullable_constant = || ConstantArray::new(Some(17_i64), len).into_array();
 
     let (lhs, rhs) = match shape {
-        RowFnShape::VaryingVarying => (varying(), varying()),
-        RowFnShape::VaryingConstant => (varying(), constant()),
-        RowFnShape::ConstantVarying => (constant(), varying()),
-        RowFnShape::VaryingNullableConstant => (varying(), nullable_constant()),
+        RowFnShape::PerRowPerRow => (per_row(), per_row()),
+        RowFnShape::PerRowConstant => (per_row(), constant()),
+        RowFnShape::ConstantPerRow => (constant(), per_row()),
+        RowFnShape::PerRowNullableConstant => (per_row(), nullable_constant()),
     };
 
     bench_primitive(bencher, lhs, rhs, operator);
