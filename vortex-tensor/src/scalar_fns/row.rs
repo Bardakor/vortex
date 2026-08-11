@@ -163,7 +163,7 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
 
 /// Test-only probe recording which operands the last `prepare` step saw as batch-constant, so a
 /// test can assert its inputs took the stride-0 decode path rather than merely producing the right
-/// values through the varying path.
+/// values through the per-row path.
 #[cfg(test)]
 pub(crate) mod probe {
     use std::cell::Cell;
