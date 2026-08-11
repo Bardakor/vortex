@@ -32,6 +32,7 @@ use crate::utils::test_helpers::assert_close;
 use crate::utils::test_helpers::literal_vector_array;
 use crate::utils::test_helpers::tensor_array;
 use crate::utils::test_helpers::vector_array;
+use crate::utils::test_helpers::zero_width_vector_array;
 
 /// Evaluates L2 norm on a tensor/vector array and returns the result as `Vec<f64>`.
 fn eval_l2_norm(input: ArrayRef) -> VortexResult<Vec<f64>> {
@@ -40,6 +41,28 @@ fn eval_l2_norm(input: ArrayRef) -> VortexResult<Vec<f64>> {
     let mut ctx = SESSION.create_execution_ctx();
     let prim: PrimitiveArray = result.into_array().execute(&mut ctx)?;
     Ok(prim.as_slice::<f64>().to_vec())
+}
+
+#[test]
+fn inherent_constructors_remain_available() -> VortexResult<()> {
+    let _scalar_fn = L2Norm::new();
+    let array = L2Norm::try_new_array(tensor_array(&[1], &[3.0])?)?;
+
+    assert_eq!(array.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn zero_width_and_empty_inputs() -> VortexResult<()> {
+    assert_close(
+        &eval_l2_norm(zero_width_vector_array::<f64>(3)?)?,
+        &[0.0, 0.0, 0.0],
+    );
+    assert!(eval_l2_norm(vector_array(2, &[] as &[f64])?)?.is_empty());
+
+    let constant = Vector::constant_array::<f64>(&[], 3)?;
+    assert_close(&eval_l2_norm(constant)?, &[0.0, 0.0, 0.0]);
+    Ok(())
 }
 
 #[rstest]

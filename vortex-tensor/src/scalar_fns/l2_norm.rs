@@ -7,6 +7,7 @@ use prost::Message;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::arrays::ScalarFn as ScalarFnArrayEncoding;
+use vortex_array::arrays::ScalarFnArray;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayExt;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayView;
 use vortex_array::arrays::scalar_fn::plugin::ScalarFnArrayParts;
@@ -20,6 +21,7 @@ use vortex_array::scalar_fn::RowExecution;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
+use vortex_array::scalar_fn::TypedScalarFnInstance;
 use vortex_array::scalar_fn::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
 use vortex_error::VortexResult;
@@ -51,6 +53,23 @@ use crate::utils::validate_tensor_float_input;
 /// [`Normalized`]: crate::encodings::normalized::Normalized
 #[derive(Clone, Debug, Default)]
 pub struct L2Norm;
+
+impl L2Norm {
+    /// Creates a new [`TypedScalarFnInstance`] wrapping the L2 norm operation.
+    pub fn new() -> TypedScalarFnInstance<Self> {
+        TypedScalarFnInstance::new(Self, EmptyOptions)
+    }
+
+    /// Constructs a [`ScalarFnArray`] that lazily computes the L2 norm over `child`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the array cannot be constructed, such as when the input dtype is
+    /// unsupported.
+    pub fn try_new_array(child: ArrayRef) -> VortexResult<ScalarFnArray> {
+        ScalarFnArray::try_new(Self::new().erased(), vec![child])
+    }
+}
 
 impl RowFn for L2Norm {
     type Options = EmptyOptions;
