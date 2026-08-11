@@ -45,7 +45,9 @@ macro_rules! impl_row_fn_vtable {
             fn serialize(
                 &self,
                 options: &Self::Options,
-            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<Option<Vec<u8>>> {
+            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<
+                ::core::option::Option<::std::vec::Vec<u8>>,
+            > {
                 $crate::scalar_fn::RowFn::serialize(self, options)
             }
 
@@ -95,7 +97,7 @@ macro_rules! impl_row_fn_vtable {
                 _options: &Self::Options,
                 expression: &$crate::expr::Expression,
             ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<
-                Option<$crate::expr::Expression>,
+                ::core::option::Option<$crate::expr::Expression>,
             > {
                 $crate::expr::union_child_validities(expression)
             }
@@ -206,4 +208,52 @@ fn prepare_batch<F: RowFn>(
     Batch::new(RowFn::id(function), args, |arg_dtypes| {
         function.dispatch(options, arg_dtypes, PlanRows::<F>::new(arg_dtypes, options))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use vortex_error::VortexResult;
+    use vortex_error::vortex_bail;
+    use vortex_session::registry::CachedId;
+
+    use crate::dtype::DType;
+    use crate::scalar_fn::EmptyOptions;
+    use crate::scalar_fn::RowFn;
+    use crate::scalar_fn::RowVisitor;
+    use crate::scalar_fn::ScalarFnId;
+    use crate::scalar_fn::ScalarFnVTable;
+
+    struct Option;
+    struct Vec;
+
+    #[derive(Clone)]
+    struct ShadowedPrelude;
+
+    impl RowFn for ShadowedPrelude {
+        type Options = EmptyOptions;
+
+        const ARG_NAMES: &'static [&'static str] = &[];
+
+        fn id(&self) -> ScalarFnId {
+            static ID: CachedId = CachedId::new("test.shadowed_prelude");
+            *ID
+        }
+
+        fn dispatch<V: RowVisitor<Self::Options>>(
+            &self,
+            _options: &Self::Options,
+            _args: &[DType],
+            _visitor: V,
+        ) -> VortexResult<V::VisitResult> {
+            vortex_bail!("compile-only RowFn must not execute")
+        }
+    }
+
+    crate::impl_row_fn_vtable!(ShadowedPrelude);
+
+    #[test]
+    fn adapter_macro_ignores_shadowed_prelude_types() {
+        _ = (Option, Vec);
+        _ = ScalarFnVTable::id(&ShadowedPrelude);
+    }
 }

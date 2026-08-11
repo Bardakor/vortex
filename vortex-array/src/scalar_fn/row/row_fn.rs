@@ -24,14 +24,13 @@ use crate::scalar_fn::ScalarFnId;
 /// sink types for each accepted dtype combination.
 ///
 /// A `RowFn` does not automatically implement
-/// [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable). A function adopted by the expression
-/// system implements that trait explicitly, delegates its `return_dtype` method to
-/// [`row_fn_return_dtype`](crate::scalar_fn::row_fn_return_dtype), and delegates `execute` to
-/// [`execute_rows`](crate::scalar_fn::execute_rows). Explicit adoption leaves the function free to
-/// provide custom coercion, simplification, reduction, or formatting hooks. Implement only
-/// `ScalarFnVTable` when the natural kernel is columnar rather than row-oriented. A serializable
-/// adopter also delegates the vtable's `serialize` and `deserialize` methods to the matching
-/// methods below; an internal or non-serializable adopter can keep the vtable defaults.
+/// [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable). Invoke
+/// [`impl_row_fn_vtable!`](crate::impl_row_fn_vtable) to adopt its standard scalar-function
+/// behavior. A function that needs custom coercion, simplification, reduction, formatting, or
+/// validity hooks implements `ScalarFnVTable` itself and can delegate its `return_dtype` and
+/// `execute` methods to [`row_fn_return_dtype`](crate::scalar_fn::row_fn_return_dtype) and
+/// [`execute_rows`](crate::scalar_fn::execute_rows). Implement only `ScalarFnVTable` when the
+/// natural kernel is columnar rather than row-oriented.
 pub trait RowFn: 'static + Sized + Clone + Send + Sync {
     /// Options for this function, if any. Use [`EmptyOptions`](crate::scalar_fn::EmptyOptions)
     /// for none.
