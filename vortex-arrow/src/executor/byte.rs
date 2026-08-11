@@ -8,17 +8,16 @@ use arrow_array::GenericByteArray;
 use arrow_array::types::ByteArrayType;
 use arrow_buffer::ArrowNativeType;
 use arrow_buffer::Buffer as ArrowBuffer;
-use arrow_buffer::NullBuffer;
 use arrow_buffer::OffsetBuffer;
 use arrow_schema::DataType;
 use num_traits::AsPrimitive;
 use vortex_array::ArrayRef;
 use vortex_array::ArrayView;
-use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
-use vortex_array::arrays::Chunked;
-use vortex_array::arrays::Constant;
+use vortex_array::IntoArray;
+use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::VarBin;
+use vortex_array::arrays::primitive::PrimitiveArrayExt;
 use vortex_array::arrays::varbin::VarBinArraySlotsExt;
 use vortex_array::builders::VarBinBuilder;
 use vortex_array::builtins::ArrayBuiltins;
@@ -26,28 +25,14 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::OffsetBuilderPType;
-use vortex_array::matcher::Matcher;
+use vortex_array::match_each_integer_ptype;
+use vortex_array::vtable::VarBinExportable;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 
 use crate::executor::validity::to_arrow_null_buffer;
-
-/// Matches the encodings [`to_arrow_byte_array`] requires for export.
-///
-/// `Chunked` and `Constant` are matched to stop execution before it destroys them: they have
-/// specialized `append_to_builder` impls (chunk-wise append, scalar repeat) that the builder
-/// fallback exploits.
-struct ArrowByteExportable;
-
-impl Matcher for ArrowByteExportable {
-    type Match<'a> = &'a ArrayRef;
-
-    fn try_match(array: &ArrayRef) -> Option<Self::Match<'_>> {
-        (array.is::<VarBin>() || array.is::<Chunked>() || array.is::<Constant>()).then_some(array)
-    }
-}
 
 /// Convert a Vortex array into an Arrow GenericBinaryArray.
 pub(super) fn to_arrow_byte_array<T: ByteArrayType>(
@@ -72,9 +57,12 @@ where
     let target_is_utf8 = matches!(T::DATA_TYPE, DataType::Utf8 | DataType::LargeUtf8);
     let validate_utf8 = target_is_utf8 && !source_is_utf8;
 
-    let array = array.execute_until::<ArrowByteExportable>(ctx)?;
+    // Stop at an encoding that appends into the builder itself: operators like Filter and Slice
+    // still run and push down, but executing further would only reach a `VarBinView` that the
+    // builder has to re-lay out.
+    let array = array.execute_until::<dyn VarBinExportable>(ctx)?;
 
-    // If the Vortex array is in VarBin format, we can directly convert it.
+    // A VarBin array already has the Arrow layout, so its buffers can be handed over as they are.
     if let Some(array) = array.as_opt::<VarBin>() {
         return varbin_to_byte_array::<T>(array, validate_utf8, ctx);
     }
@@ -98,21 +86,14 @@ fn varbin_to_byte_array<T: ByteArrayType>(
 where
     T::Offset: NativePType,
 {
-    // We must cast the offsets to the required offset type.
-    let offsets = array
-        .offsets()
-        .cast(DType::Primitive(T::Offset::PTYPE, Nullability::NonNullable))?
-        .execute::<Canonical>(ctx)?
-        .into_primitive()
-        .to_buffer::<T::Offset>()
-        .into_arrow_offset_buffer();
+    let offsets = to_arrow_offsets::<T::Offset>(array.offsets(), ctx)?;
 
     let data = array.bytes().clone().into_arrow_buffer();
 
-    let null_buffer = to_arrow_null_buffer(array.validity()?, array.len(), ctx)?;
     if validate_utf8 {
-        validate_live_values_utf8::<T>(&offsets, &data, null_buffer.as_ref())?;
+        validate_values_utf8::<T>(&offsets, &data)?;
     }
+    let null_buffer = to_arrow_null_buffer(array.validity()?, array.len(), ctx)?;
     // SAFETY: `T::DATA_TYPE` is a `Utf8` variant only when the source dtype already guarantees the
     // bytes are UTF-8, or when `validate_utf8` made us prove it above.
     Ok(Arc::new(unsafe {
@@ -120,55 +101,75 @@ where
     }))
 }
 
-/// Checks that every non-null value spanned by `offsets` is valid UTF-8.
+/// Converts a `VarBin` array's offsets into an Arrow offsets buffer.
 ///
-/// [`GenericByteArray::try_new`] would instead validate the whole byte range the offsets span,
-/// which also covers the extents of null slots. Those bytes are never exposed as a value, and
-/// Vortex only requires non-null values to be UTF-8 (see `VarBinArray::validate_utf8`), so
-/// checking them would reject perfectly well-formed exports.
-fn validate_live_values_utf8<T: ByteArrayType>(
+/// `VarBin` offsets are usually unsigned whereas Arrow's are signed. Casting between the two is a
+/// reinterpret, but it scans the whole buffer to prove every value fits; offsets are non-decreasing,
+/// so checking the last one proves the same thing.
+fn to_arrow_offsets<O: NativePType + ArrowNativeType>(
+    offsets: &ArrayRef,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<OffsetBuffer<O>> {
+    let offsets = offsets.clone().execute::<PrimitiveArray>(ctx)?;
+    let offsets = if offsets.ptype() == O::PTYPE {
+        offsets
+    } else if offsets.ptype() == O::PTYPE.to_unsigned() {
+        let last = last_offset(&offsets);
+        vortex_ensure!(
+            <O as ArrowNativeType>::from_usize(last).is_some(),
+            "Offset {last} does not fit in the Arrow offset type {}",
+            O::PTYPE
+        );
+        offsets.reinterpret_cast(O::PTYPE)
+    } else {
+        offsets
+            .into_array()
+            .cast(DType::Primitive(O::PTYPE, Nullability::NonNullable))?
+            .execute::<PrimitiveArray>(ctx)?
+    };
+
+    Ok(offsets.to_buffer::<O>().into_arrow_offset_buffer())
+}
+
+/// Reads the last offset, which bounds every other offset since offsets are non-decreasing.
+fn last_offset(offsets: &PrimitiveArray) -> usize {
+    match_each_integer_ptype!(offsets.ptype(), |O| {
+        offsets.to_buffer::<O>().last().map_or(0, |last| last.as_())
+    })
+}
+
+/// Checks that every value spanned by `offsets` is valid UTF-8, null slots included.
+///
+/// Vortex only requires non-null values to be UTF-8, but [`GenericByteArray::value`] reinterprets
+/// any slot's bytes unchecked, so skipping null slots would hand out a malformed `&str`.
+///
+/// Every byte the offsets span belongs to some slot, so one pass validates all of them. The offsets
+/// then only have to land on character boundaries, which stops `value(i)` from slicing a multi-byte
+/// character in half.
+fn validate_values_utf8<T: ByteArrayType>(
     offsets: &OffsetBuffer<T::Offset>,
     values: &ArrowBuffer,
-    nulls: Option<&NullBuffer>,
 ) -> VortexResult<()> {
-    let value_at = |index: usize, start: usize, end: usize| -> VortexResult<&[u8]> {
-        values
-            .get(start..end)
-            .ok_or_else(|| vortex_err!("Offsets {start}..{end} at index {index} are out of bounds"))
-    };
-
-    let Some(nulls) = nulls.filter(|nulls| nulls.null_count() > 0) else {
-        // With no nulls every byte the offsets span belongs to a value, so a single pass validates
-        // all of them at once. The offsets then only have to land on character boundaries, which
-        // is what stops `value(i)` from slicing a multi-byte character in half.
-        let (Some(first), Some(last)) = (offsets.first(), offsets.last()) else {
-            return Ok(());
-        };
-        let start = first.as_usize();
-        let bytes = value_at(0, start, last.as_usize())?;
-        let validated = utf8_from_bytes(bytes)
-            .map_err(|err| vortex_err!("Encountered non UTF-8 data: {err}"))?;
-        for (index, offset) in offsets.iter().enumerate() {
-            let boundary = offset
-                .as_usize()
-                .checked_sub(start)
-                .filter(|boundary| validated.is_char_boundary(*boundary));
-            vortex_ensure!(
-                boundary.is_some(),
-                "Offset {} at index {index} does not fall on a UTF-8 character boundary",
-                offset.as_usize()
-            );
-        }
+    let (Some(first), Some(last)) = (offsets.first(), offsets.last()) else {
         return Ok(());
     };
-
-    for (index, window) in offsets.windows(2).enumerate() {
-        if nulls.is_null(index) {
-            continue;
-        }
-        let bytes = value_at(index, window[0].as_usize(), window[1].as_usize())?;
-        utf8_from_bytes(bytes)
-            .map_err(|err| vortex_err!("Encountered non UTF-8 data at index {index}: {err}"))?;
+    let start = first.as_usize();
+    let end = last.as_usize();
+    let bytes = values
+        .get(start..end)
+        .ok_or_else(|| vortex_err!("Offsets {start}..{end} are out of bounds"))?;
+    let validated =
+        utf8_from_bytes(bytes).map_err(|err| vortex_err!("Encountered non UTF-8 data: {err}"))?;
+    for (index, offset) in offsets.iter().enumerate() {
+        let boundary = offset
+            .as_usize()
+            .checked_sub(start)
+            .filter(|boundary| validated.is_char_boundary(*boundary));
+        vortex_ensure!(
+            boundary.is_some(),
+            "Offset {} at index {index} does not fall on a UTF-8 character boundary",
+            offset.as_usize()
+        );
     }
     Ok(())
 }
@@ -404,15 +405,13 @@ mod tests {
         Ok(())
     }
 
-    /// The `VarBin` fast path hands Arrow the untrimmed bytes buffer, so a `Binary` to `Utf8`
-    /// export must not validate bytes that no live value points at.
+    /// Arrow's `value(i)` reinterprets a null slot's bytes just like any other slot's, so a
+    /// `Binary` to `Utf8` export has to reject invalid bytes even where the slot is null.
     #[rstest]
     #[case(DataType::Utf8)]
     #[case(DataType::LargeUtf8)]
-    fn varbin_binary_to_string_ignores_bytes_outside_values(
-        #[case] target_dtype: DataType,
-    ) -> VortexResult<()> {
-        // Slot 1 is null and its offsets still span two bytes that are not valid UTF-8.
+    fn varbin_binary_to_string_validates_null_slots(#[case] target_dtype: DataType) {
+        // Slot 1 is null and its offsets span two bytes that are not valid UTF-8.
         let array = VarBinArray::new(
             buffer![0i32, 5, 7, 12].into_array(),
             ByteBuffer::copy_from(b"hello\xff\xfeworld".as_slice()),
@@ -423,12 +422,85 @@ mod tests {
         let session = array_session();
         let mut ctx = session.create_execution_ctx();
         let field = Field::new("test_field", target_dtype, true);
+        let result = session
+            .arrow()
+            .execute_arrow(array.into_array(), Some(&field), &mut ctx);
+
+        assert!(result.is_err());
+    }
+
+    /// The `VarBin` fast path hands Arrow the untrimmed bytes buffer, so a `Binary` to `Utf8`
+    /// export must not validate bytes that lie outside the range the offsets span.
+    #[rstest]
+    #[case(DataType::Utf8)]
+    #[case(DataType::LargeUtf8)]
+    fn varbin_binary_to_string_ignores_bytes_outside_offsets(
+        #[case] target_dtype: DataType,
+    ) -> VortexResult<()> {
+        let array = VarBinArray::new(
+            buffer![0i32, 5, 10].into_array(),
+            ByteBuffer::copy_from(b"helloworld\xff\xfe".as_slice()),
+            DType::Binary(Nullability::NonNullable),
+            Validity::NonNullable,
+        );
+
+        let session = array_session();
+        let mut ctx = session.create_execution_ctx();
+        let field = Field::new("test_field", target_dtype.clone(), false);
+        let arrow = session
+            .arrow()
+            .execute_arrow(array.into_array(), Some(&field), &mut ctx)?;
+
+        let values: Vec<&str> = match target_dtype {
+            DataType::Utf8 => (0..2).map(|i| arrow.as_string::<i32>().value(i)).collect(),
+            _ => (0..2).map(|i| arrow.as_string::<i64>().value(i)).collect(),
+        };
+        assert_eq!(values, ["hello", "world"]);
+        Ok(())
+    }
+
+    /// Unsigned `VarBin` offsets are reinterpreted rather than cast, so the values must survive it.
+    #[rstest]
+    #[case::utf8(DataType::Utf8)]
+    #[case::large_utf8(DataType::LargeUtf8)]
+    #[case::binary(DataType::Binary)]
+    #[case::large_binary(DataType::LargeBinary)]
+    fn unsigned_varbin_offsets_export(#[case] target_dtype: DataType) -> VortexResult<()> {
+        let array = VarBinArray::new(
+            buffer![0u32, 5, 5, 10].into_array(),
+            ByteBuffer::copy_from(b"helloworld".as_slice()),
+            DType::Utf8(Nullability::Nullable),
+            Validity::from_mask(Mask::from_iter([true, false, true]), Nullability::Nullable),
+        );
+
+        let session = array_session();
+        let mut ctx = session.create_execution_ctx();
+        let field = Field::new("test_field", target_dtype.clone(), true);
         let arrow = session
             .arrow()
             .execute_arrow(array.into_array(), Some(&field), &mut ctx)?;
 
         assert_eq!(arrow.len(), 3);
         assert!(arrow.is_null(1));
+        let values: Vec<&[u8]> = match target_dtype {
+            DataType::Utf8 => vec![
+                arrow.as_string::<i32>().value(0).as_bytes(),
+                arrow.as_string::<i32>().value(2).as_bytes(),
+            ],
+            DataType::LargeUtf8 => vec![
+                arrow.as_string::<i64>().value(0).as_bytes(),
+                arrow.as_string::<i64>().value(2).as_bytes(),
+            ],
+            DataType::Binary => vec![
+                arrow.as_binary::<i32>().value(0),
+                arrow.as_binary::<i32>().value(2),
+            ],
+            _ => vec![
+                arrow.as_binary::<i64>().value(0),
+                arrow.as_binary::<i64>().value(2),
+            ],
+        };
+        assert_eq!(values, [b"hello".as_slice(), b"world".as_slice()]);
         Ok(())
     }
 
