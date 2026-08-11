@@ -15,11 +15,19 @@ use divan::Bencher;
 use divan::counter::ItemsCount;
 use mimalloc::MiMalloc;
 use vortex_array::ArrayRef;
+use vortex_array::EmptyMetadata;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
+use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::FixedSizeListArray;
 use vortex_array::arrays::MaskedArray;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
+use vortex_array::dtype::DType;
+use vortex_array::dtype::Nullability;
+use vortex_array::dtype::PType;
+use vortex_array::scalar::Scalar;
+use vortex_array::scalar_fn::EmptyOptions;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_tensor::scalar_fns::inner_product::InnerProduct;
@@ -56,15 +64,25 @@ fn vectors(width: usize, seed: usize) -> ArrayRef {
     Vector::try_new_vector_array(storage).unwrap()
 }
 
+fn constant_vector(width: usize) -> ArrayRef {
+    let element_dtype = DType::Primitive(PType::F64, Nullability::NonNullable);
+    let children = (0..width)
+        .map(|i| Scalar::primitive(((i % 97) as f64) - 48.0, Nullability::NonNullable))
+        .collect();
+    let storage = Scalar::fixed_size_list(element_dtype, children, Nullability::NonNullable);
+    let vector = Scalar::extension::<Vector>(EmptyMetadata, storage);
+    ConstantArray::new(vector, ELEMENTS / width).into_array()
+}
+
 fn bench_inner_product(bencher: Bencher, lhs: ArrayRef, rhs: ArrayRef) {
     let session = vortex_array::array_session();
     bencher
         .counter(ItemsCount::new(lhs.len()))
         .with_inputs(|| {
             (
-                InnerProduct::try_new_array(lhs.clone(), rhs.clone())
-                    .unwrap()
-                    .into_array(),
+                InnerProduct
+                    .try_new_array(lhs.len(), EmptyOptions, [lhs.clone(), rhs.clone()])
+                    .unwrap(),
                 session.create_execution_ctx(),
             )
         })
@@ -83,4 +101,23 @@ fn nullable(bencher: Bencher, width: usize) {
         .unwrap()
         .into_array();
     bench_inner_product(bencher, lhs, vectors(width, 31));
+}
+
+#[divan::bench(args = WIDTHS)]
+fn column_x_constant(bencher: Bencher, width: usize) {
+    bench_inner_product(bencher, vectors(width, 0), constant_vector(width));
+}
+
+#[divan::bench(args = WIDTHS)]
+fn constant_x_column(bencher: Bencher, width: usize) {
+    bench_inner_product(bencher, constant_vector(width), vectors(width, 31));
+}
+
+#[divan::bench(args = WIDTHS)]
+fn column_x_nullable_constant(bencher: Bencher, width: usize) {
+    let validity = Validity::from_iter((0..ELEMENTS / width).map(|i| i % 8 != 0));
+    let rhs = MaskedArray::try_new(constant_vector(width), validity)
+        .unwrap()
+        .into_array();
+    bench_inner_product(bencher, vectors(width, 0), rhs);
 }

@@ -164,3 +164,20 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
         }
     }
 }
+
+/// Records which operands a test's prepare step received as batch constants.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Bit 0 records the lhs and bit 1 records the rhs. Thread-local storage prevents
+        /// concurrent tests from racing; row execution remains on the calling thread.
+        pub(crate) static SEEN_CONSTANTS: Cell<u8> = const { Cell::new(u8::MAX) };
+    }
+
+    /// Records whether each operand was constant for the current batch.
+    pub(crate) fn record(lhs_constant: bool, rhs_constant: bool) {
+        SEEN_CONSTANTS.set(u8::from(lhs_constant) | (u8::from(rhs_constant) << 1));
+    }
+}
