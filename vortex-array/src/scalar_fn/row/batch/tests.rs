@@ -51,6 +51,9 @@ struct NullarySeven;
 struct OriginalInputReducer;
 
 #[derive(Clone)]
+struct InvalidEncodedReduction;
+
+#[derive(Clone)]
 struct DeferredOriginalReducer;
 
 #[derive(Clone)]
@@ -258,6 +261,37 @@ impl RowFn for OriginalInputReducer {
     }
 }
 
+impl RowFn for InvalidEncodedReduction {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.invalid_encoded_reduction");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit::<(i64,), i64>(|(value,)| value)
+    }
+
+    fn reduce_encoded(
+        &self,
+        _options: &Self::Options,
+        _args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<RowExecution>> {
+        Ok(Some(RowExecution::Output(
+            PrimitiveArray::new(vec![10_i64, 20], Validity::from_iter([false, true])).into_array(),
+        )))
+    }
+}
+
 impl RowFn for DeferredOriginalReducer {
     type Options = EmptyOptions;
 
@@ -435,6 +469,31 @@ fn test_reduce_encoded_defers_errors_behind_nulls() -> VortexResult<()> {
     let actual = execute_rows(&DeferredOriginalReducer, &EmptyOptions, &args, &mut ctx)?;
 
     assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[rstest]
+#[case::all_valid(Validity::AllValid)]
+#[case::mixed(Validity::from_iter([true, false]))]
+fn test_reduce_encoded_rejects_nulls_on_valid_rows(#[case] validity: Validity) -> VortexResult<()> {
+    let input = PrimitiveArray::new(vec![10_i64, 20], validity).into_array();
+    let args = VecExecutionArgs::new(vec![input], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let error = match execute_rows(&InvalidEncodedReduction, &EmptyOptions, &args, &mut ctx) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("an encoded reduction introduced a null on a valid row"),
+    };
+    let error = error.to_string();
+
+    assert!(
+        error.contains("test.invalid_encoded_reduction"),
+        "the boundary error must name the function, got {error}",
+    );
+    assert!(
+        error.contains("encoded reduction produced nulls for valid rows"),
+        "the boundary error must identify invalid reduced output, got {error}",
+    );
     Ok(())
 }
 
