@@ -3,9 +3,7 @@
 
 //! Primitive comparison execution through [`RowFn`].
 
-#[cfg(target_arch = "x86_64")]
 mod columnar;
-#[cfg(target_arch = "x86_64")]
 mod operand;
 
 use vortex_error::VortexResult;
@@ -35,8 +33,49 @@ pub(super) fn compare_primitive(
     op: CompareOperator,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    #[cfg(target_arch = "x86_64")]
-    if use_columnar_comparison(lhs, rhs, op)? {
+    compare_primitive_with_path(lhs, rhs, op, PrimitiveComparisonPath::Auto, ctx)
+}
+
+/// Selects automatic production dispatch or a forced implementation in tests.
+#[derive(Clone, Copy)]
+pub(super) enum PrimitiveComparisonPath {
+    /// Use the architecture and operand-specific production policy.
+    Auto,
+
+    /// Force row execution.
+    #[cfg(test)]
+    Row,
+
+    /// Force fused columnar execution.
+    #[cfg(test)]
+    Columnar,
+}
+
+/// Compare primitives through the selected implementation.
+pub(super) fn compare_primitive_with_path(
+    lhs: &ArrayRef,
+    rhs: &ArrayRef,
+    op: CompareOperator,
+    path: PrimitiveComparisonPath,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ArrayRef> {
+    let use_columnar = match path {
+        PrimitiveComparisonPath::Auto => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                use_columnar_comparison(lhs, rhs, op)?
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        }
+        #[cfg(test)]
+        PrimitiveComparisonPath::Row => false,
+        #[cfg(test)]
+        PrimitiveComparisonPath::Columnar => true,
+    };
+    if use_columnar {
         return columnar::compare_primitive(lhs, rhs, op, ctx);
     }
 
@@ -73,7 +112,6 @@ impl RowFn for PrimitiveCompare {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn use_columnar_comparison(
     lhs: &ArrayRef,
     rhs: &ArrayRef,

@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use rstest::rstest;
 use vortex_buffer::BufferMut;
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_session::registry::CachedId;
 
@@ -29,6 +30,7 @@ use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::Nullability;
 use crate::scalar_fn::EmptyOptions;
+use crate::scalar_fn::OutputElement;
 use crate::scalar_fn::OutputSink;
 use crate::scalar_fn::RowFn;
 use crate::scalar_fn::RowVisitor;
@@ -50,6 +52,12 @@ struct OriginalInputReducer;
 struct DeferredOriginalReducer;
 
 #[derive(Clone)]
+struct InvalidKernelOutput;
+
+/// Deliberately violates [`OutputElement::build`] to test validation at the public boundary.
+struct NullProducingI64(i64);
+
+#[derive(Clone)]
 struct PreparedAdd {
     visit: PreparedVisit,
     prepares: Arc<AtomicUsize>,
@@ -60,6 +68,19 @@ enum PreparedVisit {
     Owned,
     Sink,
     Deferred,
+}
+
+impl OutputElement for NullProducingI64 {
+    fn element_dtype() -> DType {
+        DType::from(i64::PTYPE)
+    }
+
+    fn build(values: Vec<Self>) -> ArrayRef {
+        let values: Vec<_> = values.into_iter().map(|value| value.0).collect();
+        let validity = Validity::from_iter((0..values.len()).map(|index| index != 0));
+
+        PrimitiveArray::new(values, validity).into_array()
+    }
 }
 
 struct I64Sink(BufferMut<i64>);
@@ -225,6 +246,26 @@ impl RowFn for DeferredOriginalReducer {
         Ok(Some(RowExecution::DeferredError(vortex_err!(
             InvalidArgument: "encoded payload failed"
         ))))
+    }
+}
+
+impl RowFn for InvalidKernelOutput {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.invalid_kernel_output");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit::<(i64,), NullProducingI64>(|(value,)| NullProducingI64(value))
     }
 }
 
@@ -435,6 +476,45 @@ fn test_finalize_kernel_output_validates_shape_and_dtype() -> VortexResult<()> {
 
     let bools = BoolArray::from_iter([true, false]).into_array();
     assert!(finalize_kernel_output(*ID, &result_dtype, 2, bools).is_err());
+    Ok(())
+}
+
+#[test]
+fn test_nonnullable_kernel_output_rejects_nulls_at_function_boundary() -> VortexResult<()> {
+    let input = PrimitiveArray::from_iter([1_i64, 2]).into_array();
+
+    assert_invalid_kernel_output(input)
+}
+
+#[test]
+fn test_all_valid_kernel_output_rejects_nulls_at_function_boundary() -> VortexResult<()> {
+    let input = PrimitiveArray::new(vec![1_i64, 2], Validity::AllValid).into_array();
+
+    assert_invalid_kernel_output(input)
+}
+
+#[track_caller]
+fn assert_invalid_kernel_output(input: ArrayRef) -> VortexResult<()> {
+    let args = VecExecutionArgs::new(vec![input], 2);
+    let mut ctx = array_session().create_execution_ctx();
+    let execution = ScalarFnVTable::execute(&InvalidKernelOutput, &EmptyOptions, &args, &mut ctx);
+    let error = match execution {
+        Err(error) => error,
+        Ok(output) => match output.execute::<PrimitiveArray>(&mut ctx) {
+            Err(error) => error,
+            Ok(_) => vortex_bail!("an invalid row kernel output passed boundary validation"),
+        },
+    };
+    let error = error.to_string();
+
+    assert!(
+        error.contains("test.invalid_kernel_output"),
+        "the boundary error must name the function, got {error}",
+    );
+    assert!(
+        error.contains("row kernel produced nulls for valid rows"),
+        "the boundary error must identify invalid row output, got {error}",
+    );
     Ok(())
 }
 

@@ -7,11 +7,14 @@ use rstest::rstest;
 use vortex_buffer::BitBuffer;
 use vortex_buffer::buffer;
 use vortex_error::VortexExpect;
+use vortex_error::VortexResult;
 
 use crate::ArrayRef;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
+use crate::array::VTable;
 use crate::array_session;
+use crate::arrays::Bool;
 use crate::arrays::BoolArray;
 use crate::arrays::ConstantArray;
 use crate::arrays::DecimalArray;
@@ -20,6 +23,7 @@ use crate::arrays::FixedSizeListArray;
 use crate::arrays::ListArray;
 use crate::arrays::ListViewArray;
 use crate::arrays::PrimitiveArray;
+use crate::arrays::ScalarFn;
 use crate::arrays::StructArray;
 use crate::arrays::VarBinArray;
 use crate::arrays::VarBinViewArray;
@@ -36,6 +40,8 @@ use crate::extension::datetime::Timestamp;
 use crate::extension::datetime::TimestampOptions;
 use crate::scalar::DecimalValue;
 use crate::scalar::Scalar;
+use crate::scalar_fn::fns::binary::compare::primitive::PrimitiveComparisonPath;
+use crate::scalar_fn::fns::binary::compare::primitive::compare_primitive_with_path;
 use crate::scalar_fn::fns::binary::scalar_cmp;
 use crate::scalar_fn::fns::operators::CompareOperator;
 use crate::scalar_fn::fns::operators::Operator;
@@ -424,6 +430,70 @@ fn float_total_order() {
         BoolArray::from_iter([false, false, true, true]),
         &mut ctx
     );
+}
+
+#[rstest]
+#[case::row(PrimitiveComparisonPath::Row)]
+#[case::columnar(PrimitiveComparisonPath::Columnar)]
+fn test_primitive_comparison_paths_preserve_semantics_and_encoding(
+    #[case] path: PrimitiveComparisonPath,
+) -> VortexResult<()> {
+    let lhs = PrimitiveArray::new(
+        vec![
+            f64::NAN, // Equal NaNs.
+            f64::NAN, // Null on the left.
+            -0.0,     // Signed zero ordering.
+            1.0,      // A finite value below NaN.
+            f64::NAN, // Null on the right.
+        ],
+        Validity::from_iter([
+            true,  //
+            false, //
+            true,  //
+            true,  //
+            true,  //
+        ]),
+    )
+    .into_array();
+    let rhs = PrimitiveArray::new(
+        vec![
+            f64::NAN,      // Equal NaNs.
+            f64::INFINITY, // Null on the left.
+            0.0,           // Signed zero ordering.
+            f64::NAN,      // A finite value below NaN.
+            1.0,           // Null on the right.
+        ],
+        Validity::from_iter([
+            true,  //
+            true,  //
+            true,  //
+            true,  //
+            false, //
+        ]),
+    )
+    .into_array();
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = compare_primitive_with_path(&lhs, &rhs, CompareOperator::Lt, path, &mut ctx)?;
+    let expected = BoolArray::from_iter([
+        Some(false), //
+        None,        //
+        Some(true),  //
+        Some(true),  //
+        None,        //
+    ]);
+
+    assert_arrays_eq!(&actual, &expected, &mut ctx);
+    assert_eq!(actual.dtype(), &DType::Bool(Nullability::Nullable));
+
+    // This encoding difference is intentional: the fused path materializes bits and validity
+    // together, while the RowFn path keeps masking lazy.
+    match path {
+        PrimitiveComparisonPath::Columnar => assert_eq!(actual.encoding_id(), Bool.id()),
+        PrimitiveComparisonPath::Row => assert!(actual.as_opt::<ScalarFn>().is_some()),
+        PrimitiveComparisonPath::Auto => unreachable!(),
+    }
+    Ok(())
 }
 
 #[rstest]
