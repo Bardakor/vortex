@@ -145,8 +145,6 @@ impl RowFn for InnerProduct {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(InnerProduct);
-
 impl ScalarFnArrayVTable for InnerProduct {
     fn serialize(
         &self,

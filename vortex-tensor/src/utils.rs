@@ -65,7 +65,7 @@ pub fn unit_norm_tolerance(element_ptype: PType, dimensions: usize) -> f64 {
 /// Computes `sqrt(sum(v_i^2))` for one row. An empty or all-zero row produces `0.0`.
 ///
 /// L2 norm and cosine similarity share this implementation so prepared constant norms use the
-/// same accumulation order as varying rows.
+/// same accumulation order as rows from per-row inputs.
 pub(crate) fn l2_norm_row<T: Float + NativePType>(row: &[T]) -> T {
     let mut sum_squared = T::zero();
     for &element in row {

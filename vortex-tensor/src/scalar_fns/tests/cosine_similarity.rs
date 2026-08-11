@@ -490,7 +490,7 @@ fn vector_constant_matches_plain() -> VortexResult<()> {
 }
 
 /// Both literal and extension-wrapped constant storage reach the prepared row path. The probe
-/// ensures that the literal query remains a batch constant instead of becoming a varying column.
+/// ensures that the literal query remains a batch constant instead of becoming a per-row column.
 ///
 /// [`ConstantArray`]: vortex_array::arrays::ConstantArray
 #[test]
