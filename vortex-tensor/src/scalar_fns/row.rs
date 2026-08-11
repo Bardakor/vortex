@@ -19,6 +19,7 @@ use vortex_array::dtype::PType;
 use vortex_array::scalar_fn::InputElement;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure_eq;
 
 use crate::utils::extract_flat_elements;
@@ -95,11 +96,28 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
         let stride = flat.row_stride();
         let elements = flat.into_buffer::<T>();
 
-        debug_assert!(if stride == 0 {
-            elements.len() == list_size
+        let expected_elements = if stride == 0 {
+            list_size
         } else {
-            stride == list_size && rows.checked_mul(stride) == Some(elements.len())
-        });
+            vortex_ensure_eq!(
+                stride,
+                list_size,
+                "varying tensor row stride must equal its width, got {stride}",
+            );
+            let Some(expected_elements) = rows.checked_mul(stride) else {
+                vortex_bail!(
+                    "tensor row storage length must fit usize, got {rows} rows of width {stride}",
+                );
+            };
+
+            expected_elements
+        };
+        vortex_ensure_eq!(
+            elements.len(),
+            expected_elements,
+            "tensor row storage must contain {expected_elements} elements, got {}",
+            elements.len(),
+        );
 
         Ok(TensorRows {
             elements,
