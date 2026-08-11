@@ -23,11 +23,11 @@ use crate::dtype::NativePType;
 use crate::dtype::PType;
 use crate::match_each_native_ptype;
 use crate::scalar::NumericOperator;
+use crate::scalar_fn::BorrowedExecutionArgs;
 use crate::scalar_fn::RowFn;
 use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::VecExecutionArgs;
 use crate::scalar_fn::execute_rows;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::row::InitializedElement;
@@ -39,7 +39,8 @@ pub(super) fn execute_numeric_primitive(
     op: NumericOperator,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    let args = VecExecutionArgs::new(vec![lhs.clone(), rhs.clone()], lhs.len());
+    let inputs = [lhs.clone(), rhs.clone()];
+    let args = BorrowedExecutionArgs::new(&inputs, lhs.len());
 
     execute_rows(&NumericBinary, &op, &args, ctx)
 }
