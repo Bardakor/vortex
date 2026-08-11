@@ -54,11 +54,10 @@ impl<T: Copy> IndexedSource for &mut [T] {
 
 /// Pair of two [`IndexedSource`]s of equal length. Yields `(A::Item, B::Item)` per lane.
 ///
-/// Use this to drive a binary kernel from two columns. [`LaneZip::new`] enforces length equality
-/// at construction, and [`IndexedSource::len`] checks it for callers of the public tuple
-/// constructor.
+/// Use this to drive a binary kernel from two columns. Length equality is enforced at
+/// construction, and the private fields prevent callers from bypassing that check.
 #[derive(Clone, Copy)]
-pub struct LaneZip<A, B>(pub A, pub B);
+pub struct LaneZip<A, B>(A, B);
 
 impl<A: IndexedSource, B: IndexedSource> LaneZip<A, B> {
     /// Build a `LaneZip` from two equal-length sources.
@@ -80,28 +79,22 @@ impl<A: IndexedSource, B: IndexedSource> IndexedSource for LaneZip<A, B> {
     type Item = (A::Item, B::Item);
     #[inline]
     fn len(&self) -> usize {
-        assert_eq!(
-            self.0.len(),
-            self.1.len(),
-            "LaneZip operands must have the same length"
-        );
         self.0.len()
     }
     #[inline]
     unsafe fn get_unchecked(&self, i: usize) -> (A::Item, B::Item) {
-        // SAFETY: caller guarantees i < self.len(), which also verifies matching lengths.
+        // SAFETY: caller guarantees i < self.len(), and `new` enforces matching lengths.
         unsafe { (self.0.get_unchecked(i), self.1.get_unchecked(i)) }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::IndexedSource;
     use super::LaneZip;
 
     #[test]
     #[should_panic(expected = "LaneZip operands must have the same length")]
-    fn direct_construction_checks_lengths() {
-        LaneZip(&[1_u8][..], &[2_u8, 3][..]).len();
+    fn rejects_mismatched_lengths() {
+        _ = LaneZip::new(&[1_u8][..], &[2_u8, 3][..]);
     }
 }

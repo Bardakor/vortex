@@ -247,7 +247,11 @@ mod tests {
 
     #[test]
     fn test_is_not_null_is_not_strict() {
-        assert!(!is_not_null(col("a")).signature().is_strict());
+        assert!(
+            !is_not_null(col("a"))
+                .as_scalar()
+                .is_some_and(|f| f.signature().is_strict())
+        );
     }
 
     #[test]
