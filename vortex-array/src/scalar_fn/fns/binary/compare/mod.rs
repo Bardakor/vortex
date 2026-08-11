@@ -4,9 +4,9 @@
 //! Native comparison kernels.
 //!
 //! [`execute_compare`] dispatches on the logical [`DType`] of its operands and evaluates every
-//! comparison directly over Vortex canonical arrays — bit buffers for booleans, lane kernels from
-//! `vortex-compute` for primitives and decimals, binary views for strings/bytes, and a row-wise
-//! comparator for nested types. There is no Arrow fallback.
+//! comparison directly over Vortex canonical arrays: bit buffers for booleans, row or fused lane
+//! kernels for primitives, lane kernels for decimals, binary views for strings and bytes, and a
+//! row-wise comparator for nested types. There is no Arrow fallback.
 //!
 //! Floating point values compare with Vortex's total ordering (`NaN` is the largest value,
 //! `-0.0 < +0.0`, and equality is bitwise), matching [`Scalar`] comparison semantics.

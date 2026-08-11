@@ -15,11 +15,11 @@ use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::PType;
 use crate::match_each_native_ptype;
+use crate::scalar_fn::BorrowedExecutionArgs;
 use crate::scalar_fn::RowFn;
 use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::VecExecutionArgs;
 use crate::scalar_fn::execute_rows;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::operators::CompareOperator;
@@ -80,7 +80,8 @@ pub(super) fn compare_primitive_with_path(
         return columnar::compare_primitive(lhs, rhs, op, ctx);
     }
 
-    let args = VecExecutionArgs::new(vec![lhs.clone(), rhs.clone()], lhs.len());
+    let inputs = [lhs.clone(), rhs.clone()];
+    let args = BorrowedExecutionArgs::new(&inputs, lhs.len());
 
     execute_rows(&PrimitiveCompare, &op, &args, ctx)
 }
