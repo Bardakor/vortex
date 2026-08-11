@@ -26,20 +26,20 @@ pub use tuple::batch_constant;
 ///
 /// # Safety
 ///
-/// For every view returned by [`varying`](Self::varying), every index below
-/// [`varying_len`](Self::varying_len) **must** satisfy the safety contract of
-/// [`get_varying_unchecked`](Self::get_varying_unchecked). Shared execution relies on this proof to
-/// perform unchecked reads after one pre-loop length check.
+/// For every view returned by [`view`](Self::view), every index below
+/// [`view_len`](Self::view_len) **must** satisfy the safety contract of
+/// [`get_from_view_unchecked`](Self::get_from_view_unchecked). Shared execution relies on this
+/// proof to perform unchecked reads after one pre-loop length check.
 pub unsafe trait InputElement: 'static {
     /// The decoded column representation supporting `O(1)` row access.
     type Column;
 
-    /// The view of a varying decoded column read by the hot row loop.
+    /// The view of a per-row decoded column read by the hot row loop.
     ///
     /// This may borrow a cheaper representation than [`Column`](Self::Column). Primitive elements,
     /// for example, expose a slice so its pointer and length are loop invariants rather than
     /// re-reading a [`Buffer`](vortex_buffer::Buffer) descriptor for every row.
-    type Varying<'a>;
+    type View<'a>;
 
     /// The borrowed element value handed to a row closure.
     type Elem<'a>;
@@ -48,8 +48,8 @@ pub unsafe trait InputElement: 'static {
     ///
     /// Arrays only guarantee payloads for valid rows. This is `false` when a null row's stored
     /// offset or pointer may not address anything, and `true` only when [`decode`](Self::decode),
-    /// [`get`](Self::get), [`varying`](Self::varying), [`varying_len`](Self::varying_len), and
-    /// [`get_varying`](Self::get_varying) remain safe and correct for null rows.
+    /// [`get`](Self::get), [`view`](Self::view), [`view_len`](Self::view_len), and
+    /// [`get_from_view`](Self::get_from_view) remain safe and correct for null rows.
     ///
     /// Dense execution requires this of every argument; otherwise the row layer executes only
     /// valid rows.
@@ -105,16 +105,16 @@ pub unsafe trait InputElement: 'static {
     ///
     /// Called once before the hot loop. Constants do not use this view because the tuple adapter
     /// keeps their one-row decoded representation separate.
-    fn varying(column: &Self::Column) -> Self::Varying<'_>;
+    fn view(column: &Self::Column) -> Self::View<'_>;
 
-    /// Number of rows addressable through a [`Varying`](Self::Varying) view.
+    /// Number of rows addressable through a [`View`](Self::View).
     ///
     /// Every index below this length must be valid for
-    /// [`get_varying_unchecked`](Self::get_varying_unchecked).
-    fn varying_len(column: &Self::Varying<'_>) -> usize;
+    /// [`get_from_view_unchecked`](Self::get_from_view_unchecked).
+    fn view_len(view: &Self::View<'_>) -> usize;
 
-    /// Read one row from a [`Varying`](Self::Varying) view.
-    fn get_varying<'a>(column: &Self::Varying<'a>, index: usize) -> Self::Elem<'a>
+    /// Read one row from a [`View`](Self::View).
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> Self::Elem<'a>
     where
         Self: 'a;
 
@@ -122,12 +122,12 @@ pub unsafe trait InputElement: 'static {
     ///
     /// # Safety
     ///
-    /// `index` must be less than [`varying_len`](Self::varying_len) for `column`.
-    unsafe fn get_varying_unchecked<'a>(column: &Self::Varying<'a>, index: usize) -> Self::Elem<'a>
+    /// `index` must be less than [`view_len`](Self::view_len) for `view`.
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> Self::Elem<'a>
     where
         Self: 'a,
     {
-        Self::get_varying(column, index)
+        Self::get_from_view(view, index)
     }
 }
 

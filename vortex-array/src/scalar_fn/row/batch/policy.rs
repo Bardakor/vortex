@@ -85,11 +85,11 @@ mod tests {
 
     struct SparseFallibleElement;
 
-    // SAFETY: the varying view reports length zero, so no index satisfies the unchecked-read
+    // SAFETY: the per-row view reports length zero, so no index satisfies the unchecked-read
     // precondition.
     unsafe impl InputElement for SparseFallibleElement {
         type Column = ();
-        type Varying<'a> = ();
+        type View<'a> = ();
         type Elem<'a> = ();
 
         const DENSE_SAFE: bool = false;
@@ -105,13 +105,13 @@ mod tests {
 
         fn get(_column: &Self::Column, _index: usize) -> Self::Elem<'_> {}
 
-        fn varying(_column: &Self::Column) -> Self::Varying<'_> {}
+        fn view(_column: &Self::Column) -> Self::View<'_> {}
 
-        fn varying_len(_column: &Self::Varying<'_>) -> usize {
+        fn view_len(_view: &Self::View<'_>) -> usize {
             0
         }
 
-        fn get_varying<'a>(_column: &Self::Varying<'a>, _index: usize) -> Self::Elem<'a> {}
+        fn get_from_view<'a>(_view: &Self::View<'a>, _index: usize) -> Self::Elem<'a> {}
     }
 
     #[test]

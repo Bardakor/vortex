@@ -19,13 +19,6 @@ use crate::scalar_fn::fns::ext_storage::ExtStorage;
 use crate::scalar_fn::fns::get_item::GetItem;
 use crate::scalar_fn::fns::literal::Literal;
 
-/// Reexports used by [`impl_row_fn_vtable!`] without downstream transitive dependencies.
-#[doc(hidden)]
-pub mod row_fn_macro_support {
-    pub use vortex_error::VortexResult;
-    pub use vortex_session::VortexSession;
-}
-
 mod vtable;
 pub use vtable::*;
 

@@ -17,10 +17,10 @@ use crate::scalar_fn::InputElement;
 use crate::scalar_fn::OutputElement;
 use crate::validity::Validity;
 
-// SAFETY: the varying view is a native slice, and its reported length is the slice length.
+// SAFETY: the per-row view is a native slice, and its reported length is the slice length.
 unsafe impl<T: NativePType> InputElement for T {
     type Column = Buffer<T>;
-    type Varying<'a> = &'a [T];
+    type View<'a> = &'a [T];
     type Elem<'a> = T;
 
     // Every lane of the buffer holds a `T`, valid or not.
@@ -48,27 +48,27 @@ unsafe impl<T: NativePType> InputElement for T {
         column[index]
     }
 
-    fn varying(column: &Self::Column) -> Self::Varying<'_> {
+    fn view(column: &Self::Column) -> Self::View<'_> {
         column.as_slice()
     }
 
-    fn varying_len(column: &Self::Varying<'_>) -> usize {
-        column.len()
+    fn view_len(view: &Self::View<'_>) -> usize {
+        view.len()
     }
 
-    fn get_varying<'a>(column: &Self::Varying<'a>, index: usize) -> T
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> T
     where
         Self: 'a,
     {
-        column[index]
+        view[index]
     }
 
-    unsafe fn get_varying_unchecked<'a>(column: &Self::Varying<'a>, index: usize) -> T
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> T
     where
         Self: 'a,
     {
         // SAFETY: forwarded from this method's contract.
-        unsafe { *column.get_unchecked(index) }
+        unsafe { *view.get_unchecked(index) }
     }
 }
 

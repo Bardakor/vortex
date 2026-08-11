@@ -15,10 +15,10 @@ use crate::scalar_fn::InputElement;
 use crate::scalar_fn::OutputElement;
 use crate::validity::Validity;
 
-// SAFETY: the varying view is a bit buffer, and its reported length is the buffer length.
+// SAFETY: the per-row view is a bit buffer, and its reported length is the buffer length.
 unsafe impl InputElement for bool {
     type Column = BitBuffer;
-    type Varying<'a> = &'a BitBuffer;
+    type View<'a> = &'a BitBuffer;
     type Elem<'a> = bool;
 
     // Every bit of the buffer is readable, valid or not.
@@ -41,27 +41,27 @@ unsafe impl InputElement for bool {
         column.value(index)
     }
 
-    fn varying(column: &Self::Column) -> Self::Varying<'_> {
+    fn view(column: &Self::Column) -> Self::View<'_> {
         column
     }
 
-    fn varying_len(column: &Self::Varying<'_>) -> usize {
-        column.len()
+    fn view_len(view: &Self::View<'_>) -> usize {
+        view.len()
     }
 
-    fn get_varying<'a>(column: &Self::Varying<'a>, index: usize) -> bool
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> bool
     where
         Self: 'a,
     {
-        column.value(index)
+        view.value(index)
     }
 
-    unsafe fn get_varying_unchecked<'a>(column: &Self::Varying<'a>, index: usize) -> bool
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> bool
     where
         Self: 'a,
     {
         // SAFETY: forwarded from this method's contract.
-        unsafe { column.value_unchecked(index) }
+        unsafe { view.value_unchecked(index) }
     }
 }
 

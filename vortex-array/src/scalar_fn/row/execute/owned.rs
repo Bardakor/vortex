@@ -71,25 +71,26 @@ where
     {
         let output = &mut values.spare_capacity_mut()[..row_count];
 
-        // When every input varies, the indexed source removes argument-shape dispatch from the hot
-        // loop and lets the lane kernel optimize the traversal as one operation. Keep the varying
-        // view and its length proof in this branch: hoisting them through the shared validation
-        // helper changed mixed-constant add, subtract, and multiply from 9.219, 9.229, and 18.94 us
-        // to 30.46, 31.11, and 37.73 us on a Ryzen 9 7950X with rustc 1.91.0 and LLVM 21.1.2.
+        // When every input stores one value per row, the indexed source removes argument-shape
+        // dispatch from the hot loop and lets the lane kernel optimize the traversal as one
+        // operation. Keep view construction and its length proof in this branch. Hoisting them
+        // through the shared validation helper changed mixed-constant add, subtract, and multiply
+        // from 9.219, 9.229, and 18.94 us to 30.46, 31.11, and 37.73 us on a Ryzen 9 7950X with
+        // rustc 1.91.0 and LLVM 21.1.2.
         // Restoring this placement recovered the fast code under the 16-CGU, no-LTO bench profile.
-        if let Some(varying) = Args::varying(&columns) {
+        if let Some(views) = Args::per_row_views(&columns) {
             vortex_ensure!(
-                Args::varying_len_matches(&varying, row_count),
+                Args::view_lens_match(&views, row_count),
                 "a decoded row input does not address exactly {row_count} rows",
             );
 
-            // SAFETY: `varying_len_matches` proved every column addresses exactly `row_count`
-            // rows immediately above.
-            failure = unsafe { Args::indexed_source(varying, row_count) }
+            // SAFETY: `view_lens_match` proved every view addresses exactly `row_count` rows
+            // immediately above.
+            failure = unsafe { Args::indexed_source(views, row_count) }
                 .map_checked_into(output, |elements| apply(&prepared, elements));
         } else {
             // A batch-constant input was collapsed to one row during decoding. This path reads that
-            // row repeatedly while indexing only the inputs that vary.
+            // row repeatedly while indexing only the per-row inputs.
             vortex_ensure!(
                 Args::decoded_lens_match(&columns, row_count),
                 "a decoded row input does not address exactly {row_count} rows",

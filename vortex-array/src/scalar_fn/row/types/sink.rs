@@ -19,7 +19,7 @@ use crate::scalar_fn::OutputElement;
 ///
 /// Rows arrive in increasing index order. Ordinary execution visits `0..row_count` exactly once;
 /// skip-invalid execution can omit invalid rows when
-/// [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) is present.
+/// [`skipped_rows_initializer`](Self::skipped_rows_initializer) returns an initializer.
 ///
 /// # Safety
 ///
@@ -31,8 +31,12 @@ use crate::scalar_fn::OutputElement;
 ///   [`WriteToken`](Self::WriteToken) that safe code cannot produce without initializing that exact
 ///   row. Evidence for an uninitialized row **must not** be safely forgeable, reusable, or
 ///   substitutable for another row.
-/// - A present [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) **must** initialize
-///   every row handed to it.
+/// - An initializer returned by
+///   [`skipped_rows_initializer`](Self::skipped_rows_initializer) **must** initialize every row
+///   handed to it.
+/// - `Self` and every borrowed [`Rows`](Self::Rows) view **must** remain safe to drop if decoding,
+///   preparation, skipped-row initialization, or a row callback returns an error or unwinds. The
+///   executor can abandon a sink after any prefix of rows.
 /// - [`finish`](Self::finish) **must** be sound once every visited callback returned its required
 ///   token and the skipped-row initializer, when present, ran successfully.
 ///
@@ -46,14 +50,6 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
     where
         Self: 'a;
 
-    /// The operation that initializes every output position before skip-invalid execution.
-    ///
-    /// `None` declines skip-invalid execution before input decoding or sink allocation. A present
-    /// initializer **must** leave a legal arbitrary value in every row. Encoding support as the
-    /// initializer's presence prevents a separate capability flag from disagreeing with a no-op
-    /// method.
-    const SKIPPED_ROWS_INITIALIZER: Option<for<'a> fn(&mut Self::Rows<'a>)> = None;
-
     /// The place a row closure writes one row through, borrowed from the sink.
     type Row<'a>
     where
@@ -66,6 +62,16 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
     /// **must** prevent safe construction that does not establish the invariant. Make construction
     /// unsafe when Rust cannot tie the token to the supplied row handle.
     type WriteToken: 'static;
+
+    /// The operation that initializes every output position before skip-invalid execution.
+    ///
+    /// `None` declines skip-invalid execution before input decoding or sink allocation. A present
+    /// initializer **must** leave a legal arbitrary value in every row. Encoding support as the
+    /// initializer's presence prevents a separate capability flag from disagreeing with a no-op
+    /// method.
+    fn skipped_rows_initializer() -> Option<for<'a> fn(&mut Self::Rows<'a>)> {
+        None
+    }
 
     /// The dtype of the column this sink builds, given the function options and input dtypes.
     ///
@@ -96,7 +102,8 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
     ///
     /// The executor must have completed every row callback successfully, and each callback must
     /// have returned this sink's [`WriteToken`](Self::WriteToken). When skipped rows are allowed,
-    /// [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) must have run before traversal.
+    /// the initializer returned by
+    /// [`skipped_rows_initializer`](Self::skipped_rows_initializer) must have run before traversal.
     unsafe fn finish(self) -> VortexResult<ArrayRef>;
 }
 
@@ -120,19 +127,9 @@ impl InitializedElement {
     ///
     /// # Safety
     ///
-    /// `row` must be the [`UninitElementSink`] row supplied to the current callback. The caller must
-    /// return the token from that callback. Using another row or returning the token from another
-    /// callback can cause undefined behavior.
-    ///
-    /// Safe code cannot construct initialization evidence:
-    ///
-    /// ```compile_fail,E0133
-    /// use std::mem::MaybeUninit;
-    /// use vortex_array::scalar_fn::InitializedElement;
-    ///
-    /// let mut unrelated = MaybeUninit::<i32>::uninit();
-    /// let _evidence = InitializedElement::write(&mut unrelated, 42);
-    /// ```
+    /// `row` must be the [`UninitElementSink`] row supplied to the current callback. The caller
+    /// must return the token from that callback. Using another row or returning the token from
+    /// another callback can cause undefined behavior.
     #[inline]
     pub unsafe fn write<T>(row: &mut MaybeUninit<T>, value: T) -> Self {
         row.write(value);
@@ -164,15 +161,16 @@ unsafe impl<T: OutputElement + Copy + Default, Options> OutputSink<Options>
     for UninitElementSink<T>
 {
     type Rows<'a> = &'a mut [MaybeUninit<T>];
-
-    const SKIPPED_ROWS_INITIALIZER: Option<for<'a> fn(&mut Self::Rows<'a>)> = Some(|rows| {
-        for row in rows.iter_mut() {
-            row.write(T::default());
-        }
-    });
-
     type Row<'a> = &'a mut MaybeUninit<T>;
     type WriteToken = InitializedElement;
+
+    fn skipped_rows_initializer() -> Option<for<'a> fn(&mut Self::Rows<'a>)> {
+        Some(|rows| {
+            for row in rows.iter_mut() {
+                row.write(T::default());
+            }
+        })
+    }
 
     fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(T::element_dtype())

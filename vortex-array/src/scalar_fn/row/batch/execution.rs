@@ -19,6 +19,7 @@ use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::arrays::BoolArray;
+use crate::arrays::Constant;
 use crate::arrays::ConstantArray;
 use crate::arrays::MaskedArray;
 use crate::arrays::PrimitiveArray;
@@ -138,10 +139,11 @@ impl Batch {
         // Strictness: an all-null batch has no observable row work. Keep the literal-constant
         // check explicit alongside the conjoined validity invariant.
         if matches!(self.validity, Validity::AllInvalid)
-            || self
-                .inputs
-                .iter()
-                .any(|input| input.as_constant().is_some_and(|scalar| scalar.is_null()))
+            || self.inputs.iter().any(|input| {
+                input
+                    .as_opt::<Constant>()
+                    .is_some_and(|constant| constant.scalar().is_null())
+            })
         {
             return Ok(self.all_null());
         }

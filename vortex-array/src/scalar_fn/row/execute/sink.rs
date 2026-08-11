@@ -38,8 +38,8 @@ where
     let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count, sink_dtype)?;
     let columns = Args::decode(args, ctx)?;
     let prepared = prepare(Args::constants(&columns));
-    let varying = Args::varying(&columns);
-    ensure_decoded_lengths::<Args>(&columns, varying.as_ref(), row_count)?;
+    let views = Args::per_row_views(&columns);
+    ensure_decoded_lengths::<Args>(&columns, views.as_ref(), row_count)?;
     let mut accumulated = ApplyResult::Accumulated::default();
 
     {
@@ -51,13 +51,13 @@ where
             "the output sink does not address exactly {row_count} rows",
         );
 
-        // The all-varying representation removes argument-shape dispatch from the hot loop. The
+        // The all-per-row representation removes argument-shape dispatch from the hot loop. The
         // mixed path instead reads collapsed batch constants at row zero.
-        if let Some(varying) = varying {
+        if let Some(views) = views {
             for index in 0..row_count {
-                // SAFETY: `ensure_decoded_lengths` proved every varying column has `row_count`
-                // rows before the loop.
-                let elements = unsafe { Args::get_varying_unchecked(&varying, index) };
+                // SAFETY: `ensure_decoded_lengths` proved every view has `row_count` rows before
+                // the loop.
+                let elements = unsafe { Args::get_from_views_unchecked(&views, index) };
                 apply(
                     &prepared,
                     elements,
@@ -96,7 +96,7 @@ where
 {
     // Decline before input decoding or sink allocation when this sink cannot initialize rows that
     // the mask skips. The capability and the operation are the same function pointer.
-    let Some(initialize_skipped_rows) = <Sink as OutputSink<Options>>::SKIPPED_ROWS_INITIALIZER
+    let Some(initialize_skipped_rows) = <Sink as OutputSink<Options>>::skipped_rows_initializer()
     else {
         return Ok(None);
     };
@@ -127,8 +127,8 @@ where
             "the output sink does not address exactly {row_count} rows",
         );
 
-        let varying = Args::varying(&columns);
-        ensure_decoded_lengths::<Args>(&columns, varying.as_ref(), row_count)?;
+        let views = Args::per_row_views(&columns);
+        ensure_decoded_lengths::<Args>(&columns, views.as_ref(), row_count)?;
 
         // The loop writes only valid indices, but the sink still finishes a full-length output.
         // Initialize placeholders now; batch execution masks them before the result escapes.
@@ -142,12 +142,12 @@ where
                 return;
             }
 
-            let result = match &varying {
-                Some(varying) => apply(
+            let result = match &views {
+                Some(views) => apply(
                     &prepared,
-                    // SAFETY: `ensure_decoded_lengths` proved every varying column has
-                    // `row_count` rows, and mask indices are below `row_count`.
-                    unsafe { Args::get_varying_unchecked(varying, index) },
+                    // SAFETY: `ensure_decoded_lengths` proved every view has `row_count` rows, and
+                    // mask indices are below `row_count`.
+                    unsafe { Args::get_from_views_unchecked(views, index) },
                     <Sink as OutputSink<Options>>::row(&mut rows, index),
                 ),
                 None => apply(

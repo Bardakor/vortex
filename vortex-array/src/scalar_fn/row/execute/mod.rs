@@ -56,11 +56,11 @@ impl From<RowExecution> for VortexResult<ArrayRef> {
 /// Ensure that every decoded input addresses the complete row loop.
 pub(super) fn ensure_decoded_lengths<Args: ElementTuple>(
     columns: &Args::Columns,
-    varying: Option<&Args::VaryingColumns<'_>>,
+    views: Option<&Args::Views<'_>>,
     row_count: usize,
 ) -> VortexResult<()> {
-    let lengths_match = match varying {
-        Some(varying) => Args::varying_len_matches(varying, row_count),
+    let lengths_match = match views {
+        Some(views) => Args::view_lens_match(views, row_count),
         None => Args::decoded_lens_match(columns, row_count),
     };
     vortex_ensure!(

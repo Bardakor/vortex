@@ -23,12 +23,10 @@ use crate::scalar_fn::ScalarFnId;
 /// Declare the argument names and use [`dispatch`](Self::dispatch) to choose concrete element and
 /// sink types for each accepted dtype combination.
 ///
-/// A `RowFn` does not automatically implement
-/// [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable). Invoke
-/// [`impl_row_fn_vtable!`](crate::impl_row_fn_vtable) to adopt its standard scalar-function
-/// behavior. A function that needs custom coercion, simplification, reduction, formatting, or
-/// validity hooks implements `ScalarFnVTable` itself and can delegate its `return_dtype` and
-/// `execute` methods to [`row_fn_return_dtype`](crate::scalar_fn::row_fn_return_dtype) and
+/// Every `RowFn` receives the standard [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable)
+/// implementation. A function that needs custom scalar-function hooks instead implements
+/// `ScalarFnVTable` on its public type and delegates row execution to a private `RowFn` kernel with
+/// [`row_fn_return_dtype`](crate::scalar_fn::row_fn_return_dtype) and
 /// [`execute_rows`](crate::scalar_fn::execute_rows). Implement only `ScalarFnVTable` when the
 /// natural kernel is columnar rather than row-oriented.
 pub trait RowFn: 'static + Sized + Clone + Send + Sync {

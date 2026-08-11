@@ -667,11 +667,11 @@ fn assert_invalid_kernel_output(input: ArrayRef) -> VortexResult<()> {
 
 #[rstest]
 #[case::owned_constant(PreparedVisit::Owned, true)]
-#[case::owned_varying(PreparedVisit::Owned, false)]
+#[case::owned_per_row(PreparedVisit::Owned, false)]
 #[case::sink_constant(PreparedVisit::Sink, true)]
-#[case::sink_varying(PreparedVisit::Sink, false)]
+#[case::sink_per_row(PreparedVisit::Sink, false)]
 #[case::deferred_constant(PreparedVisit::Deferred, true)]
-#[case::deferred_varying(PreparedVisit::Deferred, false)]
+#[case::deferred_per_row(PreparedVisit::Deferred, false)]
 fn test_prepared_visits(
     #[case] visit: PreparedVisit,
     #[case] constant_rhs: bool,
