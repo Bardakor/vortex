@@ -20,7 +20,24 @@ use crate::scalar_fn::OutputElement;
 /// Rows arrive in increasing index order. Ordinary execution visits `0..row_count` exactly once;
 /// skip-invalid execution can omit invalid rows when
 /// [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) is present.
-pub trait OutputSink<Options>: 'static + Sized {
+///
+/// # Safety
+///
+/// An implementation must uphold all of these requirements:
+///
+/// - When [`row_count_matches`](Self::row_count_matches) returns `true`, every index in
+///   `0..row_count` **must** identify one distinct row owned by this sink.
+/// - A row must either be initialized before the callback or require a
+///   [`WriteToken`](Self::WriteToken) that safe code cannot produce without initializing that exact
+///   row. Evidence for an uninitialized row **must not** be safely forgeable, reusable, or
+///   substitutable for another row.
+/// - A present [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) **must** initialize
+///   every row handed to it.
+/// - [`finish`](Self::finish) **must** be sound once every visited callback returned its required
+///   token and the skipped-row initializer, when present, ran successfully.
+///
+/// The executor relies on these guarantees when it calls `finish`.
+pub unsafe trait OutputSink<Options>: 'static + Sized {
     /// A loop-local view of all output rows.
     ///
     /// Borrowed once before execution so the sink's buffer descriptor and shape become loop
@@ -84,6 +101,14 @@ pub trait OutputSink<Options>: 'static + Sized {
 }
 
 /// Proof that one uninitialized element row was initialized.
+///
+/// The private field prevents safe construction without calling [`write`](Self::write):
+///
+/// ```compile_fail,E0423
+/// use vortex_array::scalar_fn::InitializedElement;
+///
+/// let _evidence = InitializedElement(());
+/// ```
 #[must_use = "return this token from the row closure to prove that it initialized the output"]
 pub struct InitializedElement(
     /// Private so constructing initialization evidence requires an unsafe operation.
@@ -98,6 +123,16 @@ impl InitializedElement {
     /// `row` must be the [`UninitElementSink`] row supplied to the current callback. The caller must
     /// return the token from that callback. Using another row or returning the token from another
     /// callback can cause undefined behavior.
+    ///
+    /// Safe code cannot construct initialization evidence:
+    ///
+    /// ```compile_fail,E0133
+    /// use std::mem::MaybeUninit;
+    /// use vortex_array::scalar_fn::InitializedElement;
+    ///
+    /// let mut unrelated = MaybeUninit::<i32>::uninit();
+    /// let _evidence = InitializedElement::write(&mut unrelated, 42);
+    /// ```
     #[inline]
     pub unsafe fn write<T>(row: &mut MaybeUninit<T>, value: T) -> Self {
         row.write(value);
@@ -121,7 +156,13 @@ pub struct UninitElementSink<T> {
     row_count: usize,
 }
 
-impl<T: OutputElement + Copy + Default, Options> OutputSink<Options> for UninitElementSink<T> {
+// SAFETY: the row slice covers exactly the reserved spare-capacity range, so each accepted index
+// names one distinct slot. `InitializedElement` cannot be constructed by safe code; its unsafe
+// constructor writes the supplied slot and requires the caller to return that exact evidence. The
+// skipped-row initializer writes `T::default()` into every slot before masked traversal.
+unsafe impl<T: OutputElement + Copy + Default, Options> OutputSink<Options>
+    for UninitElementSink<T>
+{
     type Rows<'a> = &'a mut [MaybeUninit<T>];
 
     const SKIPPED_ROWS_INITIALIZER: Option<for<'a> fn(&mut Self::Rows<'a>)> = Some(|rows| {

@@ -38,6 +38,62 @@ const ROWS: usize = 65_536;
 
 static SESSION: LazyLock<VortexSession> = LazyLock::new(array_session);
 
+/// Adopt the standard scalar-function behavior for a row function in this benchmark.
+macro_rules! impl_row_fn_scalar_vtable {
+    ($function:ty) => {
+        impl ScalarFnVTable for $function {
+            type Options = <$function as RowFn>::Options;
+
+            fn id(&self) -> ScalarFnId {
+                RowFn::id(self)
+            }
+
+            fn arity(&self, _options: &Self::Options) -> vortex_array::scalar_fn::Arity {
+                vortex_array::scalar_fn::Arity::Exact(<$function as RowFn>::ARG_NAMES.len())
+            }
+
+            fn child_name(
+                &self,
+                _options: &Self::Options,
+                child_index: usize,
+            ) -> vortex_array::scalar_fn::ChildName {
+                vortex_array::scalar_fn::ChildName::from(
+                    <$function as RowFn>::ARG_NAMES[child_index],
+                )
+            }
+
+            fn return_dtype(&self, options: &Self::Options, args: &[DType]) -> VortexResult<DType> {
+                vortex_array::scalar_fn::row_fn_return_dtype(self, options, args)
+            }
+
+            fn execute(
+                &self,
+                options: &Self::Options,
+                args: &dyn vortex_array::scalar_fn::ExecutionArgs,
+                ctx: &mut vortex_array::ExecutionCtx,
+            ) -> VortexResult<ArrayRef> {
+                vortex_array::scalar_fn::execute_rows(self, options, args, ctx)
+            }
+
+            fn validity(
+                &self,
+                _options: &Self::Options,
+                expression: &vortex_array::expr::Expression,
+            ) -> VortexResult<Option<vortex_array::expr::Expression>> {
+                vortex_array::expr::union_child_validities(expression)
+            }
+
+            fn is_strict(&self, _options: &Self::Options) -> bool {
+                true
+            }
+
+            fn is_fallible(&self, _options: &Self::Options) -> bool {
+                <$function as RowFn>::FALLIBLE
+            }
+        }
+    };
+}
+
 fn main() {
     LazyLock::force(&SESSION);
     divan::main();
@@ -111,7 +167,9 @@ struct I64Sink(
     BufferMut<i64>,
 );
 
-impl<Options> OutputSink<Options> for I64Sink {
+// SAFETY: every row is initialized by `BufferMut::zeroed`, and the sink exposes exactly that
+// initialized slice. The `()` write token therefore proves no additional invariant.
+unsafe impl<Options> OutputSink<Options> for I64Sink {
     type Rows<'a> = &'a mut [i64];
     type Row<'a> = &'a mut i64;
     type WriteToken = ();
@@ -166,9 +224,9 @@ impl RowFn for RowSinkWrappingAdd {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(RowWrappingAdd);
-vortex_array::impl_row_fn_vtable!(RowCheckedAdd);
-vortex_array::impl_row_fn_vtable!(RowSinkWrappingAdd);
+impl_row_fn_scalar_vtable!(RowWrappingAdd);
+impl_row_fn_scalar_vtable!(RowCheckedAdd);
+impl_row_fn_scalar_vtable!(RowSinkWrappingAdd);
 
 fn inputs() -> (ArrayRef, ArrayRef) {
     let lhs = (0..ROWS)

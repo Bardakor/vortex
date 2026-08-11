@@ -21,8 +21,15 @@ use crate::scalar_fn::ScalarFnId;
 /// A scalar function computed one row at a time.
 ///
 /// Declare the argument names and use [`dispatch`](Self::dispatch) to choose concrete element and
-/// sink types for each accepted dtype combination. Implement
-/// [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable) directly for columnar kernels.
+/// sink types for each accepted dtype combination.
+///
+/// A `RowFn` does not automatically implement
+/// [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable). A function adopted by the expression
+/// system implements that trait explicitly, delegates its `return_dtype` method to
+/// [`row_fn_return_dtype`](crate::scalar_fn::row_fn_return_dtype), and delegates `execute` to
+/// [`execute_rows`](crate::scalar_fn::execute_rows). Explicit adoption leaves the function free to
+/// provide custom coercion, simplification, reduction, or formatting hooks. Implement only
+/// `ScalarFnVTable` when the natural kernel is columnar rather than row-oriented.
 pub trait RowFn: 'static + Sized + Clone + Send + Sync {
     /// Options for this function, if any. Use [`EmptyOptions`](crate::scalar_fn::EmptyOptions)
     /// for none.

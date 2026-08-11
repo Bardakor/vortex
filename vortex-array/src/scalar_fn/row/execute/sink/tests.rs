@@ -20,7 +20,9 @@ use crate::validity::Validity;
 
 struct NonSkippingSink;
 
-impl<Options> OutputSink<Options> for NonSkippingSink {
+// SAFETY: `with_capacity` always returns an error, so no sink value can reach `rows`, `row`, or
+// `finish` through the executor. The row-initialization requirements are therefore vacuous.
+unsafe impl<Options> OutputSink<Options> for NonSkippingSink {
     type Rows<'a> = ();
     type Row<'a> = ();
     type WriteToken = ();

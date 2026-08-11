@@ -77,7 +77,9 @@ enum PreparedVisit {
     Deferred,
 }
 
-impl OutputSink<bool> for OptionsCheckingSink {
+// SAFETY: `with_capacity` always returns an error, so no sink value can reach `rows`, `row`, or
+// `finish` through the executor. The row-initialization requirements are therefore vacuous.
+unsafe impl OutputSink<bool> for OptionsCheckingSink {
     type Rows<'a> = ();
     type Row<'a> = ();
     type WriteToken = ();
@@ -122,7 +124,9 @@ impl OutputElement for NullProducingI64 {
 
 struct I64Sink(BufferMut<i64>);
 
-impl<Options> OutputSink<Options> for I64Sink {
+// SAFETY: every row is initialized by `BufferMut::zeroed`, and the sink exposes exactly that
+// initialized slice. The `()` write token therefore proves no additional invariant.
+unsafe impl<Options> OutputSink<Options> for I64Sink {
     type Rows<'a> = &'a mut [i64];
     type Row<'a> = &'a mut i64;
     type WriteToken = ();

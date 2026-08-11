@@ -122,7 +122,7 @@ pub(super) struct L2NormMetadata {
     input_dtype: Option<pb::DType>,
 }
 
-vortex_array::impl_row_fn_vtable!(L2Norm);
+impl_row_fn_scalar_vtable!(L2Norm);
 
 impl ScalarFnArrayVTable for L2Norm {
     fn serialize(
