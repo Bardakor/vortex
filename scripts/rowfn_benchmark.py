@@ -192,7 +192,19 @@ def read_measurements(directory: Path) -> dict[tuple[str, str, int, str], float]
 
 
 def summarize(measurements: dict[tuple[str, str, int, str], float]) -> list[BenchmarkSummary]:
-    groups = {(suite, pair, benchmark) for suite, _, pair, benchmark in measurements}
+    inventories: dict[tuple[str, str], set[str]] = {}
+    for suite, revision, _, benchmark in measurements:
+        inventories.setdefault((suite, revision), set()).add(benchmark)
+
+    suites = {suite for suite, _ in inventories}
+    comparable = {
+        (suite, benchmark)
+        for suite in suites
+        for benchmark in inventories.get((suite, "baseline"), set()) & inventories.get((suite, "candidate"), set())
+    }
+    groups = {
+        (suite, pair, benchmark) for suite, _, pair, benchmark in measurements if (suite, benchmark) in comparable
+    }
     incomplete = [
         group
         for group in groups
@@ -201,6 +213,8 @@ def summarize(measurements: dict[tuple[str, str, int, str], float]) -> list[Benc
     ]
     if incomplete:
         raise ValueError(f"unpaired benchmark measurements: {sorted(incomplete)!r}")
+    if not groups:
+        raise ValueError("unpaired benchmark measurements: no comparable benchmarks")
 
     by_benchmark: dict[tuple[str, str], list[tuple[float, float]]] = {}
     for suite, pair, benchmark in sorted(groups):
@@ -231,6 +245,25 @@ def summarize(measurements: dict[tuple[str, str, int, str], float]) -> list[Benc
     return summaries
 
 
+def inventory_differences(
+    measurements: dict[tuple[str, str, int, str], float],
+) -> list[tuple[str, str, str]]:
+    """Return benchmarks that exist in only one revision."""
+
+    inventories: dict[tuple[str, str], set[str]] = {}
+    for suite, revision, _, benchmark in measurements:
+        inventories.setdefault((suite, revision), set()).add(benchmark)
+
+    differences = []
+    for suite in sorted({suite for suite, _ in inventories}):
+        baseline = inventories.get((suite, "baseline"), set())
+        candidate = inventories.get((suite, "candidate"), set())
+        differences.extend((suite, "baseline only", benchmark) for benchmark in baseline - candidate)
+        differences.extend((suite, "candidate only", benchmark) for benchmark in candidate - baseline)
+
+    return sorted(differences)
+
+
 def format_ns(value: float) -> str:
     for divisor, unit in ((1_000_000_000, "s"), (1_000_000, "ms"), (1_000, "µs")):
         if value >= divisor:
@@ -239,7 +272,11 @@ def format_ns(value: float) -> str:
     return f"{value:.3f} ns"
 
 
-def write_summary(output_directory: Path, summaries: list[BenchmarkSummary]) -> None:
+def write_summary(
+    output_directory: Path,
+    summaries: list[BenchmarkSummary],
+    differences: Iterable[tuple[str, str, str]] = (),
+) -> None:
     csv_path = output_directory / "ratios.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(asdict(summaries[0])))
@@ -262,14 +299,27 @@ def write_summary(output_directory: Path, summaries: list[BenchmarkSummary]) -> 
             f"| {format_ns(summary.candidate_median_ns)} "
             f"| {summary.median_ratio:.6f} | {change:+.2f}% | {summary.ratio_mad:.6f} |"
         )
+    differences = list(differences)
+    if differences:
+        markdown.extend(
+            [
+                "",
+                "## Unpaired benchmark inventory",
+                "",
+                "These benchmarks were recorded for only one revision and are excluded from ratios.",
+                "",
+            ]
+        )
+        markdown.extend(f"- `{suite}/{benchmark}`: {revision}." for suite, revision, benchmark in differences)
     markdown.append("")
     (output_directory / "summary.md").write_text("\n".join(markdown), encoding="utf-8")
 
 
 def summarize_directory(args: argparse.Namespace) -> None:
     output_directory = Path(args.output_directory)
-    summaries = summarize(read_measurements(output_directory / "measured"))
-    write_summary(output_directory, summaries)
+    measurements = read_measurements(output_directory / "measured")
+    summaries = summarize(measurements)
+    write_summary(output_directory, summaries, inventory_differences(measurements))
 
 
 def argument_parser() -> argparse.ArgumentParser:

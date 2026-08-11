@@ -106,6 +106,29 @@ class RowFnBenchmarkTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unpaired benchmark measurements"):
             self.module.summarize(self.module.read_measurements(measured))
 
+    def test_summarize_excludes_and_reports_revision_only_benchmarks(self) -> None:
+        measured = self.directory / "measured"
+        measured.mkdir()
+        results = {
+            "numeric-baseline-1.txt": ["├─ add  10 ns │ 10 ns │ 10 ns │ 10 ns │ 100 │ 100"],
+            "numeric-candidate-1.txt": [
+                "├─ add       11 ns │ 11 ns │ 11 ns │ 11 ns │ 100 │ 100",
+                "╰─ candidate  5 ns │  5 ns │  5 ns │  5 ns │ 100 │ 100",
+            ],
+        }
+        for name, rows in results.items():
+            write_divan(measured / name, rows)
+
+        measurements = self.module.read_measurements(measured)
+        summaries = self.module.summarize(measurements)
+        differences = self.module.inventory_differences(measurements)
+        self.module.write_summary(self.directory, summaries, differences)
+
+        self.assertEqual([summary.benchmark for summary in summaries], ["add"])
+        self.assertEqual(differences, [("numeric", "candidate only", "candidate")])
+        markdown = (self.directory / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("`numeric/candidate`: candidate only.", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()
