@@ -93,8 +93,6 @@ impl RowFn for SpatialContains {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(SpatialContains);
-
 /// Per-batch state for the contains row kernel: the prepared form of whichever operand is
 /// constant for the batch. `None` marks an operand that varies by row.
 struct ConstOperands {
