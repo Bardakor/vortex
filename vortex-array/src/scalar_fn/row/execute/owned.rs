@@ -83,7 +83,9 @@ where
                 "a decoded row input does not address exactly {row_count} rows",
             );
 
-            failure = Args::indexed_source(&varying)
+            // SAFETY: `varying_len_matches` proved every column addresses exactly `row_count`
+            // rows immediately above.
+            failure = unsafe { Args::indexed_source(varying, row_count) }
                 .map_checked_into(output, |elements| apply(&prepared, elements));
         } else {
             // A batch-constant input was collapsed to one row during decoding. This path reads that

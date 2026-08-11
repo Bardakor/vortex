@@ -15,7 +15,6 @@ use crate::arrays::Masked;
 use crate::arrays::extension::ExtensionArrayExt;
 use crate::arrays::masked::MaskedArraySlotsExt;
 use crate::dtype::DType;
-use crate::dtype::NativePType;
 use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::InputElement;
 
@@ -205,11 +204,8 @@ pub trait ElementTuple: 'static + private::Sealed {
 
 /// An argument tuple that supports a validated dense indexed traversal.
 ///
-/// This is separate from [`ElementTuple`] because many row elements have no contiguous source, and
-/// stable Rust cannot provide a blanket fallback plus a more specific primitive implementation.
-/// The trait is sealed so shared execution can rely on its unchecked-read contract. A tuple only
-/// implements it when the source can be validated once and every lane can then be read
-/// independently.
+/// Every [`ElementTuple`] implements this trait. Its source delegates each lane read to the tuple's
+/// unchecked varying-row access after batch execution validates every decoded column length once.
 pub trait IndexedElementTuple: ElementTuple {
     /// The source shared execution uses for a dense all-varying loop.
     ///
@@ -218,27 +214,77 @@ pub trait IndexedElementTuple: ElementTuple {
     /// read contract of [`IndexedSource`].
     type Source<'a>: IndexedSource<Item = Self::Elems<'a>>;
 
-    /// Borrow a source from columns already validated to vary within the batch.
-    fn indexed_source<'a>(columns: &Self::VaryingColumns<'a>) -> Self::Source<'a>;
+    /// Build a source from columns already validated to vary within the batch.
+    ///
+    /// # Safety
+    ///
+    /// Every column in `columns` **must** address exactly `row_count` rows. Violating this
+    /// requirement can make a safe lane kernel read outside a column's allocation.
+    unsafe fn indexed_source<'a>(
+        columns: Self::VaryingColumns<'a>,
+        row_count: usize,
+    ) -> Self::Source<'a>;
 }
 
-/// An indexed native slice yielding the one-tuples expected by a unary row closure.
-#[derive(Clone, Copy)]
-pub struct UnaryTupleSource<'a, T>(
-    /// The native values read by the row loop.
-    &'a [T],
-);
+/// Indexed access to one varying element column.
+pub struct ElementSource<'a, T: InputElement> {
+    column: T::Varying<'a>,
+}
 
-impl<T: Copy> IndexedSource for UnaryTupleSource<'_, T> {
-    type Item = (T,);
+impl<'a, T: InputElement> ElementSource<'a, T> {
+    fn new(column: T::Varying<'a>) -> Self {
+        Self { column }
+    }
+}
+
+impl<'a, T: InputElement> IndexedSource for ElementSource<'a, T> {
+    type Item = T::Elem<'a>;
+
+    fn len(&self) -> usize {
+        T::varying_len(&self.column)
+    }
+
+    unsafe fn get_unchecked(&self, index: usize) -> Self::Item {
+        // SAFETY: the source length is the number of rows addressable by `column`, and the caller
+        // guarantees that `index` is below that length.
+        unsafe { T::get_varying_unchecked(&self.column, index) }
+    }
+}
+
+/// An indexed element source yielding the one-tuples expected by a unary row closure.
+pub struct UnaryTupleSource<Source>(Source);
+
+impl<Source: IndexedSource> IndexedSource for UnaryTupleSource<Source> {
+    type Item = (Source::Item,);
 
     fn len(&self) -> usize {
         self.0.len()
     }
 
     unsafe fn get_unchecked(&self, index: usize) -> Self::Item {
-        // SAFETY: the caller guarantees that `index` is in bounds.
-        (unsafe { *self.0.get_unchecked(index) },)
+        // SAFETY: forwarded from this method's contract.
+        (unsafe { self.0.get_unchecked(index) },)
+    }
+}
+
+/// Indexed access to the varying columns of an element tuple.
+pub struct ElementTupleSource<'a, Args: ElementTuple> {
+    columns: Args::VaryingColumns<'a>,
+    row_count: usize,
+}
+
+impl<'a, Args: ElementTuple> IndexedSource for ElementTupleSource<'a, Args> {
+    type Item = Args::Elems<'a>;
+
+    fn len(&self) -> usize {
+        self.row_count
+    }
+
+    unsafe fn get_unchecked(&self, index: usize) -> Self::Item {
+        // SAFETY: the caller guarantees that `index` is below `row_count`. Batch execution checks
+        // that every varying column addresses exactly `row_count` rows before constructing this
+        // source.
+        unsafe { Args::get_varying_unchecked(&self.columns, index) }
     }
 }
 
@@ -400,21 +446,64 @@ element_tuple!(10; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9);
 element_tuple!(11; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10);
 element_tuple!(12; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
 
-impl<T: NativePType> IndexedElementTuple for (T,) {
-    type Source<'a> = UnaryTupleSource<'a, T>;
+impl IndexedElementTuple for () {
+    type Source<'a> = ElementTupleSource<'a, ()>;
 
-    fn indexed_source<'a>(columns: &Self::VaryingColumns<'a>) -> Self::Source<'a> {
-        UnaryTupleSource(columns.0)
+    unsafe fn indexed_source<'a>(
+        columns: Self::VaryingColumns<'a>,
+        row_count: usize,
+    ) -> Self::Source<'a> {
+        ElementTupleSource { columns, row_count }
     }
 }
 
-impl<Left: NativePType, Right: NativePType> IndexedElementTuple for (Left, Right) {
-    type Source<'a> = LaneZip<&'a [Left], &'a [Right]>;
+impl<A: InputElement> IndexedElementTuple for (A,) {
+    type Source<'a> = UnaryTupleSource<ElementSource<'a, A>>;
 
-    fn indexed_source<'a>(columns: &Self::VaryingColumns<'a>) -> Self::Source<'a> {
-        LaneZip::new(columns.0, columns.1)
+    unsafe fn indexed_source<'a>(
+        columns: Self::VaryingColumns<'a>,
+        _row_count: usize,
+    ) -> Self::Source<'a> {
+        UnaryTupleSource(ElementSource::new(columns.0))
     }
 }
+
+impl<A: InputElement, B: InputElement> IndexedElementTuple for (A, B) {
+    type Source<'a> = LaneZip<ElementSource<'a, A>, ElementSource<'a, B>>;
+
+    unsafe fn indexed_source<'a>(
+        columns: Self::VaryingColumns<'a>,
+        _row_count: usize,
+    ) -> Self::Source<'a> {
+        LaneZip::new(ElementSource::new(columns.0), ElementSource::new(columns.1))
+    }
+}
+
+macro_rules! indexed_element_tuple {
+    ($($t:ident),+) => {
+        impl<$($t: InputElement),+> IndexedElementTuple for ($($t,)+) {
+            type Source<'a> = ElementTupleSource<'a, ($($t,)+)>;
+
+            unsafe fn indexed_source<'a>(
+                columns: Self::VaryingColumns<'a>,
+                row_count: usize,
+            ) -> Self::Source<'a> {
+                ElementTupleSource { columns, row_count }
+            }
+        }
+    };
+}
+
+indexed_element_tuple!(A, B, C);
+indexed_element_tuple!(A, B, C, D);
+indexed_element_tuple!(A, B, C, D, E);
+indexed_element_tuple!(A, B, C, D, E, F);
+indexed_element_tuple!(A, B, C, D, E, F, G);
+indexed_element_tuple!(A, B, C, D, E, F, G, H);
+indexed_element_tuple!(A, B, C, D, E, F, G, H, I);
+indexed_element_tuple!(A, B, C, D, E, F, G, H, I, J);
+indexed_element_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+indexed_element_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 
 #[cfg(test)]
 mod tests {
@@ -423,7 +512,7 @@ mod tests {
     use vortex_error::vortex_bail;
     use vortex_mask::Mask;
 
-    use super::UnaryTupleSource;
+    use super::IndexedElementTuple;
     use super::batch_constant;
     use crate::IntoArray;
     use crate::arrays::ConstantArray;
@@ -435,12 +524,24 @@ mod tests {
     use crate::validity::Validity;
 
     #[test]
-    fn test_unary_tuple_source_reads_one_tuple_per_row() {
-        let source = UnaryTupleSource(&[10, 20, 30]);
+    fn test_unary_element_source_reads_one_tuple_per_row() {
+        // SAFETY: the only column has exactly three rows.
+        let source = unsafe { <(i32,)>::indexed_source((&[10, 20, 30][..],), 3) };
         assert_eq!(source.len(), 3);
 
         // SAFETY: index one is within the three-element source.
         assert_eq!(unsafe { source.get_unchecked(1) }, (20,));
+    }
+
+    #[test]
+    fn test_binary_element_source_zips_columns() {
+        // SAFETY: both columns have exactly three rows.
+        let source =
+            unsafe { <(i32, i64)>::indexed_source((&[10, 20, 30][..], &[100, 200, 300][..]), 3) };
+        assert_eq!(source.len(), 3);
+
+        // SAFETY: index one is within the three-element source.
+        assert_eq!(unsafe { source.get_unchecked(1) }, (20, 200));
     }
 
     #[test]

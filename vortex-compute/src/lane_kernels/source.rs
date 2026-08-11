@@ -10,9 +10,8 @@
 /// reads carry no inter-iteration data dependency — the autovectorizer treats each
 /// lane independently.
 pub trait IndexedSource {
-    /// The per-lane item type. Must be `Copy` so the kernels can pass it through
-    /// the closure by value without extra moves.
-    type Item: Copy;
+    /// The per-lane item type passed through the kernel by value.
+    type Item;
     /// Logical lane count.
     fn len(&self) -> usize;
     /// Returns true when there are no lanes.
