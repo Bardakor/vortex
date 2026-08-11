@@ -4,6 +4,9 @@
 use crate::ArrayRef;
 
 /// Trait for matching array types.
+///
+/// Implemented for encoding vtable types, for logical matchers like `AnyCanonical`, and for
+/// capability traits such as `dyn VarBinExportable`.
 pub trait Matcher {
     type Match<'a>;
 

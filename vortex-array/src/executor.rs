@@ -165,7 +165,10 @@ impl ArrayRef {
     /// parent rewrite would observe inconsistent state and could discard accumulated builder
     /// data.
     #[allow(clippy::cognitive_complexity)]
-    pub fn execute_until<M: Matcher>(self, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+    pub fn execute_until<M: Matcher + ?Sized>(
+        self,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
         let mut current_array = self;
         let mut current_builder: Option<Box<dyn ArrayBuilder>> = None;
         let mut stack: Vec<StackFrame> = Vec::new();
@@ -774,7 +777,7 @@ impl ExecutionResult {
     /// Request execution of slot at `slot_idx` until it matches the given [`Matcher`].
     ///
     /// The provided array is the (possibly modified) parent that still needs its slot executed.
-    pub fn execute_slot<M: Matcher>(array: impl IntoArray, slot_idx: usize) -> Self {
+    pub fn execute_slot<M: Matcher + ?Sized>(array: impl IntoArray, slot_idx: usize) -> Self {
         let array = array.into_array();
         Self {
             array,

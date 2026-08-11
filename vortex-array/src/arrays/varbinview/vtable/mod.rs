@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::TypeId;
 use std::hash::Hasher;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -36,6 +37,8 @@ use crate::hash::ArrayHash;
 use crate::match_each_varbin_builder;
 use crate::serde::ArrayChildren;
 use crate::validity::Validity;
+use crate::vtable::VarBinExportable;
+use crate::vtable::has_capability;
 mod kernel;
 mod operations;
 mod validity;
@@ -69,6 +72,8 @@ impl ArrayEq for VarBinViewData {
             && self.views.array_eq(&other.views, accuracy)
     }
 }
+
+impl VarBinExportable for VarBinView {}
 
 impl VTable for VarBinView {
     type TypedArrayData = VarBinViewData;
@@ -239,6 +244,10 @@ impl VTable for VarBinView {
         child_idx: usize,
     ) -> VortexResult<Option<ArrayRef>> {
         PARENT_RULES.evaluate(array, parent, child_idx)
+    }
+
+    fn has_capability(&self, capability: TypeId) -> bool {
+        has_capability::<dyn VarBinExportable>(self, capability)
     }
 
     fn append_to_builder(

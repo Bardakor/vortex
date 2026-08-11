@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -45,6 +46,8 @@ use crate::scalar::DecimalValue;
 use crate::scalar::Scalar;
 use crate::scalar::ScalarValue;
 use crate::serde::ArrayChildren;
+use crate::vtable::VarBinExportable;
+use crate::vtable::has_capability;
 pub(crate) mod canonical;
 mod operations;
 mod validity;
@@ -66,6 +69,8 @@ impl ArrayEq for ConstantData {
         self.scalar == other.scalar
     }
 }
+
+impl VarBinExportable for Constant {}
 
 impl VTable for Constant {
     type TypedArrayData = ConstantData;
@@ -176,6 +181,10 @@ impl VTable for Constant {
             array.as_view(),
             ctx,
         )?))
+    }
+
+    fn has_capability(&self, capability: TypeId) -> bool {
+        has_capability::<dyn VarBinExportable>(self, capability)
     }
 
     fn append_to_builder(

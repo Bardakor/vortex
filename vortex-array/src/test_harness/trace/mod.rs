@@ -561,7 +561,7 @@ fn record_parent_reduce_applied(
     });
 }
 
-pub(crate) fn record_execute_until_start<M>(root: &ArrayRef) {
+pub(crate) fn record_execute_until_start<M: ?Sized>(root: &ArrayRef) {
     record(TraceEvent::ExecuteUntilStart {
         target: short_type_name::<M>(),
         root: ArraySummary::new(root),
@@ -816,7 +816,7 @@ fn adapter_field<'a>(label: &'a str, field: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-fn short_type_name<T>() -> String {
+fn short_type_name<T: ?Sized>() -> String {
     std::any::type_name::<T>()
         .rsplit("::")
         .next()

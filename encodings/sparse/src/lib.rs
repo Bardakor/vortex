@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -47,6 +48,8 @@ use vortex_array::serde::ArrayChildren;
 use vortex_array::validity::Validity;
 use vortex_array::vtable::VTable;
 use vortex_array::vtable::ValidityVTable;
+use vortex_array::vtable::VarBinExportable;
+use vortex_array::vtable::has_capability;
 use vortex_buffer::Buffer;
 use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexExpect as _;
@@ -186,6 +189,8 @@ impl ArrayEq for SparseData {
             && self.fill_value == other.fill_value
     }
 }
+
+impl VarBinExportable for Sparse {}
 
 impl VTable for Sparse {
     type TypedArrayData = SparseData;
@@ -357,6 +362,10 @@ impl VTable for Sparse {
         let parts = array.into_parts()?;
         // TODO(joe): remove ctx from execute_sparse since all slots should be canonical.
         execute_sparse(parts, ctx).map(ExecutionResult::done)
+    }
+
+    fn has_capability(&self, capability: TypeId) -> bool {
+        has_capability::<dyn VarBinExportable>(self, capability)
     }
 
     fn append_to_builder(

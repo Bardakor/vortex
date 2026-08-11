@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::TypeId;
 use std::hash::Hasher;
 
 use itertools::Itertools;
@@ -41,6 +42,8 @@ use crate::dtype::DType;
 use crate::dtype::Nullability;
 use crate::dtype::PType;
 use crate::serde::ArrayChildren;
+use crate::vtable::VarBinExportable;
+use crate::vtable::has_capability;
 mod canonical;
 mod operations;
 mod validity;
@@ -65,6 +68,8 @@ impl ArrayEq for ChunkedData {
         true
     }
 }
+
+impl VarBinExportable for Chunked {}
 
 impl VTable for Chunked {
     type TypedArrayData = ChunkedData;
@@ -232,6 +237,10 @@ impl VTable for Chunked {
             ChunkedData::new(chunk_offsets_usize),
         )
         .with_slots(slots))
+    }
+
+    fn has_capability(&self, capability: TypeId) -> bool {
+        has_capability::<dyn VarBinExportable>(self, capability)
     }
 
     fn append_to_builder(

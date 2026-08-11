@@ -11,16 +11,21 @@
 //! into these traits. Implementations should focus on encoding-specific work and uphold the
 //! documented postconditions.
 
+mod capability;
 mod operations;
 mod validity;
+mod varbin_exportable;
 
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::Hasher;
 
+pub use capability::*;
 pub use operations::*;
 pub use validity::*;
+pub use varbin_exportable::*;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -140,10 +145,28 @@ pub trait VTable: 'static + Clone + Sized + Send + Sync + Debug {
         session: &VortexSession,
     ) -> VortexResult<ArrayParts<Self>>;
 
+    /// Whether this encoding implements the capability trait identified by `capability`.
+    ///
+    /// Capabilities are optional interfaces, queried through
+    /// [`ArrayRef::has_capability`](crate::ArrayRef::has_capability). Report each one with
+    /// [`has_capability`]:
+    ///
+    /// ```ignore
+    /// fn has_capability(&self, capability: TypeId) -> bool {
+    ///     has_capability::<dyn SomeCapability>(self, capability)
+    ///         || has_capability::<dyn AnotherCapability>(self, capability)
+    /// }
+    /// ```
+    fn has_capability(&self, capability: TypeId) -> bool {
+        _ = capability;
+        false
+    }
+
     /// Writes the array's logical values into a canonical builder.
     ///
     /// The default implementation executes the full array to [`Canonical`] and appends that result.
-    /// Encodings may override this to avoid materializing an intermediate canonical array.
+    /// Encodings may override this to avoid materializing an intermediate canonical array. An
+    /// override targeting a `VarBinBuilder` should also claim [`VarBinExportable`].
     fn append_to_builder(
         array: ArrayView<'_, Self>,
         builder: &mut dyn ArrayBuilder,

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use std::any::Any;
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::hash::Hasher;
@@ -134,6 +135,10 @@ pub(crate) trait DynArrayData: 'static + private::Sealed + Send + Sync + Debug {
         builder: &mut dyn ArrayBuilder,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<()>;
+
+    /// Whether this array's encoding implements the given capability trait. See
+    /// [`VTable::has_capability`].
+    fn has_capability(&self, capability: TypeId) -> bool;
 
     // --- Visitor methods (formerly in ArrayVisitor) ---
 
@@ -305,6 +310,10 @@ impl<V: VTable> DynArrayData for ArrayData<V> {
             this.encoding_id(),
         );
         Ok(())
+    }
+
+    fn has_capability(&self, capability: TypeId) -> bool {
+        V::has_capability(&self.vtable, capability)
     }
 
     fn buffers(&self, this: &ArrayRef) -> Vec<ByteBuffer> {

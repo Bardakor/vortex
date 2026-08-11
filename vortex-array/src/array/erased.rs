@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::TypeId;
 use std::any::type_name;
 use std::fmt::Debug;
 use std::fmt::Formatter;
@@ -385,19 +386,19 @@ impl ArrayRef {
 
     /// Does the array match the given matcher.
     #[inline]
-    pub fn is<M: Matcher>(&self) -> bool {
+    pub fn is<M: Matcher + ?Sized>(&self) -> bool {
         M::matches(self)
     }
 
     /// Returns the array downcast by the given matcher.
     #[inline]
-    pub fn as_<M: Matcher>(&self) -> M::Match<'_> {
+    pub fn as_<M: Matcher + ?Sized>(&self) -> M::Match<'_> {
         self.as_opt::<M>().vortex_expect("Failed to downcast")
     }
 
     /// Returns the array downcast by the given matcher.
     #[inline]
-    pub fn as_opt<M: Matcher>(&self) -> Option<M::Match<'_>> {
+    pub fn as_opt<M: Matcher + ?Sized>(&self) -> Option<M::Match<'_>> {
         M::try_match(self)
     }
 
@@ -441,6 +442,13 @@ impl ArrayRef {
     /// Whether the array is of a canonical encoding.
     pub fn is_canonical(&self) -> bool {
         self.is::<AnyCanonical>()
+    }
+
+    /// Whether this array's encoding implements the capability trait `C`.
+    ///
+    /// `false` unless the encoding reports `C` from [`VTable::has_capability`].
+    pub fn has_capability<C: ?Sized + 'static>(&self) -> bool {
+        self.0.data.has_capability(TypeId::of::<C>())
     }
 
     /// Returns a new array with the slot at `slot_idx` replaced by `replacement`.

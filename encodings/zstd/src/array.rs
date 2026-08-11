@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -45,7 +46,9 @@ use vortex_array::validity::Validity;
 use vortex_array::vtable::OperationsVTable;
 use vortex_array::vtable::VTable;
 use vortex_array::vtable::ValidityVTable;
+use vortex_array::vtable::VarBinExportable;
 use vortex_array::vtable::child_to_validity;
+use vortex_array::vtable::has_capability;
 use vortex_array::vtable::validity_to_child;
 use vortex_buffer::Alignment;
 use vortex_buffer::Buffer;
@@ -135,6 +138,8 @@ impl ArrayEq for ZstdData {
             && self.slice_stop == other.slice_stop
     }
 }
+
+impl VarBinExportable for Zstd {}
 
 impl VTable for Zstd {
     type TypedArrayData = ZstdData;
@@ -277,6 +282,10 @@ impl VTable for Zstd {
             .decompress(array.dtype(), &unsliced_validity, ctx)?
             .execute::<ArrayRef>(ctx)
             .map(ExecutionResult::done)
+    }
+
+    fn has_capability(&self, capability: TypeId) -> bool {
+        has_capability::<dyn VarBinExportable>(self, capability)
     }
 
     fn append_to_builder(
