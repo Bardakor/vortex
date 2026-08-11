@@ -23,7 +23,11 @@ pub(super) struct CheckedDiv;
 /// OR-reducible evidence that a row failed, with [`Default`] meaning success.
 pub(super) trait Failure: Copy + Default + PartialEq + BitOrAssign {}
 
-impl<T: Copy + Default + PartialEq + BitOrAssign> Failure for T {}
+impl Failure for bool {}
+impl Failure for u8 {}
+impl Failure for u16 {}
+impl Failure for u32 {}
+impl Failure for u64 {}
 
 /// One arithmetic operator at one width, split into its value and failure evidence.
 pub(super) trait CheckedPrimitiveOp<T: NativePType>: 'static + Sized {
@@ -87,7 +91,10 @@ impl<T: CheckedArithmetic> CheckedPrimitiveOp<T> for CheckedDiv {
     }
 }
 
-/// Per-width checked arithmetic. Every value method **must** be total over stored lane values.
+/// Per-width arithmetic used to compute values and failure evidence.
+///
+/// The add, subtract, and multiply value methods **must** be total over every stored lane value.
+/// [`Self::div_value`] may assume that [`Self::div_error`] returned `false` for the same operands.
 pub(super) trait CheckedArithmetic: NativePType {
     /// How multiplication reports a failing row.
     ///
@@ -100,7 +107,11 @@ pub(super) trait CheckedArithmetic: NativePType {
     fn sub_error(self, rhs: Self) -> bool;
     fn mul_value(self, rhs: Self) -> Self;
     fn mul_failure(self, rhs: Self) -> Self::MulFailure;
+
+    /// Divide operands that [`Self::div_error`] accepted.
     fn div_value(self, rhs: Self) -> Self;
+
+    /// Return whether [`Self::div_value`] would trap for these operands.
     fn div_error(self, rhs: Self) -> bool;
 }
 
