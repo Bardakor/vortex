@@ -105,38 +105,37 @@ struct ConstOperands {
     b: Option<PreparedOperand>,
 }
 
-/// One batch-constant operand: the geometry cloned out of its decoded column (the state must not
-/// borrow from the columns), plus its [`PreparedGeometry`], built on the first row whose pairing
-/// routes through relate.
+/// One batch-constant operand: its bounding rectangle and the [`PreparedGeometry`] built on the
+/// first row whose pairing routes through relate.
 ///
 /// The build is lazy because preparation (self-noding the topology graph plus an R*-tree over the
 /// edges) costs `O(edges log edges)` and pays off only on relate-routed pairings; a batch of
 /// point rows against a constant polygon never touches it, and preparing a large constant eagerly
 /// would charge such a batch for nothing.
 struct PreparedOperand {
-    /// The constant's decoded geometry, owned so [`prepared`](Self::prepared) can be `'static`.
-    geometry: Geometry<f64>,
-
     /// The constant's bounding rectangle, folded once for conservative row rejection.
     bbox: Option<Rect<f64>>,
 
-    /// The lazily built prepared form of [`geometry`](Self::geometry).
+    /// The constant's prepared form, initialized only when a relate route needs it.
     prepared: OnceCell<PreparedGeometry<'static, Geometry<f64>, f64>>,
 }
 
 impl PreparedOperand {
     fn new(geometry: &Geometry<f64>) -> Self {
         Self {
-            geometry: geometry.clone(),
             bbox: finite_bounding_rect(geometry),
             prepared: OnceCell::new(),
         }
     }
 
-    /// The prepared geometry, built on first use.
-    fn get(&self) -> &PreparedGeometry<'static, Geometry<f64>, f64> {
+    /// Return the prepared geometry, cloning the decoded constant only on first use.
+    ///
+    /// `geometry` **must** be the constant represented by this state. The row kernel maintains
+    /// that relationship by passing the operand from the same decoded constant column that
+    /// produced this [`PreparedOperand`].
+    fn get(&self, geometry: &Geometry<f64>) -> &PreparedGeometry<'static, Geometry<f64>, f64> {
         self.prepared
-            .get_or_init(|| PreparedGeometry::from(self.geometry.clone()))
+            .get_or_init(|| PreparedGeometry::from(geometry.clone()))
     }
 }
 
@@ -328,15 +327,15 @@ fn contains_row_prepared(operands: &ConstOperands, a: &Geometry<f64>, b: &Geomet
     match contains_route(a, b) {
         ContainsRoute::Direct => a.contains(b),
         ContainsRoute::ForwardRelate => match (&operands.a, &operands.b) {
-            (Some(const_a), Some(const_b)) => const_a.get().relate(const_b.get()).is_contains(),
-            (Some(const_a), None) => const_a.get().relate(b).is_contains(),
-            (None, Some(const_b)) => a.relate(const_b.get()).is_contains(),
+            (Some(const_a), Some(const_b)) => const_a.get(a).relate(const_b.get(b)).is_contains(),
+            (Some(const_a), None) => const_a.get(a).relate(b).is_contains(),
+            (None, Some(const_b)) => a.relate(const_b.get(b)).is_contains(),
             (None, None) => a.contains(b),
         },
         ContainsRoute::ReversedRelate => match (&operands.a, &operands.b) {
-            (Some(const_a), Some(const_b)) => const_b.get().relate(const_a.get()).is_within(),
-            (Some(const_a), None) => b.relate(const_a.get()).is_within(),
-            (None, Some(const_b)) => const_b.get().relate(a).is_within(),
+            (Some(const_a), Some(const_b)) => const_b.get(b).relate(const_a.get(a)).is_within(),
+            (Some(const_a), None) => b.relate(const_a.get(a)).is_within(),
+            (None, Some(const_b)) => const_b.get(b).relate(a).is_within(),
             (None, None) => a.contains(b),
         },
     }
