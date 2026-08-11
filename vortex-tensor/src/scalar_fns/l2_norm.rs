@@ -164,8 +164,6 @@ impl RowFn for L2Norm {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(L2Norm);
-
 /// Metadata for a serialized [`L2Norm`] array: the single `input` child's [`DType`], which carries
 /// the extension type (`FixedShapeTensor` vs `Vector`), dimension, and nullability that are not
 /// recoverable from the parent's primitive-float output.
