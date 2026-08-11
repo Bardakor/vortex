@@ -21,14 +21,14 @@ use crate::extension::is_native_geometry;
 ///
 /// The two operands of a binary geo function need not share a geometry type, since distance,
 /// containment and intersection across types are all meaningful, so this validates only that the
-/// column is *some* native geometry.
+/// column is _some_ native geometry.
 pub(crate) struct GeometryRow;
 
-// SAFETY: [`varying`](InputElement::varying) returns the decoded geometry slice and
-// [`varying_len`](InputElement::varying_len) reports that slice's exact length.
+// SAFETY: [`view`](InputElement::view) returns the decoded geometry slice and
+// [`view_len`](InputElement::view_len) reports that slice's exact length.
 unsafe impl InputElement for GeometryRow {
     type Column = Vec<Geometry<f64>>;
-    type Varying<'a> = &'a [Geometry<f64>];
+    type View<'a> = &'a [Geometry<f64>];
     type Elem<'a> = &'a Geometry<f64>;
 
     // A geometry row is decoded from its coordinate storage, which behind a null row holds arbitrary
@@ -53,31 +53,28 @@ unsafe impl InputElement for GeometryRow {
         &column[index]
     }
 
-    fn varying(column: &Self::Column) -> Self::Varying<'_> {
+    fn view(column: &Self::Column) -> Self::View<'_> {
         column.as_slice()
     }
 
-    fn varying_len(column: &Self::Varying<'_>) -> usize {
-        column.len()
+    fn view_len(view: &Self::View<'_>) -> usize {
+        view.len()
     }
 
-    fn get_varying<'a>(column: &Self::Varying<'a>, index: usize) -> &'a Geometry<f64>
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> &'a Geometry<f64>
     where
         Self: 'a,
     {
-        &column[index]
+        &view[index]
     }
 
-    unsafe fn get_varying_unchecked<'a>(
-        column: &Self::Varying<'a>,
-        index: usize,
-    ) -> &'a Geometry<f64>
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> &'a Geometry<f64>
     where
         Self: 'a,
     {
         // SAFETY: The caller established that `index` is below the slice length returned by
-        // `varying_len` for this exact view.
-        unsafe { column.get_unchecked(index) }
+        // `view_len` for this exact view.
+        unsafe { view.get_unchecked(index) }
     }
 
     /// Null rows decode to a placeholder geometry that the branch-and-skip row loop never reads.

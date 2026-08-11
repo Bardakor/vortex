@@ -75,8 +75,6 @@ impl RowFn for SpatialDistance {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(SpatialDistance);
-
 #[cfg(test)]
 mod tests {
     use vortex_array::ArrayRef;
