@@ -75,7 +75,7 @@ impl RowFn for SpatialDistance {
     }
 }
 
-impl_row_fn_scalar_vtable!(SpatialDistance);
+vortex_array::impl_row_fn_vtable!(SpatialDistance);
 
 #[cfg(test)]
 mod tests {

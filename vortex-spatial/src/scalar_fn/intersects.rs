@@ -84,7 +84,7 @@ impl RowFn for SpatialIntersects {
     }
 }
 
-impl_row_fn_scalar_vtable!(SpatialIntersects);
+vortex_array::impl_row_fn_vtable!(SpatialIntersects);
 
 /// Per-batch state for the intersects row kernel: the bounding rect of each operand that is
 /// constant for the batch.

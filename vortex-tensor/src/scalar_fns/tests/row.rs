@@ -57,7 +57,7 @@ impl RowFn for L1Norm {
     }
 }
 
-impl_row_fn_scalar_vtable!(L1Norm);
+vortex_array::impl_row_fn_vtable!(L1Norm);
 
 fn l1_norm_row<T: Float + NativePType>(row: &[T]) -> T {
     row.iter().fold(T::zero(), |acc, &x| acc + x.abs())
