@@ -13,13 +13,14 @@ use crate::scalar_fn::OutputElement;
 
 /// A column allocated once per batch that a row closure writes into, one row at a time.
 ///
-/// A sink may use the input dtypes to build a runtime-shaped output or own shared batch state. The
-/// executor passes each row slot into an [`Fn`] closure, keeping mutable state out of its capture.
+/// A sink may use the function's `Options` and input dtypes to build a runtime-shaped output or own
+/// shared batch state. The executor passes each row slot into an [`Fn`] closure, keeping mutable
+/// state out of its capture.
 ///
 /// Rows arrive in increasing index order. Ordinary execution visits `0..row_count` exactly once;
 /// skip-invalid execution can omit invalid rows when
 /// [`SKIPPED_ROWS_INITIALIZER`](Self::SKIPPED_ROWS_INITIALIZER) is present.
-pub trait OutputSink: 'static + Sized {
+pub trait OutputSink<Options>: 'static + Sized {
     /// A loop-local view of all output rows.
     ///
     /// Borrowed once before execution so the sink's buffer descriptor and shape become loop
@@ -49,11 +50,11 @@ pub trait OutputSink: 'static + Sized {
     /// unsafe when Rust cannot tie the token to the supplied row handle.
     type WriteToken: 'static;
 
-    /// The dtype of the column this sink builds, given the function's input dtypes.
+    /// The dtype of the column this sink builds, given the function options and input dtypes.
     ///
     /// **Must** be non-nullable: batch execution derives nullability from the inputs, widens the
     /// result, and masks the null rows.
-    fn sink_dtype(args: &[DType]) -> VortexResult<DType>;
+    fn sink_dtype(options: &Options, args: &[DType]) -> VortexResult<DType>;
 
     /// Allocate a sink for `rows` rows of `dtype`, which is this sink's own
     /// [`sink_dtype`](Self::sink_dtype). Called once per batch.
@@ -120,7 +121,7 @@ pub struct UninitElementSink<T> {
     row_count: usize,
 }
 
-impl<T: OutputElement + Copy + Default> OutputSink for UninitElementSink<T> {
+impl<T: OutputElement + Copy + Default, Options> OutputSink<Options> for UninitElementSink<T> {
     type Rows<'a> = &'a mut [MaybeUninit<T>];
 
     const SKIPPED_ROWS_INITIALIZER: Option<for<'a> fn(&mut Self::Rows<'a>)> = Some(|rows| {
@@ -132,7 +133,7 @@ impl<T: OutputElement + Copy + Default> OutputSink for UninitElementSink<T> {
     type Row<'a> = &'a mut MaybeUninit<T>;
     type WriteToken = InitializedElement;
 
-    fn sink_dtype(_args: &[DType]) -> VortexResult<DType> {
+    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(T::element_dtype())
     }
 

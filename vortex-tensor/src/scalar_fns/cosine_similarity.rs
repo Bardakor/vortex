@@ -83,7 +83,7 @@ impl RowFn for CosineSimilarity {
         Ok(EmptyOptions)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         args: &[DType],
@@ -139,6 +139,8 @@ impl RowFn for CosineSimilarity {
         }
     }
 }
+
+vortex_array::impl_row_fn_vtable!(CosineSimilarity);
 
 impl ScalarFnArrayVTable for CosineSimilarity {
     fn serialize(

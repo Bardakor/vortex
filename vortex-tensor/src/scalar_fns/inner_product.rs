@@ -69,7 +69,7 @@ impl RowFn for InnerProduct {
         Ok(EmptyOptions)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         args: &[DType],
@@ -124,6 +124,8 @@ impl RowFn for InnerProduct {
         .map(RowExecution::Output))
     }
 }
+
+vortex_array::impl_row_fn_vtable!(InnerProduct);
 
 impl ScalarFnArrayVTable for InnerProduct {
     fn serialize(

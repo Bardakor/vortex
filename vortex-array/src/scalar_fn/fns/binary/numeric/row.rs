@@ -28,6 +28,7 @@ use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::VecExecutionArgs;
+use crate::scalar_fn::execute_rows;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::row::InitializedElement;
 use crate::scalar_fn::row::UninitElementSink;
@@ -40,7 +41,7 @@ pub(super) fn execute_numeric_primitive(
 ) -> VortexResult<ArrayRef> {
     let args = VecExecutionArgs::new(vec![lhs.clone(), rhs.clone()], lhs.len());
 
-    ScalarFnVTable::execute(&NumericBinary, &op, &args, ctx)
+    execute_rows(&NumericBinary, &op, &args, ctx)
 }
 
 /// Internal row execution for the primitive arithmetic operators.
@@ -62,7 +63,7 @@ impl RowFn for NumericBinary {
         ScalarFnVTable::id(&Binary)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         op: &Self::Options,
         args: &[DType],
@@ -88,7 +89,7 @@ fn visit_checked<T, Op, V>(visitor: V) -> VortexResult<V::VisitResult>
 where
     T: NativePType,
     Op: CheckedPrimitiveOp<T>,
-    V: RowVisitor,
+    V: RowVisitor<NumericOperator>,
 {
     visitor.visit_deferred::<(T, T), T, Op::Fail>(
         |(lhs, rhs)| Op::apply(lhs, rhs),
@@ -105,7 +106,7 @@ where
 fn visit_div<T, V>(visitor: V) -> VortexResult<V::VisitResult>
 where
     T: CheckedArithmetic,
-    V: RowVisitor,
+    V: RowVisitor<NumericOperator>,
 {
     if T::PTYPE.is_float() {
         return visit_checked::<T, CheckedDiv, V>(visitor);

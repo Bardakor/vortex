@@ -70,7 +70,7 @@ impl RowFn for SpatialContains {
     }
 
     /// Containment is not symmetric, so `a` is always the container and `b` the contained.
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -92,6 +92,8 @@ impl RowFn for SpatialContains {
         )
     }
 }
+
+vortex_array::impl_row_fn_vtable!(SpatialContains);
 
 /// Per-batch state for the contains row kernel: the prepared form of whichever operand is
 /// constant for the batch. `None` marks an operand that varies by row.

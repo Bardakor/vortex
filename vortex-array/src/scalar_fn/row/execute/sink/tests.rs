@@ -13,18 +13,19 @@ use crate::array_session;
 use crate::arrays::PrimitiveArray;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
+use crate::scalar_fn::EmptyOptions;
 use crate::scalar_fn::OutputSink;
 use crate::scalar_fn::VecExecutionArgs;
 use crate::validity::Validity;
 
 struct NonSkippingSink;
 
-impl OutputSink for NonSkippingSink {
+impl<Options> OutputSink<Options> for NonSkippingSink {
     type Rows<'a> = ();
     type Row<'a> = ();
     type WriteToken = ();
 
-    fn sink_dtype(_args: &[DType]) -> VortexResult<DType> {
+    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(DType::from(i64::PTYPE))
     }
 
@@ -54,7 +55,7 @@ fn test_non_skipping_sink_declines_before_allocation() -> VortexResult<()> {
     let valid = Mask::from_iter([true, false]);
     let mut ctx = array_session().create_execution_ctx();
 
-    let execution = execute_sink_valid_rows::<(i64,), (), NonSkippingSink, ()>(
+    let execution = execute_sink_valid_rows::<(i64,), (), NonSkippingSink, (), EmptyOptions>(
         &args,
         &DType::from(i64::PTYPE),
         &valid,

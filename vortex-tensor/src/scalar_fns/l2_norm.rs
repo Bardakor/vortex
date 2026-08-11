@@ -74,7 +74,7 @@ impl RowFn for L2Norm {
         Ok(EmptyOptions)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         args: &[DType],
@@ -121,6 +121,8 @@ pub(super) struct L2NormMetadata {
     #[prost(message, optional, tag = "1")]
     input_dtype: Option<pb::DType>,
 }
+
+vortex_array::impl_row_fn_vtable!(L2Norm);
 
 impl ScalarFnArrayVTable for L2Norm {
     fn serialize(

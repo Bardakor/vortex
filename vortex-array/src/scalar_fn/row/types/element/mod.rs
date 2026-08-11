@@ -139,7 +139,8 @@ pub trait OutputElement: 'static + Sized {
     /// Taking no arguments confines an element's dtype to a property of its Rust type, so an output
     /// whose dtype depends on runtime data (a tensor, whose dtype carries its shape) cannot be an
     /// element. Such an output uses an [`OutputSink`](crate::scalar_fn::OutputSink), whose
-    /// [`sink_dtype`](crate::scalar_fn::OutputSink::sink_dtype) does see the input dtypes.
+    /// [`sink_dtype`](crate::scalar_fn::OutputSink::sink_dtype) sees the function options and input
+    /// dtypes.
     fn element_dtype() -> DType;
 
     /// Build a column from one value per row. Called once per batch.

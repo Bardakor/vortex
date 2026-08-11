@@ -65,7 +65,7 @@ impl<'args, 'ctx, F> ExecuteRows<'args, 'ctx, F> {
 
 impl<F> private::Sealed for ExecuteRows<'_, '_, F> {}
 
-impl<F: RowFn> RowVisitor for ExecuteRows<'_, '_, F> {
+impl<F: RowFn> RowVisitor<F::Options> for ExecuteRows<'_, '_, F> {
     type VisitResult = RowExecution;
 
     fn visit_prepared<Args, Out, Prepared>(
@@ -85,16 +85,20 @@ impl<F: RowFn> RowVisitor for ExecuteRows<'_, '_, F> {
     fn visit_prepared_into<Args, Sink, Prepared, ApplyResult>(
         self,
         prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
-        apply: impl Fn(&Prepared, Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
+        apply: impl Fn(
+            &Prepared,
+            Args::Elems<'_>,
+            <Sink as OutputSink<F::Options>>::Row<'_>,
+        ) -> ApplyResult,
     ) -> VortexResult<Self::VisitResult>
     where
         Args: ElementTuple,
-        Sink: OutputSink,
-        ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
+        Sink: OutputSink<F::Options>,
+        ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<F::Options>>::WriteToken>,
     {
         const { assert_sink_visit_contract::<F, Args, ApplyResult>() };
 
-        execute_sink::<Args, Prepared, Sink, ApplyResult>(
+        execute_sink::<Args, Prepared, Sink, ApplyResult, F::Options>(
             self.args,
             self.output_dtype,
             self.ctx,
@@ -166,7 +170,7 @@ impl<'args, 'ctx, F> ExecuteValidRows<'args, 'ctx, F> {
 
 impl<F> private::Sealed for ExecuteValidRows<'_, '_, F> {}
 
-impl<F: RowFn> RowVisitor for ExecuteValidRows<'_, '_, F> {
+impl<F: RowFn> RowVisitor<F::Options> for ExecuteValidRows<'_, '_, F> {
     type VisitResult = Option<RowExecution>;
 
     fn visit_prepared<Args, Out, Prepared>(
@@ -188,16 +192,20 @@ impl<F: RowFn> RowVisitor for ExecuteValidRows<'_, '_, F> {
     fn visit_prepared_into<Args, Sink, Prepared, ApplyResult>(
         self,
         prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
-        apply: impl Fn(&Prepared, Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
+        apply: impl Fn(
+            &Prepared,
+            Args::Elems<'_>,
+            <Sink as OutputSink<F::Options>>::Row<'_>,
+        ) -> ApplyResult,
     ) -> VortexResult<Self::VisitResult>
     where
         Args: ElementTuple,
-        Sink: OutputSink,
-        ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
+        Sink: OutputSink<F::Options>,
+        ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<F::Options>>::WriteToken>,
     {
         const { assert_sink_visit_contract::<F, Args, ApplyResult>() };
 
-        execute_sink_valid_rows::<Args, Prepared, Sink, ApplyResult>(
+        execute_sink_valid_rows::<Args, Prepared, Sink, ApplyResult, F::Options>(
             self.args,
             self.output_dtype,
             self.valid,

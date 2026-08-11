@@ -60,7 +60,7 @@ pub trait RowFn: 'static + Sized + Clone + Send + Sync {
     ///
     /// Plan time and run time both call this method, so the choice **must** be a pure function of
     /// `options` and `args`. Cross-argument dtype validation belongs here.
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         options: &Self::Options,
         args: &[DType],

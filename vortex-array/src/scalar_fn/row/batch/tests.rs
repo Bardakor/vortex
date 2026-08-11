@@ -36,8 +36,9 @@ use crate::scalar_fn::OutputSink;
 use crate::scalar_fn::RowFn;
 use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
-use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::VecExecutionArgs;
+use crate::scalar_fn::execute_rows;
+use crate::scalar_fn::row_fn_return_dtype;
 use crate::validity::Validity;
 
 #[derive(Clone)]
@@ -51,6 +52,11 @@ struct OriginalInputReducer;
 
 #[derive(Clone)]
 struct DeferredOriginalReducer;
+
+#[derive(Clone)]
+struct SinkOptions;
+
+struct OptionsCheckingSink;
 
 #[derive(Clone)]
 struct InvalidKernelOutput;
@@ -71,6 +77,36 @@ enum PreparedVisit {
     Deferred,
 }
 
+impl OutputSink<bool> for OptionsCheckingSink {
+    type Rows<'a> = ();
+    type Row<'a> = ();
+    type WriteToken = ();
+
+    fn sink_dtype(enabled: &bool, _args: &[DType]) -> VortexResult<DType> {
+        if !enabled {
+            vortex_bail!(InvalidArgument: "the test sink is disabled");
+        }
+
+        Ok(DType::from(i64::PTYPE))
+    }
+
+    fn with_capacity(_rows: usize, _dtype: &DType) -> VortexResult<Self> {
+        vortex_bail!("the planning-only test sink must not be allocated")
+    }
+
+    fn rows(&mut self) -> Self::Rows<'_> {}
+
+    fn row_count_matches(_rows: &Self::Rows<'_>, _row_count: usize) -> bool {
+        true
+    }
+
+    fn row<'a>(_rows: &'a mut Self::Rows<'_>, _index: usize) -> Self::Row<'a> {}
+
+    unsafe fn finish(self) -> VortexResult<ArrayRef> {
+        vortex_bail!("the planning-only test sink must not finish")
+    }
+}
+
 impl OutputElement for NullProducingI64 {
     fn element_dtype() -> DType {
         DType::from(i64::PTYPE)
@@ -86,12 +122,12 @@ impl OutputElement for NullProducingI64 {
 
 struct I64Sink(BufferMut<i64>);
 
-impl OutputSink for I64Sink {
+impl<Options> OutputSink<Options> for I64Sink {
     type Rows<'a> = &'a mut [i64];
     type Row<'a> = &'a mut i64;
     type WriteToken = ();
 
-    fn sink_dtype(_args: &[DType]) -> VortexResult<DType> {
+    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(DType::from(i64::PTYPE))
     }
 
@@ -126,7 +162,7 @@ impl RowFn for NullarySeven {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -149,7 +185,7 @@ impl RowFn for RetryConstantAdd {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -193,7 +229,7 @@ impl RowFn for OriginalInputReducer {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -229,7 +265,7 @@ impl RowFn for DeferredOriginalReducer {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -250,6 +286,26 @@ impl RowFn for DeferredOriginalReducer {
     }
 }
 
+impl RowFn for SinkOptions {
+    type Options = bool;
+
+    const ARG_NAMES: &'static [&'static str] = &[];
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.sink_options");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit_into::<(), OptionsCheckingSink, _>(|(), ()| ())
+    }
+}
+
 impl RowFn for InvalidKernelOutput {
     type Options = EmptyOptions;
 
@@ -260,7 +316,7 @@ impl RowFn for InvalidKernelOutput {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -281,7 +337,7 @@ impl RowFn for PreparedAdd {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -344,7 +400,7 @@ fn test_dense_retry_does_not_reduce_filtered_inputs() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![lhs, rhs], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let result = ScalarFnVTable::execute(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx);
+    let result = execute_rows(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx);
 
     assert!(result.is_err());
     Ok(())
@@ -358,7 +414,7 @@ fn test_dense_retry_suppresses_null_row_failure() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![lhs, rhs], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = ScalarFnVTable::execute(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx)?;
     let expected = PrimitiveArray::new(vec![2_u8, 0], Validity::from_iter([true, false]));
 
     assert_arrays_eq!(&actual, expected.as_ref(), &mut ctx);
@@ -372,7 +428,7 @@ fn test_reduce_encoded_defers_errors_behind_nulls() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![input.clone()], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = ScalarFnVTable::execute(&DeferredOriginalReducer, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&DeferredOriginalReducer, &EmptyOptions, &args, &mut ctx)?;
 
     assert_arrays_eq!(&actual, &input, &mut ctx);
     Ok(())
@@ -384,7 +440,7 @@ fn test_reduce_encoded_precedes_constant_broadcast() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![input], 3);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = ScalarFnVTable::execute(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
     let expected = ConstantArray::new(42_i64, 3).into_array();
 
     assert_arrays_eq!(&actual, &expected, &mut ctx);
@@ -397,7 +453,7 @@ fn test_constant_input_broadcasts_one_row() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![input.clone()], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = ScalarFnVTable::execute(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
 
     assert_arrays_eq!(&actual, &input, &mut ctx);
     Ok(())
@@ -481,6 +537,16 @@ fn test_finalize_kernel_output_validates_shape_and_dtype() -> VortexResult<()> {
 }
 
 #[test]
+fn test_sink_dtype_receives_function_options() -> VortexResult<()> {
+    assert_eq!(
+        row_fn_return_dtype(&SinkOptions, &true, &[])?,
+        DType::from(i64::PTYPE)
+    );
+    assert!(row_fn_return_dtype(&SinkOptions, &false, &[]).is_err());
+    Ok(())
+}
+
+#[test]
 fn test_nonnullable_kernel_output_rejects_nulls_at_function_boundary() -> VortexResult<()> {
     let input = PrimitiveArray::from_iter([1_i64, 2]).into_array();
 
@@ -498,7 +564,7 @@ fn test_all_valid_kernel_output_rejects_nulls_at_function_boundary() -> VortexRe
 fn assert_invalid_kernel_output(input: ArrayRef) -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![input], 2);
     let mut ctx = array_session().create_execution_ctx();
-    let execution = ScalarFnVTable::execute(&InvalidKernelOutput, &EmptyOptions, &args, &mut ctx);
+    let execution = execute_rows(&InvalidKernelOutput, &EmptyOptions, &args, &mut ctx);
     let error = match execution {
         Err(error) => error,
         Ok(output) => match output.execute::<PrimitiveArray>(&mut ctx) {
@@ -544,7 +610,7 @@ fn test_prepared_visits(
     };
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = ScalarFnVTable::execute(&function, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&function, &EmptyOptions, &args, &mut ctx)?;
     let expected = if constant_rhs {
         PrimitiveArray::from_iter([4_i64, 5]).into_array()
     } else {
@@ -590,7 +656,7 @@ fn test_nullary_row_function_broadcasts() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![], 3);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = ScalarFnVTable::execute(&NullarySeven, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&NullarySeven, &EmptyOptions, &args, &mut ctx)?;
     let expected = PrimitiveArray::from_iter([7i64, 7, 7]).into_array();
 
     assert_arrays_eq!(&actual, &expected, &mut ctx);

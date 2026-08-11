@@ -87,7 +87,7 @@ impl RowFn for LazyDouble {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -105,6 +105,8 @@ impl RowFn for LazyDouble {
         doubled(&args[0], ctx).map(|output| Some(RowExecution::Output(output)))
     }
 }
+
+vortex_array::impl_row_fn_vtable!(LazyDouble);
 
 /// The same function, applying validity the way the adapter used to: materialize a mask first.
 #[derive(Clone)]

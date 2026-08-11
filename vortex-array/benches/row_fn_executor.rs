@@ -24,6 +24,7 @@ use vortex_array::scalar_fn::OutputSink;
 use vortex_array::scalar_fn::RowFn;
 use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
+use vortex_array::scalar_fn::ScalarFnVTable;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_buffer::BufferMut;
@@ -55,7 +56,7 @@ impl RowFn for RowWrappingAdd {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -79,7 +80,7 @@ impl RowFn for RowCheckedAdd {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -110,12 +111,12 @@ struct I64Sink(
     BufferMut<i64>,
 );
 
-impl OutputSink for I64Sink {
+impl<Options> OutputSink<Options> for I64Sink {
     type Rows<'a> = &'a mut [i64];
     type Row<'a> = &'a mut i64;
     type WriteToken = ();
 
-    fn sink_dtype(_args: &[DType]) -> VortexResult<DType> {
+    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(DType::from(i64::PTYPE))
     }
 
@@ -153,7 +154,7 @@ impl RowFn for RowSinkWrappingAdd {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -164,6 +165,10 @@ impl RowFn for RowSinkWrappingAdd {
         })
     }
 }
+
+vortex_array::impl_row_fn_vtable!(RowWrappingAdd);
+vortex_array::impl_row_fn_vtable!(RowCheckedAdd);
+vortex_array::impl_row_fn_vtable!(RowSinkWrappingAdd);
 
 fn inputs() -> (ArrayRef, ArrayRef) {
     let lhs = (0..ROWS)
@@ -201,7 +206,7 @@ fn nullable_inputs() -> (ArrayRef, ArrayRef) {
 
 fn bench_row_fn<F>(bencher: Bencher, function: F, make_inputs: fn() -> (ArrayRef, ArrayRef))
 where
-    F: RowFn<Options = EmptyOptions>,
+    F: RowFn<Options = EmptyOptions> + ScalarFnVTable<Options = EmptyOptions>,
 {
     bencher
         .with_inputs(make_inputs)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! The [`ScalarFnVTable`] adapter shared by every [`RowFn`].
+//! The explicit [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable) adapter for [`RowFn`].
 //!
 //! The [`visitor`](super::visitor) module validates and executes the concrete row signature
 //! selected by dispatch. This module connects those visits to batch execution and exposes the
@@ -9,20 +9,13 @@
 
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
-use vortex_session::VortexSession;
 
 use super::row_fn::RowFn;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::dtype::DType;
-use crate::expr::Expression;
-use crate::expr::union_child_validities;
-use crate::scalar_fn::Arity;
 use crate::scalar_fn::BorrowedExecutionArgs;
-use crate::scalar_fn::ChildName;
 use crate::scalar_fn::ExecutionArgs;
-use crate::scalar_fn::ScalarFnId;
-use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::row::batch::Batch;
 use crate::scalar_fn::row::batch::KernelArgs;
 use crate::scalar_fn::row::batch::finalize_kernel_output;
@@ -31,92 +24,144 @@ use crate::scalar_fn::row::visitor::ExecuteRows;
 use crate::scalar_fn::row::visitor::ExecuteValidRows;
 use crate::scalar_fn::row::visitor::PlanRows;
 
-/// Implement [`ScalarFnVTable`] for every [`RowFn`].
-impl<F: RowFn> ScalarFnVTable for F {
-    type Options = F::Options;
+/// Implement [`ScalarFnVTable`](crate::scalar_fn::ScalarFnVTable) for one concrete [`RowFn`].
+///
+/// Adoption is explicit so a function that needs custom coercion, simplification, reduction, or
+/// formatting hooks can implement the vtable itself and delegate only execution to
+/// [`execute_rows`](crate::scalar_fn::execute_rows).
+#[macro_export]
+macro_rules! impl_row_fn_vtable {
+    ($function:ty) => {
+        impl $crate::scalar_fn::ScalarFnVTable for $function {
+            type Options = <$function as $crate::scalar_fn::RowFn>::Options;
 
-    fn id(&self) -> ScalarFnId {
-        RowFn::id(self)
-    }
+            fn id(&self) -> $crate::scalar_fn::ScalarFnId {
+                $crate::scalar_fn::RowFn::id(self)
+            }
 
-    fn serialize(&self, options: &Self::Options) -> VortexResult<Option<Vec<u8>>> {
-        RowFn::serialize(self, options)
-    }
+            fn serialize(
+                &self,
+                options: &Self::Options,
+            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<Option<Vec<u8>>> {
+                $crate::scalar_fn::RowFn::serialize(self, options)
+            }
 
-    fn deserialize(&self, metadata: &[u8], session: &VortexSession) -> VortexResult<Self::Options> {
-        RowFn::deserialize(self, metadata, session)
-    }
+            fn deserialize(
+                &self,
+                metadata: &[u8],
+                session: &$crate::scalar_fn::row_fn_macro_support::VortexSession,
+            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<Self::Options> {
+                $crate::scalar_fn::RowFn::deserialize(self, metadata, session)
+            }
 
-    fn arity(&self, _options: &Self::Options) -> Arity {
-        Arity::Exact(F::ARG_NAMES.len())
-    }
+            fn arity(&self, _options: &Self::Options) -> $crate::scalar_fn::Arity {
+                $crate::scalar_fn::Arity::Exact(
+                    <$function as $crate::scalar_fn::RowFn>::ARG_NAMES.len(),
+                )
+            }
 
-    fn child_name(&self, _options: &Self::Options, child_index: usize) -> ChildName {
-        ChildName::from(F::ARG_NAMES[child_index])
-    }
+            fn child_name(
+                &self,
+                _options: &Self::Options,
+                child_index: usize,
+            ) -> $crate::scalar_fn::ChildName {
+                $crate::scalar_fn::ChildName::from(
+                    <$function as $crate::scalar_fn::RowFn>::ARG_NAMES[child_index],
+                )
+            }
 
-    fn return_dtype(&self, options: &Self::Options, args: &[DType]) -> VortexResult<DType> {
-        let plan = self.dispatch(options, args, PlanRows::<F>::new(args))?;
+            fn return_dtype(
+                &self,
+                options: &Self::Options,
+                args: &[$crate::dtype::DType],
+            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<$crate::dtype::DType> {
+                $crate::scalar_fn::row_fn_return_dtype(self, options, args)
+            }
 
-        Ok(plan.result_dtype(args))
-    }
+            fn execute(
+                &self,
+                options: &Self::Options,
+                args: &dyn $crate::scalar_fn::ExecutionArgs,
+                ctx: &mut $crate::ExecutionCtx,
+            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<$crate::ArrayRef> {
+                $crate::scalar_fn::execute_rows(self, options, args, ctx)
+            }
 
-    fn execute(
-        &self,
-        options: &Self::Options,
-        args: &dyn ExecutionArgs,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<ArrayRef> {
-        // Nullary functions have no input validity to propagate, so they skip batch execution.
-        if args.num_inputs() == 0 {
-            let result_dtype = ScalarFnVTable::return_dtype(self, options, &[])?;
-            let nullary_args = KernelArgs {
-                arrays: &[],
-                row_count: args.row_count(),
-                dtypes: &[],
-                output_dtype: &result_dtype,
-            };
+            fn validity(
+                &self,
+                _options: &Self::Options,
+                expression: &$crate::expr::Expression,
+            ) -> $crate::scalar_fn::row_fn_macro_support::VortexResult<
+                Option<$crate::expr::Expression>,
+            > {
+                $crate::expr::union_child_validities(expression)
+            }
 
-            let execution = execute_rows(self, options, nullary_args, ctx)?;
-            let values = VortexResult::from(execution)?;
+            fn is_strict(&self, _options: &Self::Options) -> bool {
+                true
+            }
 
-            return finalize_kernel_output(
-                RowFn::id(self),
-                &result_dtype,
-                args.row_count(),
-                values,
-                ctx,
-            );
+            fn is_fallible(&self, _options: &Self::Options) -> bool {
+                <$function as $crate::scalar_fn::RowFn>::FALLIBLE
+            }
         }
+    };
+}
 
-        let batch = prepare_batch(self, options, args)?;
-        batch.execute(
-            |args, ctx| self.reduce_encoded(options, args.arrays, ctx),
-            |args, ctx| execute_rows(self, options, args, ctx),
-            |args, valid, ctx| try_execute_rows_unfiltered(self, options, args, valid, ctx),
+/// Compute the return dtype for a [`RowFn`] without adopting its complete scalar-function vtable.
+pub fn row_fn_return_dtype<F: RowFn>(
+    function: &F,
+    options: &F::Options,
+    args: &[DType],
+) -> VortexResult<DType> {
+    let plan = function.dispatch(options, args, PlanRows::<F>::new(args, options))?;
+
+    Ok(plan.result_dtype(args))
+}
+
+/// Execute a [`RowFn`] while preserving a caller-owned scalar-function vtable.
+///
+/// Existing vtables delegate here when they need row execution but retain custom hooks for other
+/// capabilities. A simple RowFn-only function can use [`impl_row_fn_vtable`] instead.
+pub fn execute_rows<F: RowFn>(
+    function: &F,
+    options: &F::Options,
+    args: &dyn ExecutionArgs,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ArrayRef> {
+    // Nullary functions have no input validity to propagate, so they skip batch execution.
+    if args.num_inputs() == 0 {
+        let result_dtype = row_fn_return_dtype(function, options, &[])?;
+        let nullary_args = KernelArgs {
+            arrays: &[],
+            row_count: args.row_count(),
+            dtypes: &[],
+            output_dtype: &result_dtype,
+        };
+
+        let execution = execute_row_kernel(function, options, nullary_args, ctx)?;
+        let values = VortexResult::from(execution)?;
+
+        return finalize_kernel_output(
+            RowFn::id(function),
+            &result_dtype,
+            args.row_count(),
+            values,
             ctx,
-        )
+        );
     }
 
-    fn validity(
-        &self,
-        _options: &Self::Options,
-        expression: &Expression,
-    ) -> VortexResult<Option<Expression>> {
-        union_child_validities(expression)
-    }
-
-    fn is_strict(&self, _options: &Self::Options) -> bool {
-        true
-    }
-
-    fn is_fallible(&self, _options: &Self::Options) -> bool {
-        F::FALLIBLE
-    }
+    let batch = prepare_batch(function, options, args)?;
+    batch.execute(
+        |args, ctx| function.reduce_encoded(options, args.arrays, ctx),
+        |args, ctx| execute_row_kernel(function, options, args, ctx),
+        |args, valid, ctx| try_execute_rows_unfiltered(function, options, args, valid, ctx),
+        ctx,
+    )
 }
 
 /// Run the encoding-aware rewrite when available, or execute the selected row loop.
-fn execute_rows<F: RowFn>(
+fn execute_row_kernel<F: RowFn>(
     function: &F,
     options: &F::Options,
     args: KernelArgs<'_>,
@@ -155,6 +200,6 @@ fn prepare_batch<F: RowFn>(
     args: &dyn ExecutionArgs,
 ) -> VortexResult<Batch> {
     Batch::new(RowFn::id(function), args, |arg_dtypes| {
-        function.dispatch(options, arg_dtypes, PlanRows::<F>::new(arg_dtypes))
+        function.dispatch(options, arg_dtypes, PlanRows::<F>::new(arg_dtypes, options))
     })
 }

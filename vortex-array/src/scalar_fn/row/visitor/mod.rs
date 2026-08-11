@@ -29,7 +29,7 @@ pub(super) use plan::PlanRows;
 ///
 /// Only the framework implements this trait. The `visit_prepared*` methods derive shared state
 /// from constant arguments before visiting any rows.
-pub trait RowVisitor: private::Sealed + Sized {
+pub trait RowVisitor<Options>: private::Sealed + Sized {
     /// The framework result of visiting one concrete row signature.
     ///
     /// This is a batch plan or execution result, not the per-row `Out` returned by [`visit`] and
@@ -77,6 +77,11 @@ pub trait RowVisitor: private::Sealed + Sized {
     /// other than writing the supplied row handle. Dense execution can pass unspecified values
     /// from null rows.
     ///
+    /// On success, `apply` must return the write token produced by writing the `Sink::Row` supplied
+    /// to that same invocation. It must not return evidence produced for another row, sink, or
+    /// unrelated local cell. Violating this requirement can make the unsafe
+    /// [`OutputSink::finish`] precondition false.
+    ///
     /// # Prerequisites
     ///
     /// The framework checks these at compile time:
@@ -87,12 +92,12 @@ pub trait RowVisitor: private::Sealed + Sized {
     ///   `Args` or computing the result can fail.
     fn visit_into<Args, Sink, ApplyResult>(
         self,
-        apply: impl Fn(Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
+        apply: impl Fn(Args::Elems<'_>, <Sink as OutputSink<Options>>::Row<'_>) -> ApplyResult,
     ) -> VortexResult<Self::VisitResult>
     where
         Args: ElementTuple,
-        Sink: OutputSink,
-        ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
+        Sink: OutputSink<Options>,
+        ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<Options>>::WriteToken>,
     {
         self.visit_prepared_into::<Args, Sink, (), ApplyResult>(
             |_| (),
@@ -104,12 +109,16 @@ pub trait RowVisitor: private::Sealed + Sized {
     fn visit_prepared_into<Args, Sink, Prepared, ApplyResult>(
         self,
         prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
-        apply: impl Fn(&Prepared, Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
+        apply: impl Fn(
+            &Prepared,
+            Args::Elems<'_>,
+            <Sink as OutputSink<Options>>::Row<'_>,
+        ) -> ApplyResult,
     ) -> VortexResult<Self::VisitResult>
     where
         Args: ElementTuple,
-        Sink: OutputSink,
-        ApplyResult: SinkResult<WriteToken = Sink::WriteToken>;
+        Sink: OutputSink<Options>,
+        ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<Options>>::WriteToken>;
 
     /// Visit a row computation that returns an owned output and deferred failure evidence.
     ///

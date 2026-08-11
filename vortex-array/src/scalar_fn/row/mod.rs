@@ -35,3 +35,5 @@ mod visitor;
 pub use visitor::RowVisitor;
 
 mod vtable;
+pub use vtable::execute_rows;
+pub use vtable::row_fn_return_dtype;

@@ -22,20 +22,20 @@ use crate::scalar_fn::SinkResult;
 ///
 /// The sink lives here rather than in the closure, so `apply` stays [`Fn`] and mutable output state
 /// does not need to be captured by the closure.
-pub fn execute_sink<Args, Prepared, Sink, ApplyResult>(
+pub fn execute_sink<Args, Prepared, Sink, ApplyResult, Options>(
     args: &dyn ExecutionArgs,
     sink_dtype: &DType,
     ctx: &mut ExecutionCtx,
     prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
-    apply: impl Fn(&Prepared, Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
+    apply: impl Fn(&Prepared, Args::Elems<'_>, <Sink as OutputSink<Options>>::Row<'_>) -> ApplyResult,
 ) -> VortexResult<RowExecution>
 where
     Args: ElementTuple,
-    Sink: OutputSink,
-    ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
+    Sink: OutputSink<Options>,
+    ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<Options>>::WriteToken>,
 {
     let row_count = args.row_count();
-    let mut sink = Sink::with_capacity(row_count, sink_dtype)?;
+    let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count, sink_dtype)?;
     let columns = Args::decode(args, ctx)?;
     let prepared = prepare(Args::constants(&columns));
     let varying = Args::varying(&columns);
@@ -45,9 +45,9 @@ where
     {
         // Borrow the sink once so its shape and buffer descriptor remain loop invariants. This
         // scope releases the borrow before `finish_sink` consumes the sink.
-        let mut rows = sink.rows();
+        let mut rows = <Sink as OutputSink<Options>>::rows(&mut sink);
         vortex_ensure!(
-            Sink::row_count_matches(&rows, row_count),
+            <Sink as OutputSink<Options>>::row_count_matches(&rows, row_count),
             "the output sink does not address exactly {row_count} rows",
         );
 
@@ -58,41 +58,46 @@ where
                 // SAFETY: `ensure_decoded_lengths` proved every varying column has `row_count`
                 // rows before the loop.
                 let elements = unsafe { Args::get_varying_unchecked(&varying, index) };
-                apply(&prepared, elements, Sink::row(&mut rows, index))
-                    .accumulate(&mut accumulated)?;
+                apply(
+                    &prepared,
+                    elements,
+                    <Sink as OutputSink<Options>>::row(&mut rows, index),
+                )
+                .accumulate(&mut accumulated)?;
             }
         } else {
             for index in 0..row_count {
                 apply(
                     &prepared,
                     Args::get(&columns, index),
-                    Sink::row(&mut rows, index),
+                    <Sink as OutputSink<Options>>::row(&mut rows, index),
                 )
                 .accumulate(&mut accumulated)?;
             }
         }
     }
 
-    finish_sink(sink)
+    finish_sink::<Sink, Options>(sink)
 }
 
 /// Run a prepared sink over only the rows set in `valid`, or decline when the sink cannot skip.
-pub fn execute_sink_valid_rows<Args, Prepared, Sink, ApplyResult>(
+pub fn execute_sink_valid_rows<Args, Prepared, Sink, ApplyResult, Options>(
     args: &dyn ExecutionArgs,
     sink_dtype: &DType,
     valid: &Mask,
     ctx: &mut ExecutionCtx,
     prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
-    apply: impl Fn(&Prepared, Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
+    apply: impl Fn(&Prepared, Args::Elems<'_>, <Sink as OutputSink<Options>>::Row<'_>) -> ApplyResult,
 ) -> VortexResult<Option<RowExecution>>
 where
     Args: ElementTuple,
-    Sink: OutputSink,
-    ApplyResult: SinkResult<WriteToken = Sink::WriteToken>,
+    Sink: OutputSink<Options>,
+    ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<Options>>::WriteToken>,
 {
     // Decline before input decoding or sink allocation when this sink cannot initialize rows that
     // the mask skips. The capability and the operation are the same function pointer.
-    let Some(initialize_skipped_rows) = Sink::SKIPPED_ROWS_INITIALIZER else {
+    let Some(initialize_skipped_rows) = <Sink as OutputSink<Options>>::SKIPPED_ROWS_INITIALIZER
+    else {
         return Ok(None);
     };
 
@@ -103,7 +108,7 @@ where
     };
     let prepared = prepare(Args::constants(&columns));
     let row_count = args.row_count();
-    let mut sink = Sink::with_capacity(row_count, sink_dtype)?;
+    let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count, sink_dtype)?;
     let mut accumulated = ApplyResult::Accumulated::default();
 
     // Batch execution resolves all-valid and all-null inputs before selecting this path.
@@ -116,9 +121,9 @@ where
     );
 
     {
-        let mut rows = sink.rows();
+        let mut rows = <Sink as OutputSink<Options>>::rows(&mut sink);
         vortex_ensure!(
-            Sink::row_count_matches(&rows, row_count),
+            <Sink as OutputSink<Options>>::row_count_matches(&rows, row_count),
             "the output sink does not address exactly {row_count} rows",
         );
 
@@ -143,12 +148,12 @@ where
                     // SAFETY: `ensure_decoded_lengths` proved every varying column has
                     // `row_count` rows, and mask indices are below `row_count`.
                     unsafe { Args::get_varying_unchecked(varying, index) },
-                    Sink::row(&mut rows, index),
+                    <Sink as OutputSink<Options>>::row(&mut rows, index),
                 ),
                 None => apply(
                     &prepared,
                     Args::get(&columns, index),
-                    Sink::row(&mut rows, index),
+                    <Sink as OutputSink<Options>>::row(&mut rows, index),
                 ),
             };
             if let Err(err) = result.accumulate(&mut accumulated) {
@@ -161,14 +166,17 @@ where
         }
     }
 
-    finish_sink(sink).map(Some)
+    finish_sink::<Sink, Options>(sink).map(Some)
 }
 
-fn finish_sink<S: OutputSink>(sink: S) -> VortexResult<RowExecution> {
+fn finish_sink<S, Options>(sink: S) -> VortexResult<RowExecution>
+where
+    S: OutputSink<Options>,
+{
     // SAFETY: callers reach this helper only after every completed callback returned the sink's
     // write token. Skipped-row traversal also ran the sink's initializer before visiting its mask.
     // The sink contract defines how that evidence establishes initialization of its row storage.
-    unsafe { sink.finish() }.map(RowExecution::Output)
+    unsafe { <S as OutputSink<Options>>::finish(sink) }.map(RowExecution::Output)
 }
 
 #[cfg(test)]

@@ -64,7 +64,7 @@ impl RowFn for SpatialIntersects {
         Ok(EmptyOptions)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -83,6 +83,8 @@ impl RowFn for SpatialIntersects {
         )
     }
 }
+
+vortex_array::impl_row_fn_vtable!(SpatialIntersects);
 
 /// Per-batch state for the intersects row kernel: the bounding rect of each operand that is
 /// constant for the batch.

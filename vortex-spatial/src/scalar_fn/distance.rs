@@ -60,7 +60,7 @@ impl RowFn for SpatialDistance {
         Ok(EmptyOptions)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         _args: &[DType],
@@ -74,6 +74,8 @@ impl RowFn for SpatialDistance {
         )
     }
 }
+
+vortex_array::impl_row_fn_vtable!(SpatialDistance);
 
 #[cfg(test)]
 mod tests {

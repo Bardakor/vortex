@@ -20,6 +20,7 @@ use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::VecExecutionArgs;
+use crate::scalar_fn::execute_rows;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::operators::CompareOperator;
 
@@ -81,7 +82,7 @@ pub(super) fn compare_primitive_with_path(
 
     let args = VecExecutionArgs::new(vec![lhs.clone(), rhs.clone()], lhs.len());
 
-    ScalarFnVTable::execute(&PrimitiveCompare, &op, &args, ctx)
+    execute_rows(&PrimitiveCompare, &op, &args, ctx)
 }
 
 /// Internal row execution for primitive comparison operators.
@@ -97,7 +98,7 @@ impl RowFn for PrimitiveCompare {
         ScalarFnVTable::id(&Binary)
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         op: &Self::Options,
         args: &[DType],
@@ -135,7 +136,7 @@ fn use_columnar_comparison(
 fn visit_compare<T, V>(op: CompareOperator, visitor: V) -> VortexResult<V::VisitResult>
 where
     T: NativePType,
-    V: RowVisitor,
+    V: RowVisitor<CompareOperator>,
 {
     match op {
         CompareOperator::Eq => visitor.visit::<(T, T), bool>(|(lhs, rhs)| lhs.is_eq(rhs)),

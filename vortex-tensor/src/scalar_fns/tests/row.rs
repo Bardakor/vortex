@@ -42,7 +42,7 @@ impl RowFn for L1Norm {
         *ID
     }
 
-    fn dispatch<V: RowVisitor>(
+    fn dispatch<V: RowVisitor<Self::Options>>(
         &self,
         _options: &Self::Options,
         args: &[DType],
@@ -56,6 +56,8 @@ impl RowFn for L1Norm {
         })
     }
 }
+
+vortex_array::impl_row_fn_vtable!(L1Norm);
 
 fn l1_norm_row<T: Float + NativePType>(row: &[T]) -> T {
     row.iter().fold(T::zero(), |acc, &x| acc + x.abs())
