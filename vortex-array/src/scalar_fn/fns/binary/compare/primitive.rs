@@ -3,9 +3,7 @@
 
 //! Primitive comparison execution through [`RowFn`].
 
-#[cfg(target_arch = "x86_64")]
 mod columnar;
-#[cfg(target_arch = "x86_64")]
 mod operand;
 
 use vortex_error::VortexResult;
@@ -36,8 +34,49 @@ pub(super) fn compare_primitive(
     op: CompareOperator,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    #[cfg(target_arch = "x86_64")]
-    if use_columnar_comparison(lhs, rhs, op)? {
+    compare_primitive_with_path(lhs, rhs, op, PrimitiveComparisonPath::Auto, ctx)
+}
+
+/// Selects automatic production dispatch or a forced implementation in tests.
+#[derive(Clone, Copy)]
+pub(super) enum PrimitiveComparisonPath {
+    /// Use the architecture and operand-specific production policy.
+    Auto,
+
+    /// Force row execution.
+    #[cfg(test)]
+    Row,
+
+    /// Force fused columnar execution.
+    #[cfg(test)]
+    Columnar,
+}
+
+/// Compare primitives through the selected implementation.
+pub(super) fn compare_primitive_with_path(
+    lhs: &ArrayRef,
+    rhs: &ArrayRef,
+    op: CompareOperator,
+    path: PrimitiveComparisonPath,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ArrayRef> {
+    let use_columnar = match path {
+        PrimitiveComparisonPath::Auto => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                use_columnar_comparison(lhs, rhs, op)?
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        }
+        #[cfg(test)]
+        PrimitiveComparisonPath::Row => false,
+        #[cfg(test)]
+        PrimitiveComparisonPath::Columnar => true,
+    };
+    if use_columnar {
         return columnar::compare_primitive(lhs, rhs, op, ctx);
     }
 
@@ -75,23 +114,22 @@ impl RowFn for PrimitiveCompare {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn use_columnar_comparison(
     lhs: &ArrayRef,
     rhs: &ArrayRef,
     op: CompareOperator,
 ) -> VortexResult<bool> {
-    if matches!(op, CompareOperator::Eq | CompareOperator::NotEq) {
-        return Ok(false);
-    }
-
     let ptype = PType::try_from(lhs.dtype())?;
-    Ok(match ptype {
+    Ok(match (ptype, op) {
+        // Equality bit-packs efficiently for every type supported by the columnar path.
+        (PType::I64 | PType::U64 | PType::F64, CompareOperator::Eq | CompareOperator::NotEq) => {
+            true
+        }
         // The fused comparison and bit-packing loop produces better x86 code for signed 64-bit
         // integers and f64. The RowFn byte-output loop remains faster for narrower lanes.
-        PType::I64 | PType::F64 => true,
+        (PType::I64 | PType::F64, _) => true,
         // LLVM vectorizes varying u64 inputs, but not the mixed-constant RowFn loop.
-        PType::U64 => lhs.as_constant().is_some() || rhs.as_constant().is_some(),
+        (PType::U64, _) => lhs.as_constant().is_some() || rhs.as_constant().is_some(),
         _ => false,
     })
 }

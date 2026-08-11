@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Fused comparison and bit-packing for wide x86 lanes.
+//! Fused comparison and bit-packing for wide primitive lanes.
 
 use vortex_buffer::BitBuffer;
 use vortex_error::VortexResult;
@@ -85,7 +85,6 @@ fn compare_primitive_typed<T: NativePType>(
     Ok(BoolArray::try_new(bits, validity)?.into_array())
 }
 
-#[inline(always)]
 fn apply_op<T: NativePType>(lhs: T, rhs: T, op: CompareOperator) -> bool {
     match op {
         CompareOperator::Eq => lhs.is_eq(rhs),
