@@ -6,6 +6,9 @@
 use prost::Message;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
+use vortex_array::IntoArray;
+use vortex_array::arrays::Constant;
+use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::ScalarFn as ScalarFnArrayEncoding;
 use vortex_array::arrays::ScalarFnArray;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayExt;
@@ -15,6 +18,7 @@ use vortex_array::arrays::scalar_fn::plugin::ScalarFnArrayVTable;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::proto::dtype as pb;
 use vortex_array::match_each_float_ptype;
+use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::EmptyOptions;
 use vortex_array::scalar_fn::InitializedElement;
 use vortex_array::scalar_fn::RowExecution;
@@ -24,6 +28,7 @@ use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::TypedScalarFnInstance;
 use vortex_array::scalar_fn::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_ensure_eq;
@@ -117,18 +122,45 @@ impl RowFn for L2Norm {
         _ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<RowExecution>> {
         let input = &args[0];
-        if !input.is::<Normalized>() {
-            return Ok(None);
+        if input.is::<Normalized>() {
+            let element_ptype = validate_tensor_float_input(input.dtype())?.element_ptype();
+            let (_, norms) = extract_normalized_children(input);
+            vortex_ensure!(
+                norms.dtype().is_primitive(),
+                "normalized norms must be primitive, got {}",
+                norms.dtype(),
+            );
+            vortex_ensure_eq!(norms.dtype().as_ptype(), element_ptype);
+            return Ok(Some(RowExecution::Output(norms)));
         }
+
+        let Some(constant) = input.as_opt::<Constant>() else {
+            return Ok(None);
+        };
         let element_ptype = validate_tensor_float_input(input.dtype())?.element_ptype();
-        let (_, norms) = extract_normalized_children(input);
-        vortex_ensure!(
-            norms.dtype().is_primitive(),
-            "normalized norms must be primitive, got {}",
-            norms.dtype(),
-        );
-        vortex_ensure_eq!(norms.dtype().as_ptype(), element_ptype);
-        Ok(Some(RowExecution::Output(norms)))
+        let norm_dtype =
+            DType::Primitive(element_ptype, input.dtype().as_extension().nullability());
+        let storage = constant.scalar().as_extension().to_storage_scalar();
+
+        let Some(elements) = storage.as_list().elements() else {
+            let output = ConstantArray::new(Scalar::null(norm_dtype), input.len());
+            return Ok(Some(RowExecution::Output(output.into_array())));
+        };
+
+        let norm = match_each_float_ptype!(element_ptype, |T| {
+            let values: Vec<T> = elements
+                .iter()
+                .map(|element| {
+                    element
+                        .as_primitive()
+                        .as_::<T>()
+                        .vortex_expect("tensor element must match its declared ptype")
+                })
+                .collect();
+            Scalar::try_new(norm_dtype, Some(l2_norm_row::<T>(&values).into()))
+        })?;
+        let output = ConstantArray::new(norm, input.len());
+        Ok(Some(RowExecution::Output(output.into_array())))
     }
 }
 
