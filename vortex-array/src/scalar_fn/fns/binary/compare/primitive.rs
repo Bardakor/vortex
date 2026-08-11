@@ -11,6 +11,7 @@ use vortex_error::vortex_err;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
+use crate::arrays::Constant;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::PType;
@@ -131,8 +132,8 @@ fn use_columnar_comparison(
         // The fused comparison and bit-packing loop produces better x86 code for signed 64-bit
         // integers and f64. The RowFn byte-output loop remains faster for narrower lanes.
         (PType::I64 | PType::F64, _) => true,
-        // LLVM vectorizes varying u64 inputs, but not the mixed-constant RowFn loop.
-        (PType::U64, _) => lhs.as_constant().is_some() || rhs.as_constant().is_some(),
+        // LLVM vectorizes per-row u64 inputs, but not the mixed-constant RowFn loop.
+        (PType::U64, _) => lhs.is::<Constant>() || rhs.is::<Constant>(),
         _ => false,
     })
 }
