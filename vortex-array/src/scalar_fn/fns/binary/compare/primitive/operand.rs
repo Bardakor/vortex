@@ -15,7 +15,7 @@ use crate::validity::Validity;
 
 /// A materialized primitive column, a non-null constant, or an all-null constant.
 pub(super) enum PrimitiveOperand<T: NativePType> {
-    /// A varying primitive column and its validity.
+    /// A per-row primitive column and its validity.
     Array {
         /// The materialized values.
         values: Buffer<T>,
