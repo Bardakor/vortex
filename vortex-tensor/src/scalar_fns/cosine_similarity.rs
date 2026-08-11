@@ -160,8 +160,6 @@ impl RowFn for CosineSimilarity {
     }
 }
 
-vortex_array::impl_row_fn_vtable!(CosineSimilarity);
-
 impl ScalarFnArrayVTable for CosineSimilarity {
     fn serialize(
         &self,
