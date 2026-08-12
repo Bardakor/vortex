@@ -14,11 +14,7 @@ use vortex_utils::aliases::hash_set::HashSet;
 use crate::expr::Expression;
 use crate::expr::variable::Variable;
 
-/// A body evaluated with named bindings for `params`.
-///
-/// A lambda is **not a value**: its parameter dtypes are determined by whatever applies it, so it
-/// has no dtype of its own and cannot be bound by [`bind_scope`](Expression::bind_scope). The
-/// higher-order function that applies it supplies its parameter types and binds its body.
+/// An expression `body` evaluated with named bindings `params`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lambda {
     params: Arc<Vec<Variable>>,
@@ -60,25 +56,11 @@ impl Lambda {
     pub fn body(&self) -> &Expression {
         &self.body
     }
-
-    /// Take the body if this lambda holds the only reference to it.
-    ///
-    /// Used by `Expression`'s iterative [`Drop`] to drain a lambda chain onto a worklist instead of
-    /// recursing through it, which would overflow the stack on a deeply nested chain.
-    pub(crate) fn take_unique_body(&mut self) -> Option<Expression> {
-        Arc::get_mut(&mut self.body).map(|body| std::mem::replace(body, Expression::Root))
-    }
 }
 
 impl Display for Lambda {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "({}) -> {}", self.params.iter().join(", "), self.body)
-    }
-}
-
-impl From<Lambda> for Expression {
-    fn from(lambda: Lambda) -> Self {
-        Expression::Lambda(lambda)
     }
 }
 

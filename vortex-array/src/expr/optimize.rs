@@ -216,15 +216,12 @@ mod tests {
     use crate::expr::cast;
     use crate::expr::col;
     use crate::expr::eq;
-    use crate::expr::fill_null;
     use crate::expr::get_item;
-    use crate::expr::lambda;
     use crate::expr::lit;
     use crate::expr::lt_eq;
     use crate::expr::or;
     use crate::expr::root;
     use crate::expr::test_harness::struct_dtype;
-    use crate::expr::var;
     use crate::scalar::Scalar;
     use crate::scalar_fn::fns::literal::Literal;
 
@@ -279,16 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lambda_is_an_optimization_boundary() -> VortexResult<()> {
-        let expr = lambda(["x"], fill_null(var("x"), lit(0_i32)))?;
-        assert_eq!(expr.clone().optimize_recursive(&struct_dtype())?, expr);
-        Ok(())
-    }
-
-    /// The boundary must not stop optimization of everything around it. `cast` of a literal folds,
-    /// which is a rewrite the optimizer actually performs.
-    #[test]
-    fn optimization_still_applies_outside_a_lambda() -> VortexResult<()> {
+    fn optimization_folds_a_literal_cast() -> VortexResult<()> {
         let expr = lt_eq(
             col("a"),
             cast(

@@ -77,17 +77,14 @@ pub fn var(name: impl AsRef<str>) -> Expression {
     Variable::new(name).into()
 }
 
-/// Creates a lambda binding `params` over `body`.
-///
-/// A lambda is not a value: the higher-order function that applies it supplies its parameter
-/// types and binds its body.
+/// Creates standalone lambda syntax binding `params` over `body`.
 ///
 /// Returns an error when a parameter name is repeated in the same lambda.
 pub fn lambda(
     params: impl IntoIterator<Item = impl Into<Variable>>,
     body: Expression,
-) -> VortexResult<Expression> {
-    Lambda::try_new(params, body).map(Into::into)
+) -> VortexResult<Lambda> {
+    Lambda::try_new(params, body)
 }
 
 /// Return whether the expression is a root expression.

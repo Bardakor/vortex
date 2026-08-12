@@ -357,9 +357,6 @@ impl Expression {
                     variable: variable.clone(),
                 })
             }
-            Expression::Lambda(_) => {
-                vortex_bail!("a lambda must be bound by the higher-order function that applies it")
-            }
             Expression::Scalar {
                 scalar_fn,
                 children,
@@ -405,7 +402,6 @@ mod tests {
     use crate::expr::checked_add;
     use crate::expr::col;
     use crate::expr::eq;
-    use crate::expr::lambda;
     use crate::expr::lit;
     use crate::expr::root;
     use crate::expr::test_harness::struct_dtype;
@@ -524,22 +520,6 @@ mod tests {
             &DType::Bool(Nullability::NonNullable)
         );
         Ok(())
-    }
-
-    #[test]
-    fn binding_lambda_syntax_returns_an_error() -> VortexResult<()> {
-        assert!(lambda(["x"], var("x"))?.bind_scope(&scope()).is_err());
-        assert!(
-            eq(lambda(["x"], var("x"))?, lit(1_i32))
-                .bind_scope(&scope())
-                .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn duplicate_lambda_parameters_are_rejected() {
-        assert!(lambda(["x", "x"], var("x")).is_err());
     }
 
     #[test]

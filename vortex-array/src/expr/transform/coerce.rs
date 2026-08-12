@@ -22,7 +22,7 @@ pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expres
     let scope = scope.clone();
 
     expr.transform_up(|node| {
-        // Leaf nodes (Root, Literal, Lambda) have no children to coerce.
+        // Leaf nodes have no children to coerce.
         if node.is_root() || node.is::<Literal>() || node.children().is_empty() {
             return Ok(Transformed::no(node));
         }

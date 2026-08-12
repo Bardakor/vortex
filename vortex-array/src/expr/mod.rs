@@ -171,9 +171,6 @@ impl PartialEq for ExactExpr {
         match (&self.0, &other.0) {
             (Expression::Root, Expression::Root) => true,
             (Expression::Variable(lhs), Expression::Variable(rhs)) => lhs == rhs,
-            (Expression::Lambda(lhs), Expression::Lambda(rhs)) => {
-                lhs.params() == rhs.params() && std::ptr::eq(lhs.body(), rhs.body())
-            }
             (
                 Expression::Scalar {
                     scalar_fn: lhs_fn,
@@ -197,11 +194,6 @@ impl Hash for ExactExpr {
             Expression::Variable(variable) => {
                 state.write_u8(2);
                 variable.hash(state);
-            }
-            Expression::Lambda(lambda) => {
-                state.write_u8(3);
-                lambda.params().hash(state);
-                std::ptr::from_ref(lambda.body()).hash(state);
             }
             Expression::Scalar {
                 scalar_fn,
@@ -341,19 +333,6 @@ mod tests {
 
         let unbound = case_when(gt(col("value"), lit(5i32)), col("value"), lit(5i32));
         assert_eq!(unbound.bind(&scope)?, case);
-        Ok(())
-    }
-
-    #[test]
-    fn exact_expr_uses_lambda_body_identity() -> VortexResult<()> {
-        let expr = lambda(["x"], root())?;
-        assert_eq!(ExactExpr(expr.clone()), ExactExpr(expr));
-
-        assert_ne!(
-            ExactExpr(lambda(["x"], root())?),
-            ExactExpr(lambda(["x"], root())?),
-            "separately allocated lambda bodies must be distinct ExactExpr keys"
-        );
         Ok(())
     }
 

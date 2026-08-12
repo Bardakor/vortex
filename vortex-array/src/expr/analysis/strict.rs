@@ -16,8 +16,6 @@ pub fn label_strict(expr: &Expression) -> BooleanLabels<'_> {
             Expression::Scalar { scalar_fn, .. } => scalar_fn.signature().is_strict(),
             // Vacuously strict: nullary, so no argument can be null.
             Expression::Root | Expression::Variable { .. } => true,
-            // Strictness is undefined for an unbound lambda.
-            Expression::Lambda { .. } => false,
         },
         |acc, &child| acc & child,
     )

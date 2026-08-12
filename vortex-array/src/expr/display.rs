@@ -5,7 +5,6 @@ use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
 
-use itertools::Itertools;
 use vortex_utils::tree::TreeDisplayAdapter;
 use vortex_utils::tree::write_branch_tree;
 
@@ -69,7 +68,7 @@ impl DisplayTreeNode for Expression {
     fn tree_child_name(&self, index: usize) -> ChildName {
         match self {
             Expression::Scalar { scalar_fn, .. } => scalar_fn.signature().child_name(index),
-            Expression::Root | Expression::Variable(_) | Expression::Lambda(_) => {
+            Expression::Root | Expression::Variable(_) => {
                 unreachable!("a leaf expression has no children")
             }
         }
@@ -80,9 +79,6 @@ impl DisplayTreeNode for Expression {
             Expression::Scalar { scalar_fn, .. } => Display::fmt(scalar_fn, f),
             Expression::Root => write!(f, "{ROOT_DISPLAY}"),
             Expression::Variable(variable) => write!(f, "${variable}"),
-            Expression::Lambda(lambda) => {
-                write!(f, "lambda({})", lambda.params().iter().join(", "))
-            }
         }
     }
 }

@@ -17,7 +17,6 @@ use vortex_error::vortex_ensure;
 use crate::dtype::DType;
 use crate::expr::display::DisplayTreeExpr;
 use crate::expr::is_not_null;
-use crate::expr::lambda::Lambda;
 use crate::expr::traversal::TraversalOrder;
 use crate::expr::traversal::pre_order_visit_down;
 use crate::expr::variable::Variable;
@@ -44,10 +43,8 @@ pub enum Expression {
     },
     /// The full scope of the expression evaluation.
     Root,
-    /// A reference to a name bound by an enclosing [`Expression::Lambda`].
+    /// A name to be bound to a value.
     Variable(Variable),
-    /// An expression body evaluated with named bindings.
-    Lambda(Lambda),
 }
 
 impl Expression {
@@ -84,14 +81,6 @@ impl Expression {
         }
     }
 
-    /// The lambda this expression holds, if it is one.
-    pub fn as_lambda(&self) -> Option<&Lambda> {
-        match self {
-            Self::Lambda(lambda) => Some(lambda),
-            _ => None,
-        }
-    }
-
     /// Returns the scalar fn for this expression, or `None` if it is not a scalar node.
     pub fn as_scalar(&self) -> Option<&ScalarFnRef> {
         match self {
@@ -121,10 +110,6 @@ impl Expression {
     }
 
     /// Returns the sub-expressions of this node.
-    ///
-    /// A lambda is a lexical scope boundary, so its body is intentionally not a generic child.
-    /// The higher-order function that applies it establishes the parameter bindings, then binds and
-    /// optimizes the body explicitly.
     pub fn children(&self) -> &[Expression] {
         match self {
             Self::Scalar { children, .. } => children.as_slice(),
@@ -171,13 +156,8 @@ impl Expression {
     pub fn return_dtype(&self, scope: &DType) -> VortexResult<DType> {
         match self {
             Self::Root => Ok(scope.clone()),
-            // A variable resolves against named bindings, which this entry point does not carry. Erroring
-            // keeps callers that only have a root dtype from silently mistyping a lambda body.
             Self::Variable(variable) => vortex_bail!(
                 "variable '{variable}' can only be typed by binding against a scope with bindings"
-            ),
-            Self::Lambda(_) => vortex_bail!(
-                "a lambda has no data type; it must be bound by the higher-order function that applies it"
             ),
             Self::Scalar {
                 scalar_fn,
@@ -202,9 +182,6 @@ impl Expression {
             // This is evaluated later against the array bound to the variable by a higher-order
             // function, yielding that array's validity as a non-nullable boolean mask.
             Self::Variable(_) => Ok(is_not_null(self.clone())),
-            Self::Lambda(_) => {
-                vortex_bail!("a lambda has no validity; it is not a value")
-            }
             Self::Scalar { scalar_fn, .. } => scalar_fn.validity(self),
         }
     }
@@ -217,7 +194,6 @@ impl Expression {
         match self {
             Self::Root => write!(f, "$"),
             Self::Variable(variable) => write!(f, "${variable}"),
-            Self::Lambda(lambda) => Display::fmt(lambda, f),
             Self::Scalar { scalar_fn, .. } => scalar_fn.fmt_sql(self, f),
         }
     }
@@ -320,11 +296,6 @@ impl Drop for Expression {
                     children_to_drop.append(children);
                 }
             }
-            Self::Lambda(lambda) => {
-                if let Some(body) = lambda.take_unique_body() {
-                    children_to_drop.push(body);
-                }
-            }
             Self::Root | Self::Variable(_) => return,
         }
 
@@ -333,11 +304,6 @@ impl Drop for Expression {
                 Self::Scalar { children, .. } => {
                     if let Some(expr_children) = Arc::get_mut(children) {
                         children_to_drop.append(expr_children);
-                    }
-                }
-                Self::Lambda(lambda) => {
-                    if let Some(body) = lambda.take_unique_body() {
-                        children_to_drop.push(body);
                     }
                 }
                 Self::Root | Self::Variable(_) => {}

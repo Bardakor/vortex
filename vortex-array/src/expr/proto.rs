@@ -27,8 +27,52 @@ pub(crate) const ROOT_ID: &str = "vortex.root";
 /// The wire id for [`Expression::Variable`].
 pub(crate) const VARIABLE_ID: &str = "vortex.var";
 
-/// The wire id for [`Expression::Lambda`].
+/// The wire id for [`Lambda`].
 pub(crate) const LAMBDA_ID: &str = "vortex.lambda";
+
+/// Serialize standalone lambda syntax to its protobuf representation.
+pub trait LambdaSerializeProtoExt {
+    /// Serialize the lambda to a protobuf expression message.
+    fn serialize_proto(&self) -> VortexResult<pb::Expr>;
+}
+
+impl LambdaSerializeProtoExt for Lambda {
+    fn serialize_proto(&self) -> VortexResult<pb::Expr> {
+        Ok(pb::Expr {
+            id: LAMBDA_ID.to_string(),
+            children: vec![self.body().serialize_proto()?],
+            metadata: Some(
+                pb::LambdaOpts {
+                    params: self
+                        .params()
+                        .iter()
+                        .map(|variable| variable.name().to_string())
+                        .collect(),
+                }
+                .encode_to_vec(),
+            ),
+        })
+    }
+}
+
+impl Lambda {
+    /// Deserialize standalone lambda syntax from a protobuf expression message.
+    pub fn from_proto(expr: &pb::Expr, session: &VortexSession) -> VortexResult<Self> {
+        vortex_ensure!(
+            expr.id == LAMBDA_ID,
+            "expected lambda expression id '{LAMBDA_ID}', got '{}'",
+            expr.id
+        );
+        vortex_ensure!(
+            expr.children.len() == 1,
+            "a lambda must have exactly one child, its body, got {}",
+            expr.children.len()
+        );
+        let opts = pb::LambdaOpts::decode(expr.metadata())?;
+        let body = Expression::from_proto(&expr.children[0], session)?;
+        Self::try_new(opts.params.into_iter().map(Variable::new), body)
+    }
+}
 
 impl ExprSerializeProtoExt for Expression {
     fn serialize_proto(&self) -> VortexResult<pb::Expr> {
@@ -47,22 +91,6 @@ impl ExprSerializeProtoExt for Expression {
                     metadata: Some(
                         pb::VariableOpts {
                             name: variable.name().to_string(),
-                        }
-                        .encode_to_vec(),
-                    ),
-                });
-            }
-            Expression::Lambda(lambda) => {
-                return Ok(pb::Expr {
-                    id: LAMBDA_ID.to_string(),
-                    children: vec![lambda.body().serialize_proto()?],
-                    metadata: Some(
-                        pb::LambdaOpts {
-                            params: lambda
-                                .params()
-                                .iter()
-                                .map(|v| v.name().to_string())
-                                .collect(),
                         }
                         .encode_to_vec(),
                     ),
@@ -116,18 +144,6 @@ impl Expression {
             return Ok(Expression::Variable(Variable::new(opts.name)));
         }
 
-        if expr.id == LAMBDA_ID {
-            vortex_ensure!(
-                expr.children.len() == 1,
-                "a lambda must have exactly one child, its body, got {}",
-                expr.children.len()
-            );
-            let opts = pb::LambdaOpts::decode(expr.metadata())?;
-            let body = Expression::from_proto(&expr.children[0], session)?;
-            return Lambda::try_new(opts.params.into_iter().map(Variable::new), body)
-                .map(Into::into);
-        }
-
         #[expect(clippy::disallowed_methods, reason = "interning a dynamic id")]
         let expr_id = ScalarFnId::new(expr.id.as_str());
         let children = expr
@@ -165,15 +181,20 @@ mod tests {
     use vortex_session::VortexSession;
 
     use super::ExprSerializeProtoExt;
+    use super::LambdaSerializeProtoExt;
     use crate::array_session;
     use crate::expr::Expression;
+    use crate::expr::Lambda;
     use crate::expr::and;
     use crate::expr::between;
+    use crate::expr::checked_add;
     use crate::expr::eq;
     use crate::expr::get_item;
+    use crate::expr::lambda;
     use crate::expr::lit;
     use crate::expr::or;
     use crate::expr::root;
+    use crate::expr::var;
     use crate::scalar_fn::fns::between::BetweenOptions;
     use crate::scalar_fn::fns::between::StrictComparison;
     use crate::scalar_fn::session::ScalarFnSession;
@@ -204,24 +225,10 @@ mod tests {
         assert_eq!(&deser_expr, &expr);
     }
 
-    /// Variables and lambdas round-trip on reserved ids, like `Root`. The body travels as the
-    /// lambda message's single child, so a generic walk of the wire format still sees it.
+    /// Variables round-trip on their reserved id, like `Root`.
     #[test]
-    fn variables_and_lambdas_round_trip() -> VortexResult<()> {
-        use crate::expr::checked_add;
-        use crate::expr::lambda;
-        use crate::expr::var;
-
-        for expr in [
-            var("x"),
-            lambda(["x"], var("x"))?,
-            lambda(
-                ["x", "y"],
-                checked_add(var("x"), checked_add(var("y"), lit(1_i32))),
-            )?,
-            // Nested, so the inner lambda travels inside the outer one's body.
-            lambda(["x"], lambda(["y"], var("y"))?)?,
-        ] {
+    fn variables_round_trip() -> VortexResult<()> {
+        for expr in [var("x"), var("name")] {
             let bytes = expr.serialize_proto()?.encode_to_vec();
             let decoded =
                 Expression::from_proto(&pb::Expr::decode(bytes.as_slice())?, &array_session())?;
@@ -230,8 +237,25 @@ mod tests {
         Ok(())
     }
 
-    /// A lambda carries its body as a child, so a malformed message must be rejected rather than
-    /// silently producing a lambda with the wrong arity.
+    #[test]
+    fn lambdas_round_trip() -> VortexResult<()> {
+        for lambda in [
+            lambda(["x"], var("x"))?,
+            lambda(
+                ["x", "y"],
+                checked_add(var("x"), checked_add(var("y"), lit(1_i32))),
+            )?,
+        ] {
+            let bytes = lambda.serialize_proto()?.encode_to_vec();
+            let decoded =
+                Lambda::from_proto(&pb::Expr::decode(bytes.as_slice())?, &array_session())?;
+            assert_eq!(decoded, lambda, "round trip changed {lambda}");
+        }
+        Ok(())
+    }
+
+    /// A lambda carries its body as a child, so malformed lambda syntax must be rejected rather
+    /// than silently producing a lambda with the wrong arity.
     #[test]
     fn a_lambda_without_a_body_is_rejected() {
         let malformed = pb::Expr {
@@ -244,7 +268,7 @@ mod tests {
                 .encode_to_vec(),
             ),
         };
-        assert!(Expression::from_proto(&malformed, &array_session()).is_err());
+        assert!(Lambda::from_proto(&malformed, &array_session()).is_err());
     }
 
     #[test]
