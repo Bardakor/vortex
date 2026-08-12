@@ -52,11 +52,11 @@ impl ArrayRef {
         let scalar_fn = match expr {
             // Root evaluates to the scope, which is this array.
             Expression::Root => return Ok(self),
-            Expression::Variable(variable) => vortex_bail!(
-                "cannot evaluate variable '{variable}': execution has no variable environment"
-            ),
+            Expression::Variable(variable) => {
+                vortex_bail!("cannot evaluate unbound variable '{variable}'")
+            }
             Expression::Lambda(lambda) => {
-                vortex_bail!("cannot evaluate a lambda ({lambda}); it must be applied first")
+                vortex_bail!("cannot evaluate unbound lambda '{lambda}'")
             }
             Expression::Scalar { scalar_fn, .. } => scalar_fn,
         };
