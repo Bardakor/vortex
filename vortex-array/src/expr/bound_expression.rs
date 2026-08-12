@@ -125,8 +125,6 @@ impl PartialEq for ExactBoundExpr {
                     && Arc::ptr_eq(lhs_children, rhs_children)
                     && lhs_dtype == rhs_dtype
             }
-            // No catch-all: a new variant must state its own identity rather than silently
-            // comparing unequal, which would put `eq` out of step with `hash`.
             (
                 BoundExpression::Variable {
                     dtype: lhs_dtype,
@@ -137,11 +135,7 @@ impl PartialEq for ExactBoundExpr {
                     variable: rhs_var,
                 },
             ) => lhs_var == rhs_var && lhs_dtype == rhs_dtype,
-            // No catch-all: a new variant must state its own identity, or `eq` drifts out of step
-            // with `hash` and keys stop equalling themselves.
-            (BoundExpression::Root { .. }, _)
-            | (BoundExpression::Scalar { .. }, _)
-            | (BoundExpression::Variable { .. }, _) => false,
+            _ => false,
         }
     }
 }
