@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! The column builders a row function can write its output into.
+//! Output builders for row kernels that cannot return independent owned values.
+//!
+//! [`OutputSink`] allocates batch-wide state and lends one row handle to each callback.
+//! [`UninitElementSink`] is the fixed-width implementation used when avoiding output
+//! initialization matters.
 
 use std::mem::MaybeUninit;
 
@@ -13,9 +17,8 @@ use crate::scalar_fn::unstable::row::OutputElement;
 
 /// A column allocated once per batch that a row closure writes into, one row at a time.
 ///
-/// A sink may use the function's `Options` and input dtypes to build a runtime-shaped output or own
-/// shared batch state. The executor passes each row slot into an [`Fn`] closure, keeping mutable
-/// state out of its capture.
+/// A sink may use function options and input dtypes to build a runtime-shaped output or own shared
+/// batch state. The executor passes each row slot into an [`Fn`] closure.
 ///
 /// Rows arrive in increasing index order. Ordinary execution visits `0..row_count` exactly once;
 /// skip-invalid execution can omit invalid rows when [`skipped_rows_initializer`] returns an
@@ -23,11 +26,9 @@ use crate::scalar_fn::unstable::row::OutputElement;
 ///
 /// # Errors
 ///
-/// Errors from [`sink_dtype`], [`with_capacity`], and [`finish`] are limited to incidental
-/// execution failures such as allocation or array construction. A semantic error that depends on
-/// the function's input values **must** be returned by the row callback through a fallible
-/// [`SinkResult`]. Returning it from a sink lifecycle method hides it from [`RowFn::FALLIBLE`] and
-/// can make optimizations such as dictionary push-down change the function's behavior.
+/// Lifecycle methods report only incidental failures such as allocation. A semantic error that
+/// depends on input values **must** come from the row callback through a fallible [`SinkResult`], or
+/// [`RowFn::FALLIBLE`] cannot protect optimizations such as dictionary push-down.
 ///
 /// # Safety
 ///
@@ -53,9 +54,7 @@ use crate::scalar_fn::unstable::row::OutputElement;
 /// [`row_count_matches`]: Self::row_count_matches
 /// [`RowFn::FALLIBLE`]: crate::scalar_fn::unstable::row::RowFn::FALLIBLE
 /// [`SinkResult`]: crate::scalar_fn::unstable::row::SinkResult
-/// [`sink_dtype`]: Self::sink_dtype
 /// [`skipped_rows_initializer`]: Self::skipped_rows_initializer
-/// [`with_capacity`]: Self::with_capacity
 pub unsafe trait OutputSink<Options>: 'static + Sized {
     /// A loop-local view of all output rows.
     ///
@@ -80,9 +79,8 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
 
     /// The operation that initializes every output position before skip-invalid execution.
     ///
-    /// `Some(initializer)` enables skip-invalid execution and supplies the operation that prepares
-    /// output storage before callbacks run. The initializer **must** make every row safe to finish.
-    /// Callbacks overwrite valid rows, and batch execution masks skipped rows.
+    /// `Some` enables skip-invalid execution. The initializer **must** make every row safe to
+    /// finish; callbacks overwrite valid rows and batch execution masks skipped rows.
     ///
     /// `None` makes the executor fall back to filtering the inputs.
     fn skipped_rows_initializer() -> Option<for<'a> fn(&mut Self::Rows<'a>)> {

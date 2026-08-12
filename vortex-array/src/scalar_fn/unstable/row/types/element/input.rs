@@ -31,16 +31,9 @@ pub unsafe trait InputElement: 'static {
 
     /// Whether every dense decode and access path tolerates rows that are null in the input.
     ///
-    /// Arrays only guarantee payloads for valid rows. This is `false` when a null row's stored
-    /// offset or pointer may not address anything, and `true` only when [`decode`](Self::decode),
-    /// [`get`](Self::get), [`view`](Self::view), [`view_len`](Self::view_len), and
-    /// [`get_from_view`](Self::get_from_view) remain safe and correct for null rows.
-    ///
-    /// Dense execution requires this of every argument; otherwise the row layer executes only
-    /// valid rows.
-    ///
-    /// Dense execution can pass unspecified values from null rows. The closure must be total over
-    /// every stored value: it cannot panic or cause side effects beyond its declared output.
+    /// Arrays guarantee payloads only for valid rows. Set this to `true` only when every decode and
+    /// access method remains safe for null rows. Dense execution may pass unspecified values from
+    /// null rows to the row closure.
     const DENSE_SAFE: bool = false;
 
     /// Whether [`decode`](Self::decode) can fail on _legal_ input data.
@@ -62,12 +55,8 @@ pub unsafe trait InputElement: 'static {
     /// Decode `array` _without_ assuming every row is valid, or `Ok(None)` when this element
     /// cannot for this particular array.
     ///
-    /// An element with [`DENSE_SAFE`](Self::DENSE_SAFE) set **should not** override this: its
-    /// ordinary decode already tolerates null payloads, so the default is already correct and an
-    /// override just restates it. Overriding is for an element that is _not_ dense-safe but can
-    /// still write an arbitrary placeholder into null slots; the caller guarantees
-    /// [`get`](Self::get) is never called for such a row. The skip-invalid strategy uses this
-    /// representation to avoid filtering the input.
+    /// Override this for a non-dense-safe representation that can still place safe placeholders in
+    /// null slots. The skip-invalid executor never reads those slots.
     ///
     /// Return `Ok(None)` rather than an error when an array has no null-tolerant decode; the
     /// batch execution falls back to the filter strategy.
@@ -82,10 +71,7 @@ pub unsafe trait InputElement: 'static {
         }
     }
 
-    /// Read the element at `index`, the one function called once per row.
-    ///
-    /// This must not repeat work that is constant across the batch; do that work in
-    /// [`decode`](Self::decode).
+    /// Read one row without repeating batch-constant work from [`decode`](Self::decode).
     fn get(column: &Self::Column, index: usize) -> Self::Elem<'_>;
 
     /// Borrow the representation used when this argument varies within the batch.

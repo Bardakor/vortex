@@ -140,12 +140,7 @@ pub trait ElementTuple: 'static + private::Sealed {
     /// Whether _any_ argument is [`InputElement::DECODE_FALLIBLE`].
     const DECODE_FALLIBLE: bool;
 
-    /// Validate the input dtypes, including that `dtypes` has exactly `ARITY` entries.
-    ///
-    /// The expression layer checks arity when it builds a call, but callers can invoke
-    /// [`ScalarFnVTable::return_dtype`] directly. This boundary therefore checks it again.
-    ///
-    /// [`ScalarFnVTable::return_dtype`]: crate::scalar_fn::ScalarFnVTable::return_dtype
+    /// Validate the input dtypes and exact arity.
     fn validate(dtypes: &[DType]) -> VortexResult<()>;
 
     /// Decode every input column once for one row-kernel invocation.

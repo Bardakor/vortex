@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! What a sink-writing row closure may return.
+//! Return types for sink-writing row closures.
+//!
+//! [`SinkResult`] lets the executor handle initialized sinks and sinks that require an
+//! [`InitializedElement`] token, with either infallible or immediate-error callbacks.
 
 use vortex_error::VortexResult;
 

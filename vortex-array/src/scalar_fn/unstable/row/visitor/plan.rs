@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! The visitor that validates a concrete dispatch and plans its nullable execution.
+//! Plans the concrete signature selected by [`RowFn::dispatch`].
+//!
+//! [`PlanRows`] validates input and output dtypes, then records the output dtype and null-handling
+//! policy that execution must reproduce.
 
 use std::marker::PhantomData;
 use std::ops::BitOrAssign;

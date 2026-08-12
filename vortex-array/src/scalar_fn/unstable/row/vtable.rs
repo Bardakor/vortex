@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! The [`ScalarFnVTable`] adapter for [`RowFn`].
+//! Adapts [`RowFn`] implementations to the scalar-function interface.
+//!
+//! The blanket [`ScalarFnVTable`] implementation supplies common arity, validity, fallibility, and
+//! execution behavior. [`row_fn_return_dtype`] and [`execute_rows`] expose the same planning and
+//! execution paths to public vtables that delegate to a private row kernel.
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;

@@ -14,7 +14,11 @@ use crate::scalar_fn::unstable::row::SinkResult;
 /// A planning or execution visit at concrete input and output types.
 ///
 /// Only the framework implements this trait. The `visit_prepared*` methods derive shared state
-/// from constant arguments before visiting any rows.
+/// from constant arguments before visiting any rows. Every visit verifies that the argument tuple
+/// matches [`RowFn::ARG_NAMES`] and that fallible decoding agrees with [`RowFn::FALLIBLE`].
+///
+/// [`RowFn::ARG_NAMES`]: crate::scalar_fn::unstable::row::RowFn::ARG_NAMES
+/// [`RowFn::FALLIBLE`]: crate::scalar_fn::unstable::row::RowFn::FALLIBLE
 pub trait RowVisitor<Options>: private::Sealed + Sized {
     /// The framework result of visiting one concrete row signature.
     ///
@@ -27,16 +31,7 @@ pub trait RowVisitor<Options>: private::Sealed + Sized {
     /// `apply` must be total over every stored element value: it must not panic or have side
     /// effects. Dense execution can pass unspecified values from null rows.
     ///
-    /// # Prerequisites
-    ///
-    /// The framework checks these at compile time:
-    ///
-    /// - `Args::ARITY` **must** equal the length of [`RowFn::ARG_NAMES`].
-    /// - [`RowFn::FALLIBLE`] **must** be `true` when decoding `Args` can fail.
-    /// - `Out` **must not** require drop glue.
-    ///
-    /// [`RowFn::ARG_NAMES`]: crate::scalar_fn::unstable::row::RowFn::ARG_NAMES
-    /// [`RowFn::FALLIBLE`]: crate::scalar_fn::unstable::row::RowFn::FALLIBLE
+    /// The framework also verifies that `Out` does not require drop glue.
     fn visit<Args, Out>(
         self,
         apply: impl Fn(Args::Elems<'_>) -> Out,
@@ -69,16 +64,8 @@ pub trait RowVisitor<Options>: private::Sealed + Sized {
     /// unrelated local cell. Violating this requirement can make the unsafe
     /// [`OutputSink::finish`] precondition false.
     ///
-    /// # Prerequisites
-    ///
-    /// The framework checks these at compile time:
-    ///
-    /// - `Args::ARITY` **must** equal the length of [`RowFn::ARG_NAMES`].
-    /// - [`RowFn::FALLIBLE`] **must** be `true` when decoding `Args` or computing the result can
-    ///   fail.
-    ///
-    /// [`RowFn::ARG_NAMES`]: crate::scalar_fn::unstable::row::RowFn::ARG_NAMES
-    /// [`RowFn::FALLIBLE`]: crate::scalar_fn::unstable::row::RowFn::FALLIBLE
+    /// A fallible `ApplyResult` requires
+    /// [`RowFn::FALLIBLE`](crate::scalar_fn::unstable::row::RowFn::FALLIBLE) to be `true`.
     fn visit_into<Args, Sink, ApplyResult>(
         self,
         apply: impl Fn(Args::Elems<'_>, <Sink as OutputSink<Options>>::Row<'_>) -> ApplyResult,
@@ -118,18 +105,9 @@ pub trait RowVisitor<Options>: private::Sealed + Sized {
     /// [`Default::default`] **must** mean success, including for an empty batch. The compiler
     /// cannot check this semantic requirement.
     ///
-    /// # Prerequisites
-    ///
-    /// The framework checks these at compile time:
-    ///
-    /// - `Args::ARITY` **must** equal the length of [`RowFn::ARG_NAMES`].
-    /// - [`RowFn::FALLIBLE`] **must** be `true`.
-    /// - `Out` **must not** require drop glue.
-    /// - `Out` **must** be at least as wide as `Fail` so failure tracking does not reduce the
-    ///   vector width.
-    ///
-    /// [`RowFn::ARG_NAMES`]: crate::scalar_fn::unstable::row::RowFn::ARG_NAMES
-    /// [`RowFn::FALLIBLE`]: crate::scalar_fn::unstable::row::RowFn::FALLIBLE
+    /// [`RowFn::FALLIBLE`](crate::scalar_fn::unstable::row::RowFn::FALLIBLE) **must** be `true`,
+    /// `Out` must not require drop glue, and `Fail` must be no wider than `Out` so failure tracking
+    /// does not reduce the vector width. The framework checks each requirement.
     fn visit_deferred<Args, Out, Fail>(
         self,
         apply: impl Fn(Args::Elems<'_>) -> (Out, Fail),
