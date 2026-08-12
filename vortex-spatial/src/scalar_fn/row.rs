@@ -8,7 +8,7 @@ use geo_types::Geometry;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::dtype::DType;
-use vortex_array::scalar_fn::InputElement;
+use vortex_array::scalar_fn::unstable::row::InputElement;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 
