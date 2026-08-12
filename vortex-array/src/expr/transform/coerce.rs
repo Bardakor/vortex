@@ -256,7 +256,6 @@ mod lambda_tests {
     use vortex_error::VortexResult;
 
     use super::*;
-    use crate::expr::Expression;
     use crate::expr::checked_add;
     use crate::expr::col;
     use crate::expr::lambda;
@@ -269,7 +268,7 @@ mod lambda_tests {
     /// coercion boundary and is returned untouched.
     #[test]
     fn a_lambda_is_a_coercion_boundary() -> VortexResult<()> {
-        let l = Expression::from(lambda(["x"], checked_add(var("x"), lit(1i32))));
+        let l = lambda(["x"], checked_add(var("x"), lit(1i32)))?;
         assert_eq!(coerce_expression(l.clone(), &struct_dtype())?, l);
         Ok(())
     }

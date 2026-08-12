@@ -25,9 +25,6 @@ impl ArrayRef {
             BoundExpression::Variable { variable, .. } => vortex_bail!(
                 "cannot evaluate variable '{variable}': execution has no variable environment"
             ),
-            BoundExpression::Lambda(lambda) => {
-                vortex_bail!("cannot evaluate a lambda ({lambda:?}); it must be applied first")
-            }
             BoundExpression::Scalar {
                 scalar_fn,
                 children,

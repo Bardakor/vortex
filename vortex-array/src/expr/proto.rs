@@ -125,10 +125,8 @@ impl Expression {
             );
             let opts = pb::LambdaOpts::decode(expr.metadata())?;
             let body = Expression::from_proto(&expr.children[0], session)?;
-            return Ok(Expression::from(Lambda::new(
-                opts.params.into_iter().map(Variable::new),
-                body,
-            )));
+            return Lambda::try_new(opts.params.into_iter().map(Variable::new), body)
+                .map(Into::into);
         }
 
         #[expect(clippy::disallowed_methods, reason = "interning a dynamic id")]
@@ -217,13 +215,13 @@ mod tests {
 
         for expr in [
             var("x"),
-            Expression::from(lambda(["x"], var("x"))),
-            Expression::from(lambda(
+            lambda(["x"], var("x"))?,
+            lambda(
                 ["x", "y"],
                 checked_add(var("x"), checked_add(var("y"), lit(1_i32))),
-            )),
+            )?,
             // Nested, so the inner lambda travels inside the outer one's body.
-            Expression::from(lambda(["x"], Expression::from(lambda(["y"], var("y"))))),
+            lambda(["x"], lambda(["y"], var("y"))?)?,
         ] {
             let bytes = expr.serialize_proto()?.encode_to_vec();
             let decoded =

@@ -69,8 +69,7 @@ impl DisplayTreeNode for Expression {
     fn tree_child_name(&self, index: usize) -> ChildName {
         match self {
             Expression::Scalar { scalar_fn, .. } => scalar_fn.signature().child_name(index),
-            Expression::Lambda { .. } => ChildName::from("body"),
-            Expression::Root | Expression::Variable(_) => {
+            Expression::Root | Expression::Variable(_) | Expression::Lambda(_) => {
                 unreachable!("a leaf expression has no children")
             }
         }
@@ -96,7 +95,6 @@ impl DisplayTreeNode for BoundExpression {
     fn tree_child_name(&self, index: usize) -> ChildName {
         match self {
             BoundExpression::Scalar { scalar_fn, .. } => scalar_fn.signature().child_name(index),
-            BoundExpression::Lambda(_) => ChildName::from("body"),
             BoundExpression::Root { .. } | BoundExpression::Variable { .. } => {
                 unreachable!("a leaf bound node has no children")
             }
@@ -108,9 +106,6 @@ impl DisplayTreeNode for BoundExpression {
             BoundExpression::Scalar { scalar_fn, .. } => Display::fmt(scalar_fn, f),
             BoundExpression::Root { .. } => write!(f, "{ROOT_DISPLAY}"),
             BoundExpression::Variable { variable, .. } => write!(f, "${variable}"),
-            BoundExpression::Lambda(lambda) => {
-                write!(f, "lambda({})", lambda.params().join(", "))
-            }
         }
     }
 }

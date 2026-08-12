@@ -284,7 +284,6 @@ mod tests {
 mod lambda_tests {
     use vortex_error::VortexResult;
 
-    use crate::expr::Expression;
     use crate::expr::col;
     use crate::expr::fill_null;
     use crate::expr::lambda;
@@ -296,7 +295,7 @@ mod lambda_tests {
     /// one would try to resolve the variable against the root dtype and error.
     #[test]
     fn a_lambda_is_an_optimization_boundary() -> VortexResult<()> {
-        let expr = Expression::from(lambda(["x"], fill_null(var("x"), lit(0_i32))));
+        let expr = lambda(["x"], fill_null(var("x"), lit(0_i32)))?;
         assert_eq!(expr.clone().optimize_recursive(&struct_dtype())?, expr);
         Ok(())
     }

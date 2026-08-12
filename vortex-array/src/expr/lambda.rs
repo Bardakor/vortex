@@ -7,6 +7,9 @@ use std::fmt::Formatter;
 use std::sync::Arc;
 
 use itertools::Itertools;
+use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
+use vortex_utils::aliases::hash_set::HashSet;
 
 use crate::expr::Expression;
 use crate::expr::variable::Variable;
@@ -14,14 +17,13 @@ use crate::expr::variable::Variable;
 /// A body evaluated under a frame binding `params`.
 ///
 /// A lambda is **not a value**: its parameter dtypes are determined by whatever applies it, so it
-/// has no dtype of its own and cannot be bound by
-/// [`bind_scope`](Expression::bind_scope). Bind it with [`Lambda::bind`], which takes the parameter
-/// types.
+/// has no dtype of its own and cannot be bound by [`bind_scope`](Expression::bind_scope). The
+/// higher-order function that applies it supplies its parameter types and binds its body.
 ///
 /// It is a struct rather than only an enum variant so that an API expecting a lambda — a
 /// higher-order function, for instance — can say so in its signature and reject anything else at
-/// compile time. A lambda is still reachable as [`Expression::Lambda`], because traversal needs a
-/// node to see: that node is the scope boundary.
+/// compile time. It is a scope boundary: generic expression passes leave its body to the
+/// higher-order function that establishes the parameter frame.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lambda {
     params: Box<[Variable]>,
@@ -30,11 +32,26 @@ pub struct Lambda {
 
 impl Lambda {
     /// Create a lambda binding `params` over `body`.
-    pub fn new(params: impl IntoIterator<Item = impl Into<Variable>>, body: Expression) -> Self {
-        Self {
-            params: params.into_iter().map(Into::into).collect(),
-            body: Arc::new(body),
+    ///
+    /// Returns an error when a parameter name is repeated.
+    pub fn try_new(
+        params: impl IntoIterator<Item = impl Into<Variable>>,
+        body: Expression,
+    ) -> VortexResult<Self> {
+        let params: Box<[Variable]> = params.into_iter().map(Into::into).collect();
+        {
+            let mut seen = HashSet::with_capacity(params.len());
+            for parameter in &params {
+                if !seen.insert(parameter) {
+                    vortex_bail!("duplicate lambda parameter '{parameter}'");
+                }
+            }
         }
+
+        Ok(Self {
+            params,
+            body: Arc::new(body),
+        })
     }
 
     /// The variables this lambda binds, in declaration order.
@@ -54,11 +71,6 @@ impl Lambda {
     pub(crate) fn take_unique_body(&mut self) -> Option<Expression> {
         Arc::get_mut(&mut self.body).map(std::mem::take)
     }
-
-    /// The body as a shared handle, so a caller can hand back a one-element slice.
-    pub(crate) fn body_arc(&self) -> &Arc<Expression> {
-        &self.body
-    }
 }
 
 impl Display for Lambda {
@@ -70,5 +82,15 @@ impl Display for Lambda {
 impl From<Lambda> for Expression {
     fn from(lambda: Lambda) -> Self {
         Expression::Lambda(lambda)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_parameters_are_rejected() {
+        assert!(Lambda::try_new(["x", "x"], Expression::Root).is_err());
     }
 }

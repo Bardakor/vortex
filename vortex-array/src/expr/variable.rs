@@ -8,6 +8,8 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 
+use crate::expr::Expression;
+
 /// The name of a value bound in a [`Scope`](crate::expr::Scope).
 ///
 /// Deliberately distinct from [`FieldName`](crate::dtype::FieldName): a variable and a struct field
@@ -51,6 +53,12 @@ impl Hash for Variable {
 impl Display for Variable {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl From<Variable> for Expression {
+    fn from(variable: Variable) -> Self {
+        Expression::Variable(variable)
     }
 }
 

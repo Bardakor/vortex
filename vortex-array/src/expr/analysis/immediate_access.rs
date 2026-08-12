@@ -102,8 +102,9 @@ mod variable_tests {
     use crate::dtype::DType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
+    use crate::expr::Frame;
     use crate::expr::Scope;
-    use crate::expr::lambda;
+    use crate::expr::Variable;
     use crate::expr::test_harness::struct_dtype;
     use crate::expr::var;
 
@@ -116,14 +117,17 @@ mod variable_tests {
             .as_struct_fields_opt()
             .vortex_expect("test scope is a struct");
 
-        let bound = lambda(["x"], var("x")).bind(
-            &Scope::new(scope_dtype.clone()),
-            [DType::Primitive(PType::I32, Nullability::NonNullable)],
-        )?;
+        let bound =
+            var("x").bind_scope(&Scope::new(scope_dtype.clone()).push_frame(Frame::try_new([
+                (
+                    Variable::new("x"),
+                    DType::Primitive(PType::I32, Nullability::NonNullable),
+                ),
+            ])?))?;
 
         let annotator = make_bound_free_field_annotator(fields);
         assert!(
-            annotator(bound.body()).is_empty(),
+            annotator(&bound).is_empty(),
             "a variable should read no root fields"
         );
         Ok(())

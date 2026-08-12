@@ -16,6 +16,7 @@ use vortex_error::vortex_ensure;
 
 use crate::dtype::DType;
 use crate::expr::display::DisplayTreeExpr;
+use crate::expr::is_not_null;
 use crate::expr::lambda::Lambda;
 use crate::expr::traversal::TraversalOrder;
 use crate::expr::traversal::pre_order_visit_down;
@@ -127,17 +128,15 @@ impl Expression {
             .vortex_expect("Expression options type mismatch")
     }
 
-    /// Returns the children of this expression.
     /// Returns the sub-expressions of this node.
     ///
-    /// A [`Expression::Lambda`] yields its body, so generic traversal reaches it — but only by
-    /// passing through the `Lambda` node, which is a scope boundary. A pass that is not
-    /// scope-aware must handle that variant rather than descending blindly.
+    /// A lambda is a lexical scope boundary, so its body is intentionally not a generic child.
+    /// The higher-order function that applies it establishes the parameter frame, then binds and
+    /// optimizes the body explicitly.
     pub fn children(&self) -> &[Expression] {
         match self {
             Self::Scalar { children, .. } => children.as_slice(),
-            Self::Lambda(lambda) => std::slice::from_ref(lambda.body_arc()),
-            Self::Root | Self::Variable(_) => NO_CHILDREN,
+            Self::Root | Self::Variable(_) | Self::Lambda(_) => NO_CHILDREN,
         }
     }
 
@@ -153,24 +152,13 @@ impl Expression {
     ) -> VortexResult<Self> {
         let children = Vec::from_iter(children);
         match &self {
-            Self::Root | Self::Variable(_) => {
+            Self::Root | Self::Variable(_) | Self::Lambda(_) => {
                 vortex_ensure!(
                     children.is_empty(),
-                    "Expression arity mismatch: {self} expects 0 children but got {}",
+                    "Expression arity mismatch: a leaf expects 0 children but got {}",
                     children.len()
                 );
-                Ok(self.clone())
-            }
-            Self::Lambda(lambda) => {
-                vortex_ensure!(
-                    children.len() == 1,
-                    "Expression arity mismatch: a lambda expects 1 child but got {}",
-                    children.len()
-                );
-                Ok(Self::Lambda(Lambda::new(
-                    lambda.params().iter().cloned(),
-                    children.into_iter().next().vortex_expect("checked above"),
-                )))
+                Ok(self)
             }
             Self::Scalar { scalar_fn, .. } => {
                 vortex_ensure!(
@@ -196,9 +184,9 @@ impl Expression {
             Self::Variable(variable) => vortex_bail!(
                 "variable '{variable}' can only be typed by binding against a scope with frames"
             ),
-            Self::Lambda(_) => {
-                vortex_bail!("a lambda has no data type; use Lambda::bind to type its body")
-            }
+            Self::Lambda(_) => vortex_bail!(
+                "a lambda has no data type; it must be bound by the higher-order function that applies it"
+            ),
             Self::Scalar {
                 scalar_fn,
                 children,
@@ -219,8 +207,9 @@ impl Expression {
         match self {
             // The scope is exactly as valid as itself.
             Self::Root => Ok(Self::Root),
-            // A variable is exactly as valid as whatever it is bound to.
-            Self::Variable(_) => Ok(self.clone()),
+            // This is evaluated later against the array bound to the variable by a higher-order
+            // function, yielding that array's validity as a non-nullable boolean mask.
+            Self::Variable(_) => Ok(is_not_null(self.clone())),
             Self::Lambda(_) => {
                 vortex_bail!("a lambda has no validity; it is not a value")
             }
