@@ -20,11 +20,9 @@ impl ArrayRef {
         let (scalar_fn, children) = match expr {
             // Root evaluates to the scope, which is this array.
             BoundExpression::Root { .. } => return Ok(self),
-            // Execution has no variable environment, so a variable cannot be evaluated. It must be
-            // substituted by whatever bound it before the tree reaches the array layer.
-            BoundExpression::Variable { variable, .. } => vortex_bail!(
-                "cannot evaluate variable '{variable}': execution has no variable environment"
-            ),
+            BoundExpression::Variable { .. } => {
+                vortex_bail!("cannot apply detached variable")
+            }
             BoundExpression::Scalar {
                 scalar_fn,
                 children,
@@ -52,11 +50,11 @@ impl ArrayRef {
         let scalar_fn = match expr {
             // Root evaluates to the scope, which is this array.
             Expression::Root => return Ok(self),
-            Expression::Variable(variable) => {
-                vortex_bail!("cannot evaluate unbound variable '{variable}'")
+            Expression::Variable(..) => {
+                vortex_bail!("cannot apply detached variable")
             }
             Expression::Lambda(lambda) => {
-                vortex_bail!("cannot evaluate unbound lambda '{lambda}'")
+                vortex_bail!("cannot apply detached lambda")
             }
             Expression::Scalar { scalar_fn, .. } => scalar_fn,
         };
