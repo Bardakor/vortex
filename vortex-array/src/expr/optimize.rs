@@ -214,12 +214,17 @@ mod tests {
     use crate::dtype::PType;
     use crate::dtype::StructFields;
     use crate::expr::cast;
+    use crate::expr::col;
     use crate::expr::eq;
+    use crate::expr::fill_null;
     use crate::expr::get_item;
+    use crate::expr::lambda;
     use crate::expr::lit;
     use crate::expr::lt_eq;
     use crate::expr::or;
     use crate::expr::root;
+    use crate::expr::test_harness::struct_dtype;
+    use crate::expr::var;
     use crate::scalar::Scalar;
     use crate::scalar_fn::fns::literal::Literal;
 
@@ -272,21 +277,7 @@ mod tests {
         assert_eq!(rhs, &Scalar::primitive(3.0f64, Nullability::NonNullable));
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod lambda_tests {
-    use vortex_error::VortexResult;
-
-    use crate::expr::col;
-    use crate::expr::fill_null;
-    use crate::expr::lambda;
-    use crate::expr::lit;
-    use crate::expr::test_harness::struct_dtype;
-    use crate::expr::var;
-
-    /// A lambda body types against parameter bindings this pass does not carry, so descending into
-    /// one would try to resolve the variable against the root dtype and error.
     #[test]
     fn a_lambda_is_an_optimization_boundary() -> VortexResult<()> {
         let expr = lambda(["x"], fill_null(var("x"), lit(0_i32)))?;
@@ -298,12 +289,6 @@ mod lambda_tests {
     /// which is a rewrite the optimizer actually performs.
     #[test]
     fn optimization_still_applies_outside_a_lambda() -> VortexResult<()> {
-        use crate::dtype::DType;
-        use crate::dtype::Nullability;
-        use crate::dtype::PType;
-        use crate::expr::cast;
-        use crate::expr::lt_eq;
-
         let expr = lt_eq(
             col("a"),
             cast(
