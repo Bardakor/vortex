@@ -18,6 +18,9 @@ use crate::scalar_fn::fns::literal::Literal;
 /// The rewrite is bottom-up: children are coerced first, then each parent node checks whether
 /// its children match the coerced argument types.
 pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expression> {
+    // We capture scope by reference for the closure.
+    let scope = scope.clone();
+
     expr.transform_up(|node| {
         // Leaf nodes (Root, Literal, Lambda) have no children to coerce.
         if node.is_root() || node.is::<Literal>() || node.children().is_empty() {
@@ -28,7 +31,7 @@ pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expres
         let child_dtypes: Vec<DType> = node
             .children()
             .iter()
-            .map(|c| c.return_dtype(scope))
+            .map(|c| c.return_dtype(&scope))
             .collect::<VortexResult<_>>()?;
 
         // Ask the scalar function what types it wants.
@@ -48,7 +51,7 @@ pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expres
             .iter()
             .zip(coerced_dtypes.iter())
             .map(|(child, target)| {
-                let child_dtype = child.return_dtype(scope)?;
+                let child_dtype = child.return_dtype(&scope)?;
                 if child_dtype.eq_ignore_nullability(target)
                     && child_dtype.nullability() == target.nullability()
                 {
@@ -62,7 +65,7 @@ pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expres
         let new_expr = node.with_children(new_children)?;
         Ok(Transformed::yes(new_expr))
     })
-    .map(Transformed::into_inner)
+    .map(|t| t.into_inner())
 }
 
 #[cfg(test)]
