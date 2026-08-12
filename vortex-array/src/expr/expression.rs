@@ -45,16 +45,8 @@ pub enum Expression {
     /// The full scope of the expression evaluation.
     Root,
     /// A reference to a name bound by an enclosing [`Expression::Lambda`].
-    ///
-    /// Like [`Expression::Root`], its dtype comes from the scope rather than from children, so it
-    /// is resolved during binding.
     Variable(Variable),
-    /// A body evaluated with named bindings for `params`.
-    ///
-    /// A lambda is **not a value**: its parameter dtypes are determined by whatever applies it, so
-    /// it has no dtype of its own and cannot be bound by
-    /// [`bind_scope`](Expression::bind_scope). The higher-order function that applies it supplies
-    /// its parameter types and binds its body.
+    /// An expression body evaluated with named bindings.
     Lambda(Lambda),
 }
 
@@ -104,7 +96,7 @@ impl Expression {
     pub fn as_scalar(&self) -> Option<&ScalarFnRef> {
         match self {
             Self::Scalar { scalar_fn, .. } => Some(scalar_fn),
-            Self::Root | Self::Variable(_) | Self::Lambda(_) => None,
+            _ => None,
         }
     }
 
@@ -136,7 +128,7 @@ impl Expression {
     pub fn children(&self) -> &[Expression] {
         match self {
             Self::Scalar { children, .. } => children.as_slice(),
-            Self::Root | Self::Variable(_) | Self::Lambda(_) => NO_CHILDREN,
+            _ => NO_CHILDREN,
         }
     }
 
@@ -152,14 +144,6 @@ impl Expression {
     ) -> VortexResult<Self> {
         let children = Vec::from_iter(children);
         match &self {
-            Self::Root | Self::Variable(_) | Self::Lambda(_) => {
-                vortex_ensure!(
-                    children.is_empty(),
-                    "Expression arity mismatch: a leaf expects 0 children but got {}",
-                    children.len()
-                );
-                Ok(self)
-            }
             Self::Scalar { scalar_fn, .. } => {
                 vortex_ensure!(
                     scalar_fn.signature().arity().matches(children.len()),
@@ -171,6 +155,14 @@ impl Expression {
                     scalar_fn: scalar_fn.clone(),
                     children: children.into(),
                 })
+            }
+            _ => {
+                vortex_ensure!(
+                    children.is_empty(),
+                    "Expression arity mismatch: a leaf expects 0 children but got {}",
+                    children.len()
+                );
+                Ok(self)
             }
         }
     }
@@ -308,14 +300,6 @@ impl Expression {
             Ok(TraversalOrder::Continue)
         })?;
         Ok(contains)
-    }
-}
-
-/// `Root` stands in as the default so that a body can be moved out during the iterative [`Drop`]
-/// below. It is never observed by callers.
-impl Default for Expression {
-    fn default() -> Self {
-        Self::Root
     }
 }
 

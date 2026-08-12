@@ -62,8 +62,11 @@ impl Lambda {
     }
 
     /// Take the body if this lambda holds the only reference to it.
+    ///
+    /// Used by `Expression`'s iterative [`Drop`] to drain a lambda chain onto a worklist instead of
+    /// recursing through it, which would overflow the stack on a deeply nested chain.
     pub(crate) fn take_unique_body(&mut self) -> Option<Expression> {
-        Arc::get_mut(&mut self.body).map(std::mem::take)
+        Arc::get_mut(&mut self.body).map(|body| std::mem::replace(body, Expression::Root))
     }
 }
 

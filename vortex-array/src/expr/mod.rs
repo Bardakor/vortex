@@ -247,6 +247,7 @@ mod tests {
     use vortex_array::expr::eq;
     use vortex_array::expr::lit;
     use vortex_array::expr::root;
+    use vortex_error::VortexResult;
 
     use super::*;
     use crate::dtype::DType;
@@ -304,7 +305,47 @@ mod tests {
     }
 
     #[test]
-    fn exact_expr_uses_lambda_body_identity() -> vortex_error::VortexResult<()> {
+    fn bound_constructors_preserve_order_and_types() -> VortexResult<()> {
+        let value_dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let scope = DType::Struct(
+            StructFields::from_iter([("value", value_dtype.clone())]),
+            Nullability::NonNullable,
+        );
+
+        let root = bound::root(scope.clone());
+        let value = bound::get_item("value", root);
+        let literal = bound::lit(5i32);
+        let condition = bound::gt(value.clone(), literal.clone());
+        assert_eq!(condition.dtype(), &DType::Bool(Nullability::NonNullable));
+        assert_eq!(condition.children(), &[value.clone(), literal.clone()]);
+
+        let case = bound::case_when(condition.clone(), value.clone(), literal.clone());
+        assert_eq!(case.dtype(), &value_dtype);
+        assert_eq!(case.children(), &[condition.clone(), value, literal]);
+
+        let packed = bound::pack(
+            [("condition", condition.clone()), ("value", case.clone())],
+            Nullability::NonNullable,
+        );
+        assert_eq!(packed.children(), &[condition, case.clone()]);
+        assert_eq!(
+            packed.dtype(),
+            &DType::Struct(
+                StructFields::from_iter([
+                    ("condition", DType::Bool(Nullability::NonNullable)),
+                    ("value", value_dtype),
+                ]),
+                Nullability::NonNullable,
+            )
+        );
+
+        let unbound = case_when(gt(col("value"), lit(5i32)), col("value"), lit(5i32));
+        assert_eq!(unbound.bind(&scope)?, case);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_expr_uses_lambda_body_identity() -> VortexResult<()> {
         let expr = lambda(["x"], root())?;
         assert_eq!(ExactExpr(expr.clone()), ExactExpr(expr));
 
@@ -317,9 +358,14 @@ mod tests {
     }
 
     #[test]
-    fn expr_display() {
+    fn expr_display() -> VortexResult<()> {
         assert_eq!(col("a").to_string(), "$.a");
         assert_eq!(root().to_string(), "$");
+        assert_eq!(var("value").to_string(), "$value");
+        assert_eq!(
+            lambda(["left", "right"], var("left"))?.to_string(),
+            "(left, right) -> $left"
+        );
 
         let col1: Expression = col("col1");
         let col2: Expression = col("col2");
@@ -413,6 +459,7 @@ mod tests {
             .to_string(),
             "{dog: 32u32, cat: \"rufus\"}"
         );
+        Ok(())
     }
 
     #[test]
