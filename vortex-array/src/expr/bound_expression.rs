@@ -452,6 +452,7 @@ mod tests {
     use crate::expr::test_harness::struct_dtype;
     use crate::expr::var;
     use crate::scalar_fn::fns::is_not_null::IsNotNull;
+    use crate::scalar_fn::fns::literal::Literal;
 
     fn scope() -> Scope {
         Scope::new(struct_dtype())
