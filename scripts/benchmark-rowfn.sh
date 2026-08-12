@@ -16,7 +16,7 @@ Options:
   --filter PATTERN       Pass a Divan benchmark filter. Repeatable.
   --build-only           Build and record benchmark executables without measuring.
   --measure-only         Measure previously recorded benchmark executables without building.
-  --config NAME          primary (1 CGU/fat LTO) or repository (16 CGUs/no LTO).
+  --config NAME          repository (16 CGUs/no LTO, default) or primary (1 CGU/fat LTO).
   --target-root PATH     Parent for reusable baseline and candidate Cargo targets.
   --baseline-target PATH Reusable Cargo target for the baseline revision.
   --candidate-target PATH
@@ -58,7 +58,7 @@ requested_suites=()
 filters=()
 run_build=true
 run_measure=true
-configuration=primary
+configuration=repository
 target_root=
 baseline_target_override=
 candidate_target_override=

@@ -20,10 +20,12 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::OutputSink;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::OutputSink;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_buffer::BufferMut;
@@ -133,8 +135,9 @@ unsafe impl<Options> OutputSink<Options> for I64Sink {
         rows.len() == row_count
     }
 
-    fn row<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a> {
-        &mut rows[index]
+    unsafe fn row_unchecked<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a> {
+        // SAFETY: required by this method's contract.
+        unsafe { rows.get_unchecked_mut(index) }
     }
 
     unsafe fn finish(self) -> VortexResult<ArrayRef> {
@@ -164,6 +167,36 @@ impl RowFn for RowSinkWrappingAdd {
         visitor.visit_into::<(i64, i64), I64Sink, _>(|(lhs, rhs), out| {
             *out = lhs.wrapping_add(rhs);
         })
+    }
+}
+
+#[derive(Clone)]
+struct RowSinkCheckedAdd;
+
+impl RowFn for RowSinkCheckedAdd {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = true;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("bench.row_sink_checked_add");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit_into::<(i64, i64), UninitElementSink<i64>, _>(
+            |(lhs, rhs), output| -> VortexResult<InitializedElement> {
+                let value = lhs.checked_add(rhs).ok_or_else(checked_add_error)?;
+                // SAFETY: `output` is the `UninitElementSink` row supplied for this callback.
+                Ok(unsafe { InitializedElement::write(output, value) })
+            },
+        )
     }
 }
 
@@ -230,6 +263,16 @@ fn row_sink_wrapping_add(bencher: Bencher) {
 }
 
 #[divan::bench]
+fn row_sink_wrapping_add_constant(bencher: Bencher) {
+    bench_row_fn(bencher, RowSinkWrappingAdd, constant_inputs);
+}
+
+#[divan::bench]
+fn row_sink_wrapping_add_nullable(bencher: Bencher) {
+    bench_row_fn(bencher, RowSinkWrappingAdd, nullable_inputs);
+}
+
+#[divan::bench]
 fn handrolled_sink_wrapping_add(bencher: Bencher) {
     bencher
         .with_inputs(inputs)
@@ -274,6 +317,11 @@ fn row_checked_add_constant(bencher: Bencher) {
 #[divan::bench]
 fn row_checked_add_nullable(bencher: Bencher) {
     bench_row_fn(bencher, RowCheckedAdd, nullable_inputs);
+}
+
+#[divan::bench]
+fn row_sink_checked_add_nullable(bencher: Bencher) {
+    bench_row_fn(bencher, RowSinkCheckedAdd, nullable_inputs);
 }
 
 #[divan::bench]
