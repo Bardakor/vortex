@@ -14,7 +14,8 @@
 //!
 //! The internal executor owns decoding, batch constants, null propagation, allocation, and
 //! validity. A visitor's prepare closure may derive shared state from constant operands once per
-//! batch.
+//! row-kernel invocation. A dense deferred-error retry invokes the kernel again over filtered valid
+//! rows.
 
 mod row_fn;
 pub use row_fn::RowFn;

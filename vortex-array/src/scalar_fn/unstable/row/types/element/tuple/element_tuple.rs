@@ -148,7 +148,9 @@ pub trait ElementTuple: 'static + private::Sealed {
     /// [`ScalarFnVTable::return_dtype`]: crate::scalar_fn::ScalarFnVTable::return_dtype
     fn validate(dtypes: &[DType]) -> VortexResult<()>;
 
-    /// Decode every input column once. Called once per batch.
+    /// Decode every input column once for one row-kernel invocation.
+    ///
+    /// A dense deferred-error retry starts another invocation over filtered valid rows.
     fn decode(args: &dyn ExecutionArgs, ctx: &mut ExecutionCtx) -> VortexResult<Self::Columns>;
 
     /// Decode every input column once while tolerating null rows.
@@ -192,7 +194,8 @@ pub trait ElementTuple: 'static + private::Sealed {
         index: usize,
     ) -> Self::Elems<'a>;
 
-    /// Read the batch-constant elements out of the decoded columns. Called once per batch.
+    /// Read the batch-constant elements out of the decoded columns once for one row-kernel
+    /// invocation.
     fn constants(columns: &Self::Columns) -> Self::ConstElems<'_>;
 }
 

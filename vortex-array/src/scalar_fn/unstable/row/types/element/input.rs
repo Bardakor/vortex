@@ -52,9 +52,11 @@ pub unsafe trait InputElement: 'static {
     /// Validate that `dtype` is an acceptable input column dtype for this element type.
     fn validate(dtype: &DType) -> VortexResult<()>;
 
-    /// Decode `array` into its column representation. Called once per batch.
+    /// Decode `array` into its column representation.
     ///
-    /// Hoist dtype checks, downcasts, and other batch-invariant work into this method.
+    /// The executor calls this once per row-kernel invocation. A dense deferred-error retry starts
+    /// another invocation over filtered valid rows. Hoist dtype checks, downcasts, and other
+    /// invocation-invariant work into this method.
     fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column>;
 
     /// Decode `array` _without_ assuming every row is valid, or `Ok(None)` when this element
