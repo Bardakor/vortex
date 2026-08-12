@@ -67,8 +67,6 @@ pub fn make_bound_free_field_annotator(
 ) -> impl AnnotationFn<BoundExpression, Annotation = FieldName> {
     move |expr: &BoundExpression| {
         let Some(scalar_fn) = expr.as_scalar() else {
-            // Only the scope root reads every field. A variable resolves against a frame, so it
-            // reads none of them, and saying otherwise would defeat column pruning.
             return if expr.is_root() {
                 scope.names().iter().cloned().collect()
             } else {
@@ -95,7 +93,7 @@ pub fn make_bound_free_field_annotator(
 }
 
 #[cfg(test)]
-mod variable_tests {
+mod tests {
     use vortex_error::VortexResult;
 
     use super::*;
@@ -108,8 +106,6 @@ mod variable_tests {
     use crate::expr::test_harness::struct_dtype;
     use crate::expr::var;
 
-    /// Only the scope root reads every field. A variable resolves against a frame, so treating it
-    /// like a root would mark a lambda body as reading the whole struct and defeat column pruning.
     #[test]
     fn a_bound_variable_accesses_no_root_fields() -> VortexResult<()> {
         let scope_dtype = struct_dtype();
