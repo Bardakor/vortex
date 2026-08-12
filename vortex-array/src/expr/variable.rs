@@ -11,14 +11,6 @@ use std::sync::Arc;
 use crate::expr::Expression;
 
 /// The name of a value bound in a [`Scope`](crate::expr::Scope).
-///
-/// Deliberately distinct from [`FieldName`](crate::dtype::FieldName): a variable and a struct field
-/// live in different namespaces, and giving them the same type would let one be passed where the
-/// other is meant.
-///
-/// The same type is used in both positions a variable appears — as a parameter of
-/// [`Expression::Lambda`](crate::expr::Expression::Lambda), which introduces the name, and inside
-/// [`Expression::Variable`](crate::expr::Expression::Variable), which references it.
 #[derive(Clone, Debug)]
 pub struct Variable(Arc<str>);
 
