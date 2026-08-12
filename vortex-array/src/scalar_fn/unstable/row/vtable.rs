@@ -4,12 +4,13 @@
 //! Adapts [`RowFn`] implementations to the scalar-function interface.
 //!
 //! The blanket [`ScalarFnVTable`] implementation supplies common arity, validity, fallibility, and
-//! execution behavior. [`row_fn_return_dtype`] and [`execute_rows`] expose the same planning and
-//! execution paths to public vtables that delegate to a private row kernel.
+//! execution behavior. The visitor layer validates and executes the concrete signature selected by
+//! dispatch. [`row_fn_return_dtype`] and [`execute_rows`] expose the same paths to public vtables
+//! that delegate to a private row kernel.
 
 use vortex_error::VortexResult;
-use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure_eq;
+use vortex_mask::Mask;
 use vortex_session::VortexSession;
 
 use super::row_fn::RowFn;
@@ -24,6 +25,12 @@ use crate::scalar_fn::ChildName;
 use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
+use crate::scalar_fn::unstable::row::batch::Batch;
+use crate::scalar_fn::unstable::row::batch::BorrowedExecutionArgs;
+use crate::scalar_fn::unstable::row::batch::finalize_kernel_output;
+use crate::scalar_fn::unstable::row::execute::RowExecution;
+use crate::scalar_fn::unstable::row::visitor::ExecuteRows;
+use crate::scalar_fn::unstable::row::visitor::ExecuteValidRows;
 
 impl<F: RowFn> ScalarFnVTable for F {
     type Options = F::Options;
@@ -98,16 +105,36 @@ pub fn row_fn_return_dtype<F: RowFn>(
 /// delegate row execution to a private `RowFn` kernel through this function.
 pub fn execute_rows<F: RowFn>(
     function: &F,
-    _options: &F::Options,
+    options: &F::Options,
     args: &dyn ExecutionArgs,
-    _ctx: &mut ExecutionCtx,
+    ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     ensure_arity(function, args.num_inputs())?;
 
-    // TODO(connor)[RowFn]: Replace this temporary error with the execution backend in #9129.
-    vortex_bail!(
-        "Row function {} does not yet have an execution backend",
-        RowFn::id(function)
+    // Nullary functions have no input validity to propagate, so they skip batch execution.
+    if args.num_inputs() == 0 {
+        let plan = function.dispatch(options, &[], BatchPlanner::<F>::new(&[], options))?;
+        let result_dtype = plan.result_dtype(&[]);
+        let nullary_args =
+            BorrowedExecutionArgs::new(&[], args.row_count(), &[], &plan.output_dtype, plan.policy);
+
+        let execution = execute_row_kernel(function, options, nullary_args, ctx)?;
+        let values = VortexResult::from(execution)?;
+
+        return finalize_kernel_output(
+            RowFn::id(function),
+            &result_dtype,
+            args.row_count(),
+            values,
+            ctx,
+        );
+    }
+
+    let batch = prepare_batch(function, options, args)?;
+    batch.execute(
+        |args, ctx| execute_row_kernel(function, options, args, ctx),
+        |args, valid, ctx| try_execute_rows_unfiltered(function, options, args, valid, ctx),
+        ctx,
     )
 }
 
@@ -124,25 +151,81 @@ fn ensure_arity<F: RowFn>(function: &F, actual: usize) -> VortexResult<()> {
     Ok(())
 }
 
+/// Execute the row loop selected by dispatch.
+fn execute_row_kernel<F: RowFn>(
+    function: &F,
+    options: &F::Options,
+    args: BorrowedExecutionArgs<'_>,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<RowExecution> {
+    function.dispatch(
+        options,
+        args.dtypes(),
+        ExecuteRows::<F>::new(&args, args.output_dtype(), args.policy(), ctx),
+    )
+}
+
+/// Try execution against the original inputs, returning `None` when batch execution must filter.
+fn try_execute_rows_unfiltered<F: RowFn>(
+    function: &F,
+    options: &F::Options,
+    args: BorrowedExecutionArgs<'_>,
+    valid: &Mask,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<Option<RowExecution>> {
+    function.dispatch(
+        options,
+        args.dtypes(),
+        ExecuteValidRows::<F>::new(&args, args.output_dtype(), args.policy(), valid, ctx),
+    )
+}
+
+/// Prepare the batch inputs and execution plan for `function`.
+fn prepare_batch<F: RowFn>(
+    function: &F,
+    options: &F::Options,
+    args: &dyn ExecutionArgs,
+) -> VortexResult<Batch> {
+    Batch::new(RowFn::id(function), args, |arg_dtypes| {
+        function.dispatch(
+            options,
+            arg_dtypes,
+            BatchPlanner::<F>::new(arg_dtypes, options),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
     use vortex_error::VortexError;
     use vortex_error::VortexResult;
     use vortex_session::registry::CachedId;
 
     use super::execute_rows;
     use super::row_fn_return_dtype;
+    use crate::IntoArray;
     use crate::VortexSessionExecute;
     use crate::array_session;
+    use crate::arrays::PrimitiveArray;
     use crate::dtype::DType;
     use crate::scalar_fn::EmptyOptions;
     use crate::scalar_fn::ScalarFnId;
     use crate::scalar_fn::VecExecutionArgs;
     use crate::scalar_fn::unstable::row::RowFn;
     use crate::scalar_fn::unstable::row::RowVisitor;
+    use crate::validity::Validity;
 
     #[derive(Clone)]
     struct IndexingRowFn;
+
+    #[derive(Clone)]
+    struct ChangingDispatchRowFn {
+        dispatches: Arc<AtomicUsize>,
+    }
 
     impl RowFn for IndexingRowFn {
         type Options = EmptyOptions;
@@ -168,6 +251,31 @@ mod tests {
         }
     }
 
+    impl RowFn for ChangingDispatchRowFn {
+        type Options = EmptyOptions;
+
+        const ARG_NAMES: &'static [&'static str] = &["value"];
+        const FALLIBLE: bool = true;
+
+        fn id(&self) -> ScalarFnId {
+            static ID: CachedId = CachedId::new("test.changing_dispatch_row_fn");
+            *ID
+        }
+
+        fn dispatch<V: RowVisitor<Self::Options>>(
+            &self,
+            _options: &Self::Options,
+            _args: &[DType],
+            visitor: V,
+        ) -> VortexResult<V::VisitResult> {
+            if self.dispatches.fetch_add(1, Ordering::Relaxed) == 0 {
+                visitor.visit::<(i64,), i64>(|(value,)| value)
+            } else {
+                visitor.visit_deferred::<(i64,), i64, bool>(|(value,)| (value, false), |_| Ok(()))
+            }
+        }
+    }
+
     #[test]
     fn test_return_dtype_rejects_wrong_arity_before_dispatch() {
         let error = row_fn_return_dtype(&IndexingRowFn, &EmptyOptions, &[])
@@ -184,6 +292,29 @@ mod tests {
             .expect_err("wrong arity must fail before dispatch");
 
         assert_arity_error(error);
+    }
+
+    #[test]
+    fn test_execute_rejects_dispatch_that_changes_after_planning() {
+        let function = ChangingDispatchRowFn {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+        };
+        let input = PrimitiveArray::new(vec![1_i64, 2], Validity::NonNullable).into_array();
+        let args = VecExecutionArgs::new(vec![input], 2);
+        let mut ctx = array_session().create_execution_ctx();
+
+        let error = execute_rows(&function, &EmptyOptions, &args, &mut ctx)
+            .expect_err("dispatch must not change after planning");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("row dispatch must select the planned nullable execution policy"),
+            "unexpected error: {error}",
+        );
+        assert!(
+            message.contains("planned Dense, got DenseWithRetry"),
+            "unexpected error: {error}",
+        );
     }
 
     #[track_caller]
