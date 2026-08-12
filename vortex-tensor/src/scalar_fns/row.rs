@@ -16,7 +16,7 @@ use vortex_array::arrays::masked::MaskedArraySlotsExt;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::dtype::PType;
-use vortex_array::scalar_fn::InputElement;
+use vortex_array::scalar_fn::unstable::row::InputElement;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
