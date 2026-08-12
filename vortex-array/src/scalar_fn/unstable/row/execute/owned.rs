@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Execution that stores one owned output value per row.
+//! Executes row kernels that return one independent owned value per row.
+//!
+//! [`execute_owned`] decodes inputs once, prepares constant state, writes into spare vector
+//! capacity, and reduces compact failure evidence without putting error construction in the hot
+//! loop. [`execute_owned_infallible`] removes that failure path for infallible kernels.
 
 use std::ops::BitOrAssign;
 

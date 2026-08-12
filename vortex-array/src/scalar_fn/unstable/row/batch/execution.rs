@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Null propagation, constant folding, and strategy execution for one columnar batch.
+//! Applies columnar semantics around one typed row kernel invocation.
+//!
+//! [`Batch`] owns strict null propagation, constant broadcasting, execution strategy selection, and
+//! output validation. The row kernel therefore handles only decoded values and its selected output
+//! capability.
 
 use smallvec::SmallVec;
 use vortex_error::VortexResult;

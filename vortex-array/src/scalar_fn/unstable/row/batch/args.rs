@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! A borrowed execution view passed to one row-kernel invocation.
+//! Execution arguments paired with the metadata selected during planning.
+//!
+//! [`BorrowedExecutionArgs`] can point at original, sliced, or filtered arrays while retaining the
+//! dtypes, output dtype, and null policy of the original batch plan.
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;

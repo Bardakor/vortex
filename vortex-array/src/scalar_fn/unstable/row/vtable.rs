@@ -138,7 +138,6 @@ pub fn execute_rows<F: RowFn>(
     )
 }
 
-/// Validate the number of arguments before calling user-defined dispatch code.
 fn ensure_arity<F: RowFn>(function: &F, actual: usize) -> VortexResult<()> {
     let expected = F::ARG_NAMES.len();
     vortex_ensure_eq!(
@@ -151,7 +150,6 @@ fn ensure_arity<F: RowFn>(function: &F, actual: usize) -> VortexResult<()> {
     Ok(())
 }
 
-/// Execute the row loop selected by dispatch.
 fn execute_row_kernel<F: RowFn>(
     function: &F,
     options: &F::Options,
@@ -161,11 +159,17 @@ fn execute_row_kernel<F: RowFn>(
     function.dispatch(
         options,
         args.dtypes(),
-        ExecuteRows::<F>::new(&args, args.output_dtype(), args.policy(), ctx),
+        ExecuteRows::<F>::new(
+            &args,
+            args.dtypes(),
+            options,
+            args.output_dtype(),
+            args.policy(),
+            ctx,
+        ),
     )
 }
 
-/// Try execution against the original inputs, returning `None` when batch execution must filter.
 fn try_execute_rows_unfiltered<F: RowFn>(
     function: &F,
     options: &F::Options,
@@ -176,11 +180,18 @@ fn try_execute_rows_unfiltered<F: RowFn>(
     function.dispatch(
         options,
         args.dtypes(),
-        ExecuteValidRows::<F>::new(&args, args.output_dtype(), args.policy(), valid, ctx),
+        ExecuteValidRows::<F>::new(
+            &args,
+            args.dtypes(),
+            options,
+            args.output_dtype(),
+            args.policy(),
+            valid,
+            ctx,
+        ),
     )
 }
 
-/// Prepare the batch inputs and execution plan for `function`.
 fn prepare_batch<F: RowFn>(
     function: &F,
     options: &F::Options,
@@ -225,6 +236,13 @@ mod tests {
     #[derive(Clone)]
     struct ChangingDispatchRowFn {
         dispatches: Arc<AtomicUsize>,
+        change: DispatchChange,
+    }
+
+    #[derive(Clone, Copy)]
+    enum DispatchChange {
+        Policy,
+        Element,
     }
 
     impl RowFn for IndexingRowFn {
@@ -271,7 +289,11 @@ mod tests {
             if self.dispatches.fetch_add(1, Ordering::Relaxed) == 0 {
                 visitor.visit::<(i64,), i64>(|(value,)| value)
             } else {
-                visitor.visit_deferred::<(i64,), i64, bool>(|(value,)| (value, false), |_| Ok(()))
+                match self.change {
+                    DispatchChange::Policy => visitor
+                        .visit_deferred::<(i64,), i64, bool>(|(value,)| (value, false), |_| Ok(())),
+                    DispatchChange::Element => visitor.visit::<(u64,), u64>(|(value,)| value),
+                }
             }
         }
     }
@@ -298,6 +320,7 @@ mod tests {
     fn test_execute_rejects_dispatch_that_changes_after_planning() {
         let function = ChangingDispatchRowFn {
             dispatches: Arc::new(AtomicUsize::new(0)),
+            change: DispatchChange::Policy,
         };
         let input = PrimitiveArray::new(vec![1_i64, 2], Validity::NonNullable).into_array();
         let args = VecExecutionArgs::new(vec![input], 2);
@@ -315,6 +338,28 @@ mod tests {
             message.contains("planned Dense, got DenseWithRetry"),
             "unexpected error: {error}",
         );
+    }
+
+    #[test]
+    fn test_execute_revalidates_element_types_after_planning() -> VortexResult<()> {
+        let function = ChangingDispatchRowFn {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+            change: DispatchChange::Element,
+        };
+        let input = PrimitiveArray::new(vec![1_i64, 2], Validity::NonNullable).into_array();
+        let args = VecExecutionArgs::new(vec![input], 2);
+        let mut ctx = array_session().create_execution_ctx();
+
+        let error = match execute_rows(&function, &EmptyOptions, &args, &mut ctx) {
+            Err(error) => error,
+            Ok(_) => vortex_error::vortex_bail!("dispatch must preserve its planned element types"),
+        };
+
+        assert!(
+            error.to_string().contains("expected a u64 column"),
+            "unexpected error: {error}",
+        );
+        Ok(())
     }
 
     #[track_caller]

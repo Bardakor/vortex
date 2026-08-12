@@ -479,22 +479,13 @@ fn test_sink_dtype_receives_function_options() -> VortexResult<()> {
     Ok(())
 }
 
-#[test]
-fn test_nonnullable_kernel_output_rejects_nulls_at_function_boundary() -> VortexResult<()> {
-    let input = PrimitiveArray::from_iter([1_i64, 2]).into_array();
-
-    assert_invalid_kernel_output(input)
-}
-
-#[test]
-fn test_all_valid_kernel_output_rejects_nulls_at_function_boundary() -> VortexResult<()> {
-    let input = PrimitiveArray::new(vec![1_i64, 2], Validity::AllValid).into_array();
-
-    assert_invalid_kernel_output(input)
-}
-
-#[track_caller]
-fn assert_invalid_kernel_output(input: ArrayRef) -> VortexResult<()> {
+#[rstest]
+#[case::nonnullable(Validity::NonNullable)]
+#[case::all_valid(Validity::AllValid)]
+fn test_kernel_output_rejects_nulls_at_function_boundary(
+    #[case] validity: Validity,
+) -> VortexResult<()> {
+    let input = PrimitiveArray::new(vec![1_i64, 2], validity).into_array();
     let args = VecExecutionArgs::new(vec![input], 2);
     let mut ctx = array_session().create_execution_ctx();
     let execution = execute_rows(&InvalidKernelOutput, &EmptyOptions, &args, &mut ctx);
