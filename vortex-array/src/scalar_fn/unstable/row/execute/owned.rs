@@ -24,7 +24,7 @@ impl BitOrAssign for NoFailure {
     fn bitor_assign(&mut self, _rhs: Self) {}
 }
 
-/// Decode every input column once, then store one infallible owned output per row.
+/// Decode every input column for one kernel invocation, then store one infallible output per row.
 pub fn execute_owned_infallible<Args, Out, Prepared>(
     args: &dyn ExecutionArgs,
     ctx: &mut ExecutionCtx,
@@ -44,7 +44,7 @@ where
     )
 }
 
-/// Decode every input column once, then store owned row outputs and reduce deferred failures.
+/// Decode every input column for one kernel invocation, then store outputs and reduce failures.
 pub fn execute_owned<Args, Out, Prepared, Fail>(
     args: &dyn ExecutionArgs,
     ctx: &mut ExecutionCtx,

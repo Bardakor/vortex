@@ -35,7 +35,7 @@ fn ensure_decoded_lengths<Args: ElementTuple>(
     Ok(())
 }
 
-/// Decode every input column once, allocate the sink once, then write one row at a time.
+/// Decode every input column and allocate one sink for one kernel invocation.
 ///
 /// The sink lives here rather than in the closure, so `apply` stays [`Fn`] and mutable output state
 /// does not need to be captured by the closure.
