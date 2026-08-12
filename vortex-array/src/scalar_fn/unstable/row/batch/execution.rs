@@ -121,11 +121,10 @@ impl Batch {
         })
     }
 
-    /// Add null propagation, constant folding, and strategy selection around `kernel`.
+    /// Apply constant folding and null handling around `kernel`.
     ///
-    /// The kernel may ignore input validity. It receives valid-only rows when required, and its
-    /// output **must** match the planned dtype up to nullability. `try_unfiltered` receives the
-    /// originals plus a mixed validity mask; `Ok(None)` selects filter-and-scatter.
+    /// For a mixed validity mask, `try_unfiltered` may avoid filtering; `Ok(None)` selects
+    /// filter-and-scatter. Every kernel result is checked against the planned shape and dtype.
     pub fn execute(
         &self,
         kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
@@ -167,11 +166,7 @@ impl Batch {
         }
     }
 
-    /// Evaluate a single row of all-constant inputs and broadcast its value.
-    ///
-    /// Reconciling the row's dtype before reading the scalar keeps this path on the same
-    /// kernel/declaration agreement check as the dense and filter paths, rather than letting `cast`
-    /// paper over a disagreement.
+    /// Evaluate one row of constant inputs and broadcast the validated result.
     fn broadcast_one_row(
         &self,
         kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
@@ -191,11 +186,7 @@ impl Batch {
         Ok(ConstantArray::new(scalar, self.row_count).into_array())
     }
 
-    /// Run the kernel over every row, including the rows behind nulls, then mask its result.
-    ///
-    /// The arguments reach the kernel untouched, so the inputs keep their original encoding, and
-    /// the conjoined validity is handed to `mask` as an array rather than materialized into a
-    /// [`Mask`] first.
+    /// Run every stored payload, then attach the input validity without materializing its mask.
     fn execute_dense(
         &self,
         kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
@@ -314,8 +305,7 @@ impl Batch {
             .map(Some)
     }
 
-    /// The filter strategy for a mixed mask: filter every input down to the rows set in `valid`,
-    /// run the kernel over those, and scatter its results back into a null-padded output.
+    /// Filter to valid rows, run the kernel, then scatter into a null-padded output.
     fn filter_and_scatter(
         &self,
         kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
@@ -337,7 +327,6 @@ impl Batch {
         self.finalize_output(self.scatter_valid(values, valid)?, valid.len())
     }
 
-    /// An all-null result of the function's declared return dtype.
     fn all_null(&self) -> ArrayRef {
         ConstantArray::new(Scalar::null(self.result_dtype.clone()), self.row_count).into_array()
     }
@@ -357,7 +346,6 @@ impl Batch {
         )
     }
 
-    /// Finalize an output against this batch's expected length and declared return dtype.
     fn finalize_output(&self, values: ArrayRef, expected_len: usize) -> VortexResult<ArrayRef> {
         reconcile_output(self.id, &self.result_dtype, expected_len, values)
     }
