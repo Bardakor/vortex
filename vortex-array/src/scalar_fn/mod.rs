@@ -6,6 +6,12 @@
 //! This module contains the [`ScalarFnVTable`] trait and all built-in scalar function
 //! implementations. Expressions ([`crate::expr::Expression`]) reference scalar functions
 //! at each node.
+//!
+//! Use `unstable::row::RowFn` for strict functions whose natural kernel computes one row at a
+//! time. It derives decoding, constant handling, null propagation, output construction, and
+//! validity. This experimental API requires the `unstable_row_fns` feature and has no compatibility
+//! guarantees. Implement [`ScalarFnVTable`] directly when the natural kernel is columnar, aliases
+//! an input, or may produce null from otherwise valid inputs.
 
 use vortex_session::registry::Id;
 
@@ -34,6 +40,12 @@ pub use options::*;
 
 mod signature;
 pub use signature::*;
+
+#[cfg(feature = "unstable_row_fns")]
+pub mod unstable;
+#[cfg(not(feature = "unstable_row_fns"))]
+#[allow(dead_code, unused_imports)]
+pub(crate) mod unstable;
 
 pub mod fns;
 pub mod internal;

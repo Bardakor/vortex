@@ -79,6 +79,8 @@ cudarc = ["dep:cudarc"]
 table-display = ["dep:tabled"]
 _test-harness = ["dep:goldenfile", "dep:rstest", "dep:rstest_reuse"]
 serde = ["dep:serde", "vortex-buffer/serde", "vortex-mask/serde"]
+# Exposes experimental row-function APIs without compatibility guarantees.
+unstable_row_fns = []
 
 [dev-dependencies]
 divan = { workspace = true }
@@ -90,7 +92,11 @@ rstest = { workspace = true }
 serde_json = { workspace = true }
 serde_test = { workspace = true }
 test-with = { workspace = true }
-vortex-array = { path = ".", features = ["_test-harness", "table-display"] }
+vortex-array = { path = ".", features = [
+    "_test-harness",
+    "table-display",
+    "unstable_row_fns",
+] }
 
 [[bench]]
 name = "aggregate_max"
