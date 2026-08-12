@@ -53,7 +53,7 @@ impl ArrayRef {
             Expression::Variable(..) => {
                 vortex_bail!("cannot apply detached variable")
             }
-            Expression::Lambda(lambda) => {
+            Expression::Lambda(..) => {
                 vortex_bail!("cannot apply detached lambda")
             }
             Expression::Scalar { scalar_fn, .. } => scalar_fn,
