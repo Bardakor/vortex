@@ -18,9 +18,7 @@ use vortex_session::VortexSession;
 use crate::dtype::DType;
 use crate::expr::Expression;
 use crate::expr::display::DisplayTreeExpr;
-use crate::expr::scope::Frame;
 use crate::expr::scope::Scope;
-use crate::expr::scope::VariableRef;
 use crate::expr::traversal::TraversalOrder;
 use crate::expr::traversal::pre_order_visit_down;
 use crate::expr::variable::Variable;
@@ -60,8 +58,6 @@ pub enum BoundExpression {
         dtype: DType,
         /// The variable that was resolved.
         variable: Variable,
-        /// The lexical frame and slot it resolved to.
-        reference: VariableRef,
     },
 }
 
@@ -70,40 +66,25 @@ pub enum BoundExpression {
 /// A higher-order function's type-checked lambda argument.
 ///
 /// This is deliberately separate from [`BoundExpression`]: a lambda is not a value and has no
-/// dtype. The higher-order function establishes the parameter frame, binds the body, and stores
+/// dtype. The higher-order function establishes the parameter bindings, binds the body, and stores
 /// the resulting `BoundLambda` in its own state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BoundLambda {
     /// The parameters and their dtypes: the argument side of the function type.
-    ///
-    /// Storing the [`Frame`] the body was bound under, rather than two parallel arrays, makes the
-    /// name/dtype pairing and the duplicate-name rejection structural instead of maintained by
-    /// hand.
-    frame: Frame,
+    params: Box<[Variable]>,
+    param_dtypes: Box<[DType]>,
     body: Arc<BoundExpression>,
 }
 
 impl BoundLambda {
-    /// The frame this lambda's body was bound under.
-    pub fn frame(&self) -> &Frame {
-        &self.frame
-    }
-
-    /// The parameters paired with their dtypes, in declaration order.
-    pub fn bindings(&self) -> &[(Variable, DType)] {
-        self.frame.bindings()
-    }
-
     /// The variables this lambda binds, in declaration order.
-    ///
-    /// An iterator rather than a slice, because the names and dtypes are interleaved in the frame.
-    pub fn params(&self) -> impl ExactSizeIterator<Item = &Variable> {
-        self.frame.bindings().iter().map(|(variable, _)| variable)
+    pub fn params(&self) -> &[Variable] {
+        &self.params
     }
 
     /// The dtypes of the parameters, in declaration order.
-    pub fn param_dtypes(&self) -> impl ExactSizeIterator<Item = &DType> {
-        self.frame.bindings().iter().map(|(_, dtype)| dtype)
+    pub fn param_dtypes(&self) -> &[DType] {
+        &self.param_dtypes
     }
 
     /// The bound body.
@@ -150,14 +131,12 @@ impl PartialEq for ExactBoundExpr {
                 BoundExpression::Variable {
                     dtype: lhs_dtype,
                     variable: lhs_var,
-                    reference: lhs_reference,
                 },
                 BoundExpression::Variable {
                     dtype: rhs_dtype,
                     variable: rhs_var,
-                    reference: rhs_reference,
                 },
-            ) => lhs_var == rhs_var && lhs_reference == rhs_reference && lhs_dtype == rhs_dtype,
+            ) => lhs_var == rhs_var && lhs_dtype == rhs_dtype,
             // No catch-all: a new variant must state its own identity, or `eq` drifts out of step
             // with `hash` and keys stop equalling themselves.
             (BoundExpression::Root { .. }, _)
@@ -175,14 +154,9 @@ impl Hash for ExactBoundExpr {
         // identity-keyed cache lookups from deserializing an entire schema just to compute a hash.
         match &self.0 {
             BoundExpression::Root { .. } => state.write_u8(0),
-            BoundExpression::Variable {
-                variable,
-                reference,
-                ..
-            } => {
+            BoundExpression::Variable { variable, .. } => {
                 state.write_u8(2);
                 variable.hash(state);
-                reference.hash(state);
             }
             BoundExpression::Scalar {
                 scalar_fn,
@@ -311,14 +285,10 @@ impl BoundExpression {
             .vortex_expect("Bound expression options type mismatch")
     }
 
-    /// The variable and lexical location it resolves to, if this node is a variable reference.
-    pub fn as_variable(&self) -> Option<(&Variable, VariableRef)> {
+    /// The variable this node resolves to, if this node is a variable reference.
+    pub fn as_variable(&self) -> Option<&Variable> {
         match self {
-            Self::Variable {
-                variable,
-                reference,
-                ..
-            } => Some((variable, *reference)),
+            Self::Variable { variable, .. } => Some(variable),
             Self::Scalar { .. } | Self::Root { .. } => None,
         }
     }
@@ -385,16 +355,12 @@ impl Expression {
         match self {
             Expression::Root => Ok(BoundExpression::new_root(scope.root().clone())),
             Expression::Variable(variable) => {
-                let Some((dtype, reference)) = scope.resolve(variable) else {
-                    vortex_bail!(
-                        "unbound variable '{variable}'; the scope binds {} frame(s)",
-                        scope.depth()
-                    );
+                let Some(dtype) = scope.resolve(variable) else {
+                    vortex_bail!("unbound variable '{variable}'");
                 };
                 Ok(BoundExpression::Variable {
                     dtype: dtype.clone(),
                     variable: variable.clone(),
-                    reference,
                 })
             }
             Expression::Lambda(_) => {
@@ -442,7 +408,6 @@ mod tests {
     use super::*;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
-    use crate::expr::Frame;
     use crate::expr::checked_add;
     use crate::expr::col;
     use crate::expr::eq;
@@ -531,20 +496,18 @@ mod tests {
     }
 
     #[test]
-    fn variable_binds_to_its_lexical_frame() -> VortexResult<()> {
-        let scope = scope().push_frame(Frame::try_new([(
+    fn variable_binds_to_its_scope() -> VortexResult<()> {
+        let scope = scope().with_bindings([(
             Variable::new("value"),
             DType::Primitive(PType::I64, Nullability::Nullable),
-        )])?);
+        )])?;
 
         let bound = var("value").bind_scope(&scope)?;
-        let (variable, reference) = bound
+        let variable = bound
             .as_variable()
             .vortex_expect("variable must remain bound");
 
         assert_eq!(variable, &Variable::new("value"));
-        assert_eq!(reference.frame(), 0);
-        assert_eq!(reference.slot(), 0);
         assert_eq!(
             bound.dtype(),
             &DType::Primitive(PType::I64, Nullability::Nullable)
@@ -554,10 +517,10 @@ mod tests {
 
     #[test]
     fn variable_validity_is_deferred_to_its_bound_array() -> VortexResult<()> {
-        let scope = scope().push_frame(Frame::try_new([(
+        let scope = scope().with_bindings([(
             Variable::new("value"),
             DType::Primitive(PType::I32, Nullability::Nullable),
-        )])?);
+        )])?;
         let expression = checked_add(var("value"), lit(1_i32));
 
         let validity = expression.validity()?;

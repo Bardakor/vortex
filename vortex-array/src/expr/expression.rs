@@ -49,12 +49,12 @@ pub enum Expression {
     /// Like [`Expression::Root`], its dtype comes from the scope rather than from children, so it
     /// is resolved during binding.
     Variable(Variable),
-    /// A body evaluated under a frame binding `params`.
+    /// A body evaluated with named bindings for `params`.
     ///
     /// A lambda is **not a value**: its parameter dtypes are determined by whatever applies it, so
     /// it has no dtype of its own and cannot be bound by
-    /// [`bind_scope`](Expression::bind_scope). Use
-    /// [`Lambda::bind`], which takes the parameter types.
+    /// [`bind_scope`](Expression::bind_scope). The higher-order function that applies it supplies
+    /// its parameter types and binds its body.
     Lambda(Lambda),
 }
 
@@ -131,7 +131,7 @@ impl Expression {
     /// Returns the sub-expressions of this node.
     ///
     /// A lambda is a lexical scope boundary, so its body is intentionally not a generic child.
-    /// The higher-order function that applies it establishes the parameter frame, then binds and
+    /// The higher-order function that applies it establishes the parameter bindings, then binds and
     /// optimizes the body explicitly.
     pub fn children(&self) -> &[Expression] {
         match self {
@@ -179,10 +179,10 @@ impl Expression {
     pub fn return_dtype(&self, scope: &DType) -> VortexResult<DType> {
         match self {
             Self::Root => Ok(scope.clone()),
-            // A variable resolves against a frame, which this entry point does not carry. Erroring
+            // A variable resolves against named bindings, which this entry point does not carry. Erroring
             // keeps callers that only have a root dtype from silently mistyping a lambda body.
             Self::Variable(variable) => vortex_bail!(
-                "variable '{variable}' can only be typed by binding against a scope with frames"
+                "variable '{variable}' can only be typed by binding against a scope with bindings"
             ),
             Self::Lambda(_) => vortex_bail!(
                 "a lambda has no data type; it must be bound by the higher-order function that applies it"

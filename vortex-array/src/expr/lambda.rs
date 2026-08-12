@@ -14,19 +14,14 @@ use vortex_utils::aliases::hash_set::HashSet;
 use crate::expr::Expression;
 use crate::expr::variable::Variable;
 
-/// A body evaluated under a frame binding `params`.
+/// A body evaluated with named bindings for `params`.
 ///
 /// A lambda is **not a value**: its parameter dtypes are determined by whatever applies it, so it
 /// has no dtype of its own and cannot be bound by [`bind_scope`](Expression::bind_scope). The
 /// higher-order function that applies it supplies its parameter types and binds its body.
-///
-/// It is a struct rather than only an enum variant so that an API expecting a lambda — a
-/// higher-order function, for instance — can say so in its signature and reject anything else at
-/// compile time. It is a scope boundary: generic expression passes leave its body to the
-/// higher-order function that establishes the parameter frame.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lambda {
-    params: Box<[Variable]>,
+    params: Arc<Vec<Variable>>,
     body: Arc<Expression>,
 }
 
@@ -38,18 +33,20 @@ impl Lambda {
         params: impl IntoIterator<Item = impl Into<Variable>>,
         body: Expression,
     ) -> VortexResult<Self> {
-        let params: Box<[Variable]> = params.into_iter().map(Into::into).collect();
-        {
-            let mut seen = HashSet::with_capacity(params.len());
-            for parameter in &params {
-                if !seen.insert(parameter) {
-                    vortex_bail!("duplicate lambda parameter '{parameter}'");
-                }
+        let mut vars = Vec::new();
+        let mut seen = HashSet::new();
+
+        for param in params {
+            let var: Variable = param.into();
+            if !seen.insert(var.clone()) {
+                vortex_bail!("duplicate parameter");
             }
+
+            vars.push(var)
         }
 
         Ok(Self {
-            params,
+            params: Arc::new(vars),
             body: Arc::new(body),
         })
     }
@@ -59,15 +56,12 @@ impl Lambda {
         &self.params
     }
 
-    /// The expression evaluated under the parameter frame.
+    /// The expression evaluated under the parameter bindings.
     pub fn body(&self) -> &Expression {
         &self.body
     }
 
     /// Take the body if this lambda holds the only reference to it.
-    ///
-    /// Used by `Expression`'s iterative [`Drop`] to drain a lambda chain onto a worklist instead of
-    /// recursing through it, which would overflow the stack on a deeply nested chain.
     pub(crate) fn take_unique_body(&mut self) -> Option<Expression> {
         Arc::get_mut(&mut self.body).map(std::mem::take)
     }

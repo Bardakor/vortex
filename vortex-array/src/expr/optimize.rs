@@ -132,7 +132,7 @@ impl Expression {
         &self,
         cache: &SimplifyCache<'_>,
     ) -> VortexResult<Option<Expression>> {
-        // A lambda's body types against a parameter frame that this pass does not carry, so
+        // A lambda's body types against parameter bindings that this pass does not carry, so
         // descending would try to resolve a variable against the root dtype and fail. Leave it to
         // whoever binds the lambda and knows the parameter types.
         if self.as_lambda().is_some() {
@@ -291,7 +291,7 @@ mod lambda_tests {
     use crate::expr::test_harness::struct_dtype;
     use crate::expr::var;
 
-    /// A lambda body types against a parameter frame this pass does not carry, so descending into
+    /// A lambda body types against parameter bindings this pass does not carry, so descending into
     /// one would try to resolve the variable against the root dtype and error.
     #[test]
     fn a_lambda_is_an_optimization_boundary() -> VortexResult<()> {

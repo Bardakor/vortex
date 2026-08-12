@@ -100,7 +100,6 @@ mod tests {
     use crate::dtype::DType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
-    use crate::expr::Frame;
     use crate::expr::Scope;
     use crate::expr::Variable;
     use crate::expr::test_harness::struct_dtype;
@@ -113,13 +112,10 @@ mod tests {
             .as_struct_fields_opt()
             .vortex_expect("test scope is a struct");
 
-        let bound =
-            var("x").bind_scope(&Scope::new(scope_dtype.clone()).push_frame(Frame::try_new([
-                (
-                    Variable::new("x"),
-                    DType::Primitive(PType::I32, Nullability::NonNullable),
-                ),
-            ])?))?;
+        let bound = var("x").bind_scope(&Scope::new(scope_dtype.clone()).with_bindings([(
+            Variable::new("x"),
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+        )])?)?;
 
         let annotator = make_bound_free_field_annotator(fields);
         assert!(

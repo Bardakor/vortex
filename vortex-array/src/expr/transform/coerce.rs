@@ -17,7 +17,7 @@ use crate::scalar_fn::fns::literal::Literal;
 /// The rewrite is bottom-up: children are coerced first, then each parent node checks whether
 /// its children match the coerced argument types.
 pub fn coerce_expression(expr: Expression, scope: &DType) -> VortexResult<Expression> {
-    // A lambda is a coercion boundary. Its body types against a parameter frame that this pass
+    // A lambda is a coercion boundary. Its body types against parameter bindings that this pass
     // does not carry, so descending into one would try to type a variable against the root dtype
     // and fail. Leave it for whoever binds the lambda and knows the parameter types. Recursing
     // explicitly rather than using `transform_up` is what makes skipping the body possible.
@@ -263,7 +263,7 @@ mod lambda_tests {
     use crate::expr::test_harness::struct_dtype;
     use crate::expr::var;
 
-    /// A lambda body types against a parameter frame, which this pass does not carry. Descending
+    /// A lambda body types against parameter bindings, which this pass does not carry. Descending
     /// into one would try to type the variable against the root dtype and fail, so a lambda is a
     /// coercion boundary and is returned untouched.
     #[test]
