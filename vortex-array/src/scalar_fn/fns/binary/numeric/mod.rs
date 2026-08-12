@@ -4,9 +4,9 @@
 //! Native execution of the arithmetic operators (Add/Sub/Mul/Div) of the [`Binary`] scalar
 //! function. There is no Arrow fallback.
 //!
-//! The primitive widths are computed by a [`RowFn`](crate::scalar_fn::RowFn), which owns null
-//! handling, constants, and validity for them; see [`row`]. Decimal keeps its own columnar
-//! implementation in [`decimal`].
+//! The primitive widths are computed by a
+//! [`RowFn`](crate::scalar_fn::unstable::row::RowFn), which owns null handling, constants, and
+//! validity for them; see [`row`]. Decimal keeps its own columnar implementation in [`decimal`].
 //!
 //! [`Binary`]: super::Binary
 
