@@ -21,14 +21,13 @@ pub trait ExprSerializeProtoExt {
     fn serialize_proto(&self) -> VortexResult<pb::Expr>;
 }
 
-/// The wire id for [`Expression::Root`], retained from when `Root` was a scalar function so that
-/// already-serialized expressions keep round-tripping.
+/// The wire id for [`Expression::Root`].
 pub(crate) const ROOT_ID: &str = "vortex.root";
 
 /// The wire id for [`Expression::Variable`].
 pub(crate) const VARIABLE_ID: &str = "vortex.var";
 
-/// The wire id for [`Expression::Lambda`]. Its body is the message's single child.
+/// The wire id for [`Expression::Lambda`].
 pub(crate) const LAMBDA_ID: &str = "vortex.lambda";
 
 impl ExprSerializeProtoExt for Expression {
