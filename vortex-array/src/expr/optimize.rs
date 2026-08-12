@@ -32,7 +32,7 @@ impl Expression {
     fn simplify_untyped_node(&self) -> VortexResult<Option<Expression>> {
         match self {
             Expression::Scalar { scalar_fn, .. } => scalar_fn.simplify_untyped(self),
-            Expression::Root | Expression::Variable { .. } | Expression::Lambda { .. } => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -40,7 +40,7 @@ impl Expression {
     fn simplify_node(&self, ctx: &dyn SimplifyCtx) -> VortexResult<Option<Expression>> {
         match self {
             Expression::Scalar { scalar_fn, .. } => scalar_fn.simplify(self, ctx),
-            Expression::Root | Expression::Variable { .. } | Expression::Lambda { .. } => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -51,7 +51,7 @@ impl Expression {
     ) -> VortexResult<Option<ExpressionReduceNode<'a>>> {
         match self {
             Expression::Scalar { scalar_fn, .. } => scalar_fn.reduce_expression(node),
-            Expression::Root | Expression::Variable { .. } | Expression::Lambda { .. } => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -132,12 +132,6 @@ impl Expression {
         &self,
         cache: &SimplifyCache<'_>,
     ) -> VortexResult<Option<Expression>> {
-        // A lambda's body types against parameter bindings that this pass does not carry, so
-        // descending would try to resolve a variable against the root dtype and fail. Leave it to
-        // whoever binds the lambda and knows the parameter types.
-        if self.as_lambda().is_some() {
-            return Ok(None);
-        }
         // First optimize the root
         let mut current = self.try_optimize(cache)?;
 
