@@ -16,14 +16,14 @@ use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::PType;
 use crate::match_each_native_ptype;
-use crate::scalar_fn::RowFn;
-use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::VecExecutionArgs;
-use crate::scalar_fn::execute_rows;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::operators::CompareOperator;
+use crate::scalar_fn::unstable::row::RowFn;
+use crate::scalar_fn::unstable::row::RowVisitor;
+use crate::scalar_fn::unstable::row::execute_rows;
 
 /// Compare two primitive arrays of the same [`PType`].
 ///
@@ -131,7 +131,9 @@ fn use_columnar_comparison(
         // The fused comparison and bit-packing loop produces better x86 code for signed 64-bit
         // integers and f64. The RowFn byte-output loop remains faster for narrower lanes.
         (PType::I64 | PType::F64, _) => true,
-        // LLVM vectorizes per-row u64 inputs, but not the mixed-constant RowFn loop.
+        // LLVM 22 vectorizes the mixed-constant RowFn loop at 16 CGUs without LTO. However, the
+        // fused comparison and bit-packing path is still about 38% faster in
+        // `compare_u64_constant`. Recheck that benchmark before changing this dispatch.
         (PType::U64, _) => lhs.is::<Constant>() || rhs.is::<Constant>(),
         _ => false,
     })
