@@ -27,8 +27,8 @@ use crate::scalar_fn::unstable::row::OutputElement;
 /// # Errors
 ///
 /// Lifecycle methods report only incidental failures such as allocation. A semantic error that
-/// depends on input values **must** come from the row callback through a fallible [`SinkResult`], or
-/// [`RowFn::FALLIBLE`] cannot protect optimizations such as dictionary push-down.
+/// depends on input values **must** come from the row callback through a fallible [`SinkResult`],
+/// or [`RowFn::FALLIBLE`] cannot protect optimizations such as dictionary push-down.
 ///
 /// # Safety
 ///
@@ -91,11 +91,10 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
     ///
     /// **Must** be non-nullable: batch execution derives nullability from the inputs, widens the
     /// result, and masks the null rows.
-    fn sink_dtype(options: &Options, args: &[DType]) -> VortexResult<DType>;
+    fn output_dtype(options: &Options, args: &[DType]) -> VortexResult<DType>;
 
-    /// Allocate a sink for `rows` rows of `dtype`, which is this sink's own
-    /// [`sink_dtype`](Self::sink_dtype). Called once per batch.
-    fn with_capacity(rows: usize, dtype: &DType) -> VortexResult<Self>;
+    /// Allocate a sink for `rows` rows.
+    fn with_capacity(rows: usize) -> VortexResult<Self>;
 
     /// Borrow all output rows for the hot loop.
     fn rows(&mut self) -> Self::Rows<'_>;
@@ -116,7 +115,7 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
     unsafe fn row_unchecked<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a>;
 
     /// Finish into the built column, whose dtype **must** be this sink's
-    /// [`sink_dtype`](Self::sink_dtype). Called once per batch.
+    /// [`output_dtype`](Self::output_dtype). Called once per batch.
     ///
     /// # Safety
     ///
@@ -193,11 +192,11 @@ unsafe impl<T: OutputElement + Copy + Default, Options> OutputSink<Options>
         })
     }
 
-    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
+    fn output_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(T::element_dtype())
     }
 
-    fn with_capacity(rows: usize, _dtype: &DType) -> VortexResult<Self> {
+    fn with_capacity(rows: usize) -> VortexResult<Self> {
         Ok(Self {
             values: Vec::with_capacity(rows),
             row_count: rows,

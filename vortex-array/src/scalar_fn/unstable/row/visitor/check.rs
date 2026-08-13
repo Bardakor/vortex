@@ -112,7 +112,7 @@ where
 {
     Args::validate(dtypes)?;
 
-    let dtype = Sink::sink_dtype(options, dtypes)?;
+    let dtype = Sink::output_dtype(options, dtypes)?;
     vortex_ensure!(
         !dtype.is_nullable(),
         "row output sinks must declare a non-nullable dtype, got {dtype}",

@@ -149,6 +149,8 @@ mod tests {
 
         const ARG_NAMES: &'static [&'static str] = &["value"];
 
+        const FALLIBLE: bool = false;
+
         fn id(&self) -> ScalarFnId {
             static ID: CachedId = CachedId::new("test.indexing_row_fn");
             *ID

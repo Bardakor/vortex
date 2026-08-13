@@ -34,13 +34,13 @@ pub unsafe trait InputElement: 'static {
     /// Arrays guarantee payloads only for valid rows. Set this to `true` only when every decode and
     /// access method remains safe for null rows. Dense execution may pass unspecified values from
     /// null rows to the row closure.
-    const DENSE_SAFE: bool = false;
+    const DENSE_SAFE: bool;
 
     /// Whether [`decode`](Self::decode) can fail on _legal_ input data.
     ///
     /// This excludes infrastructural failures such as IO or allocation. Set it when legal input may
     /// contain a value that the decoder rejects.
-    const DECODE_FALLIBLE: bool = true;
+    const DECODE_FALLIBLE: bool;
 
     /// Validate that `dtype` is an acceptable input column dtype for this element type.
     fn validate(dtype: &DType) -> VortexResult<()>;

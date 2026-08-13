@@ -37,9 +37,10 @@ pub trait RowFn: 'static + Sized + Clone + Send + Sync {
 
     /// Whether any dispatch can raise a semantic error.
     ///
+    /// See [`ScalarFnVTable::is_fallible`] for a more detailed explanation of semantic errors.
+    ///
     /// The framework checks dispatched element and result types. A conservative `true` is allowed.
-    /// Sink lifecycle errors are incidental; semantic sink errors come from the row callback.
-    const FALLIBLE: bool = false;
+    const FALLIBLE: bool;
 
     /// Returns the ID of the scalar function.
     fn id(&self) -> ScalarFnId;
