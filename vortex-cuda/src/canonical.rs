@@ -8,6 +8,7 @@ use futures::future::try_join_all;
 use vortex::array::Canonical;
 use vortex::array::IntoArray;
 use vortex::array::VortexSessionExecute;
+use vortex::array::arrays::Bool;
 use vortex::array::arrays::BoolArray;
 use vortex::array::arrays::DecimalArray;
 use vortex::array::arrays::ExtensionArray;
@@ -23,10 +24,34 @@ use vortex::array::arrays::varbinview::BinaryView;
 use vortex::array::arrays::varbinview::VarBinViewDataParts;
 use vortex::array::buffer::BufferHandle;
 use vortex::array::legacy_session;
+use vortex::array::validity::Validity;
 use vortex::buffer::BitBuffer;
 use vortex::buffer::Buffer;
 use vortex::buffer::ByteBuffer;
 use vortex::error::VortexResult;
+
+/// Copy a `Validity::Array` bitmap back to the host.
+///
+/// Canonical arrays keep their validity as a separate child array, so moving only the data
+/// buffer to the host leaves a device-resident bitmap behind that CPU compute cannot read.
+async fn validity_into_host(validity: Validity) -> VortexResult<Validity> {
+    let Validity::Array(array) = validity else {
+        return Ok(validity);
+    };
+
+    let Ok(bools) = array.clone().try_downcast::<Bool>() else {
+        return Ok(Validity::Array(array));
+    };
+
+    let len = bools.len();
+    let inner_validity = bools.validity()?;
+    let BoolDataParts { bits, meta } = bools.into_data().into_parts(len);
+    let bits = BitBuffer::new_with_offset(bits.try_into_host()?.await?, meta.len(), meta.offset());
+
+    Ok(Validity::Array(
+        BoolArray::new(bits, inner_validity).into_array(),
+    ))
+}
 
 /// Move all canonical data from to_host from device.
 #[async_trait]
@@ -50,6 +75,7 @@ impl CanonicalCudaExt for Canonical {
                     validity,
                     ..
                 } = struct_array.into_data_parts();
+                let validity = validity_into_host(validity).await?;
 
                 let mut host_fields = vec![];
                 for field in fields.iter() {
@@ -75,7 +101,7 @@ impl CanonicalCudaExt for Canonical {
                 // NOTE: update to copy to host when adding buffer handle.
                 // Also update other method to copy validity to host.
                 let len = bool.len();
-                let validity = bool.validity()?;
+                let validity = validity_into_host(bool.validity()?).await?;
                 let BoolDataParts { bits, meta } = bool.into_data().into_parts(len);
 
                 let bits = BitBuffer::new_with_offset(
@@ -92,6 +118,7 @@ impl CanonicalCudaExt for Canonical {
                     validity,
                     ..
                 } = prim.into_data_parts();
+                let validity = validity_into_host(validity).await?;
                 Ok(Canonical::Primitive(PrimitiveArray::from_byte_buffer(
                     buffer.try_into_host()?.await?,
                     ptype,
@@ -106,6 +133,7 @@ impl CanonicalCudaExt for Canonical {
                     validity,
                     ..
                 } = decimal.into_data_parts();
+                let validity = validity_into_host(validity).await?;
                 Ok(Canonical::Decimal(unsafe {
                     DecimalArray::new_unchecked_handle(
                         BufferHandle::new_host(values.try_into_host()?.await?),
@@ -122,6 +150,7 @@ impl CanonicalCudaExt for Canonical {
                     validity,
                     dtype,
                 } = varbinview.into_data_parts();
+                let validity = validity_into_host(validity).await?;
 
                 // Copy all device views to host
                 let host_views = views.try_into_host()?.await?;
