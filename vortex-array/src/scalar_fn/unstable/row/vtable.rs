@@ -132,6 +132,7 @@ pub fn execute_rows<F: RowFn>(
 
     let batch = prepare_batch(function, options, args)?;
     batch.execute(
+        |args, ctx| function.reduce_encoded(options, args.arrays(), ctx),
         |args, ctx| execute_row_kernel(function, options, args, ctx),
         |args, valid, ctx| try_execute_rows_unfiltered(function, options, args, valid, ctx),
         ctx,

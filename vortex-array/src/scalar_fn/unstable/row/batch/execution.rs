@@ -3,11 +3,12 @@
 
 //! Applies columnar semantics around one typed row kernel invocation.
 //!
-//! [`Batch`] owns strict null propagation, constant broadcasting, execution strategy selection, and
-//! output validation. The row kernel therefore handles only decoded values and its selected output
-//! capability.
+//! [`Batch`] owns strict null propagation, encoded reductions, constant broadcasting, execution
+//! strategy selection, and output validation. The row kernel therefore handles only decoded values
+//! and its selected output capability.
 
 use smallvec::SmallVec;
+use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
@@ -121,12 +122,17 @@ impl Batch {
         })
     }
 
-    /// Apply constant folding and null handling around `kernel`.
+    /// Apply encoded reductions, constant folding, and null handling around `kernel`.
     ///
-    /// For a mixed validity mask, `try_unfiltered` may avoid filtering; `Ok(None)` selects
-    /// filter-and-scatter. Every kernel result is checked against the planned shape and dtype.
+    /// `reduce` receives the original inputs before constant broadcasting. For a mixed validity
+    /// mask, `try_unfiltered` may avoid filtering; `Ok(None)` selects filter-and-scatter. Every
+    /// kernel result is checked against the planned shape and dtype.
     pub fn execute(
         &self,
+        reduce: impl FnOnce(
+            BorrowedExecutionArgs<'_>,
+            &mut ExecutionCtx,
+        ) -> VortexResult<Option<RowExecution>>,
         kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
         try_unfiltered: impl FnOnce(
             BorrowedExecutionArgs<'_>,
@@ -145,6 +151,20 @@ impl Batch {
             })
         {
             return Ok(self.all_null());
+        }
+
+        // An empty mask is both all-true and all-false, so deferred encoded evidence cannot be
+        // attributed to an observable row. Let the ordinary policy construct the typed empty
+        // output instead.
+        if self.row_count > 0
+            && let Some(execution) = reduce(self.execution_args(&self.inputs, self.row_count), ctx)?
+        {
+            match execution {
+                RowExecution::Output(values) => return self.finalize_reduced(values, ctx),
+                RowExecution::DeferredError(error) => {
+                    return self.resolve_reduced_error(error, kernel, try_unfiltered, ctx);
+                }
+            }
         }
 
         // All inputs constant, and their conjoined validity proves every row non-null. This sees
@@ -329,6 +349,56 @@ impl Batch {
 
     fn all_null(&self) -> ArrayRef {
         ConstantArray::new(Scalar::null(self.result_dtype.clone()), self.row_count).into_array()
+    }
+
+    /// Reconcile an encoding-aware result and apply the batch's strict input validity.
+    fn finalize_reduced(&self, values: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+        validate_output(self.id, &self.result_dtype, self.row_count, &values)?;
+
+        let input_valid = self.validity.execute_mask(self.row_count, ctx)?;
+        let output_valid = values.validity()?.execute_mask(self.row_count, ctx)?;
+        vortex_ensure!(
+            input_valid.bitand_not(&output_valid).all_false(),
+            "the {} encoded reduction produced nulls for valid rows",
+            self.id,
+        );
+
+        let values = match self.validity.clone() {
+            Validity::NonNullable | Validity::AllValid => values,
+            Validity::Array(valid) => values.mask(valid)?,
+            // Handled before the encoding-aware hook runs.
+            Validity::AllInvalid => return Ok(self.all_null()),
+        };
+
+        cast_output_nullability(&self.result_dtype, values)
+    }
+
+    /// Resolve deferred evidence from the encoded path by executing only observable rows.
+    fn resolve_reduced_error(
+        &self,
+        error: VortexError,
+        kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
+        try_unfiltered: impl FnOnce(
+            BorrowedExecutionArgs<'_>,
+            &Mask,
+            &mut ExecutionCtx,
+        ) -> VortexResult<Option<RowExecution>>,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        let valid = self.validity.clone().execute_mask(self.row_count, ctx)?;
+
+        if valid.all_true() {
+            return Err(error);
+        }
+        if valid.all_false() {
+            return Ok(self.all_null());
+        }
+
+        if let Some(result) = self.try_execute_unfiltered(try_unfiltered, &valid, ctx)? {
+            return Ok(result);
+        }
+
+        self.filter_and_scatter(kernel, &valid, ctx)
     }
 
     /// Pair an input view with this batch's planning metadata.
