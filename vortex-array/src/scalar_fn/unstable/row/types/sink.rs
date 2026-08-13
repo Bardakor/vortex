@@ -34,8 +34,7 @@ use crate::scalar_fn::unstable::row::OutputElement;
 ///
 /// An implementation must uphold all of these requirements:
 ///
-/// - When [`row_count_matches`] returns `true`, every index in `0..row_count` **must** identify one
-///   distinct row owned by this sink.
+/// - Every index in `0..row_count(rows)` **must** identify one distinct row owned by this sink.
 /// - A row must either be initialized before the callback or require a
 ///   [`WriteToken`] that safe code cannot produce without initializing that exact row. Evidence for
 ///   an uninitialized row **must not** be safely forgeable, reusable, or substitutable.
@@ -51,7 +50,7 @@ use crate::scalar_fn::unstable::row::OutputElement;
 /// [`Rows`]: Self::Rows
 /// [`WriteToken`]: Self::WriteToken
 /// [`finish`]: Self::finish
-/// [`row_count_matches`]: Self::row_count_matches
+/// [`row_count`]: Self::row_count
 /// [`RowFn::FALLIBLE`]: crate::scalar_fn::unstable::row::RowFn::FALLIBLE
 /// [`SinkResult`]: crate::scalar_fn::unstable::row::SinkResult
 /// [`skipped_rows_initializer`]: Self::skipped_rows_initializer
@@ -99,19 +98,14 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
     /// Borrow all output rows for the hot loop.
     fn rows(&mut self) -> Self::Rows<'_>;
 
-    /// Whether every index in `0..row_count` is addressable through
-    /// [`row_unchecked`](Self::row_unchecked).
-    ///
-    /// Called once before the hot loop. Besides validating the sink contract, this gives the
-    /// optimizer the output bounds it needs to remove the bounds check hidden in each row accessor.
-    fn row_count_matches(rows: &Self::Rows<'_>, row_count: usize) -> bool;
+    /// The number of rows addressable through [`row_unchecked`](Self::row_unchecked).
+    fn row_count(rows: &Self::Rows<'_>) -> usize;
 
     /// Hand out the place to write row `index`. Must be `O(1)`: it is called in the row loop.
     ///
     /// # Safety
     ///
-    /// [`row_count_matches`](Self::row_count_matches) must have returned `true` for `rows` and the
-    /// same `row_count`, and `index` must be less than that `row_count`.
+    /// `index` must be less than [`row_count`](Self::row_count) for `rows`.
     unsafe fn row_unchecked<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a>;
 
     /// Finish into the built column, whose dtype **must** be this sink's
@@ -207,8 +201,8 @@ unsafe impl<T: OutputElement + Copy + Default, Options> OutputSink<Options>
         &mut self.values.spare_capacity_mut()[..self.row_count]
     }
 
-    fn row_count_matches(rows: &Self::Rows<'_>, row_count: usize) -> bool {
-        rows.len() == row_count
+    fn row_count(rows: &Self::Rows<'_>) -> usize {
+        rows.len()
     }
 
     unsafe fn row_unchecked<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a> {
