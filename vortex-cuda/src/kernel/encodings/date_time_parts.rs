@@ -306,8 +306,7 @@ mod tests {
             .vortex_expect("failed to create execution context");
 
         let len = 3;
-        let days_arr =
-            PrimitiveArray::new(buffer![1u32, 2, 3], Validity::NonNullable).into_array();
+        let days_arr = PrimitiveArray::new(buffer![1u32, 2, 3], Validity::NonNullable).into_array();
         let seconds_arr =
             PrimitiveArray::new(buffer![3600u16, 0, 60], Validity::NonNullable).into_array();
         let subseconds_arr =
