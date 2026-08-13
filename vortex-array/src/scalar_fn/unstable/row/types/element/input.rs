@@ -24,9 +24,9 @@ pub unsafe trait InputElement: 'static {
     /// The decoded column representation supporting `O(1)` row access.
     type Column;
 
-    /// The view of a per-row decoded column read by the hot row loop.
+    /// The row-loop view of a decoded column.
     ///
-    /// This may borrow a cheaper representation than [`Column`](Self::Column). Primitive elements,
+    /// This can borrow a cheaper representation than [`Column`](Self::Column). Primitive elements,
     /// for example, expose a slice so its pointer and length are loop invariants rather than
     /// re-reading a [`Buffer`](vortex_buffer::Buffer) descriptor for every row.
     type View<'a>;
@@ -37,14 +37,13 @@ pub unsafe trait InputElement: 'static {
     /// Whether every dense decode and access path tolerates rows that are null in the input.
     ///
     /// Arrays guarantee payloads only for valid rows. Set this to `true` only when every decode and
-    /// access method remains safe for null rows. Dense execution may pass unspecified values from
+    /// access method remains safe for null rows. Dense execution can pass unspecified values from
     /// null rows to the row closure.
     const DENSE_SAFE: bool;
 
     /// Whether [`decode`](Self::decode) can fail on _legal_ input data.
     ///
-    /// This excludes infrastructural failures such as IO or allocation. Set it when legal input may
-    /// contain a value that the decoder rejects.
+    /// This excludes infrastructural failures such as IO or allocation.
     const DECODE_FALLIBLE: bool;
 
     /// Validate that `dtype` is an acceptable input column dtype for this element type.
@@ -52,9 +51,8 @@ pub unsafe trait InputElement: 'static {
 
     /// Decode `array` into its column representation.
     ///
-    /// The executor calls this once per row-kernel invocation. A dense deferred-error retry starts
-    /// another invocation over filtered valid rows. Hoist dtype checks, downcasts, and other
-    /// invocation-invariant work into this method.
+    /// Called once per row-kernel invocation, including deferred-error retries. Hoist dtype checks,
+    /// downcasts, and other invocation-invariant work into this method.
     fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column>;
 
     /// Whether [`decode_null_tolerant`](Self::decode_null_tolerant) can decode this array.
@@ -71,9 +69,6 @@ pub unsafe trait InputElement: 'static {
     ///
     /// Override this for a non-dense-safe representation that can still place safe placeholders in
     /// null slots. The skip-invalid executor never reads those slots.
-    ///
-    /// Return `Ok(None)` rather than an error when an array has no null-tolerant decode; the
-    /// batch execution falls back to the filter strategy.
     fn decode_null_tolerant(
         array: ArrayRef,
         ctx: &mut ExecutionCtx,

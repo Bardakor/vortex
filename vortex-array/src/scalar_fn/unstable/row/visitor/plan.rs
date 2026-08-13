@@ -3,8 +3,8 @@
 
 //! Plans the concrete signature selected by [`RowFn::dispatch`].
 //!
-//! [`PlanRows`] validates input and output dtypes, then records the output dtype and null-handling
-//! policy that execution must reproduce.
+//! [`BatchPlanner`] validates input and output dtypes, then records the output dtype and
+//! null-handling policy that execution must reproduce.
 
 use std::marker::PhantomData;
 use std::ops::BitOrAssign;
@@ -27,19 +27,17 @@ use crate::scalar_fn::unstable::row::OutputSink;
 use crate::scalar_fn::unstable::row::RowFn;
 use crate::scalar_fn::unstable::row::SinkResult;
 
-/// The plan-time visit that validates dtypes and derives the nullable execution policy.
-pub(crate) struct PlanRows<'a, F: RowFn> {
-    /// The input dtypes for this plan.
+/// A planning visitor that validates dtypes and selects the nullable execution policy.
+pub(crate) struct BatchPlanner<'a, F: RowFn> {
     dtypes: &'a [DType],
 
-    /// The function options used to derive a sink's runtime dtype.
     options: &'a F::Options,
 
-    /// The visited function, carried only so the dispatch check can name its contract.
+    /// Ties the planner to the function used by its compile-time contract checks.
     function: PhantomData<F>,
 }
 
-impl<'a, F: RowFn> PlanRows<'a, F> {
+impl<'a, F: RowFn> BatchPlanner<'a, F> {
     pub(crate) fn new(dtypes: &'a [DType], options: &'a F::Options) -> Self {
         Self {
             dtypes,
@@ -49,9 +47,9 @@ impl<'a, F: RowFn> PlanRows<'a, F> {
     }
 }
 
-impl<F: RowFn> private::Sealed for PlanRows<'_, F> {}
+impl<F: RowFn> private::Sealed for BatchPlanner<'_, F> {}
 
-impl<F: RowFn> RowVisitor<F::Options> for PlanRows<'_, F> {
+impl<F: RowFn> RowVisitor<F::Options> for BatchPlanner<'_, F> {
     type VisitResult = BatchPlan;
 
     fn visit_prepared<Args, Out, Prepared>(
@@ -116,7 +114,8 @@ pub(crate) struct BatchPlan {
     pub(crate) output_dtype: DType,
 
     /// How this concrete dispatch executes nullable rows.
-    // TODO(connor)[RowFn]: The execution backend tracked by #9130 consumes this field.
+    // TODO(connor)[RowFn]: Remove this allowance when the execution backend from #9130 consumes
+    // this policy.
     #[allow(dead_code)]
     pub(crate) policy: RowPolicy,
 }
@@ -124,14 +123,10 @@ pub(crate) struct BatchPlan {
 impl BatchPlan {
     /// Return the output dtype widened with strict input nullability.
     pub(crate) fn result_dtype(self, args: &[DType]) -> DType {
-        let Self {
-            output_dtype,
-            policy: _,
-        } = self;
-        let nullability =
-            output_dtype.nullability() | Nullability::from(args.iter().any(DType::is_nullable));
+        let nullability = self.output_dtype.nullability()
+            | Nullability::from(args.iter().any(DType::is_nullable));
 
-        output_dtype.with_nullability(nullability)
+        self.output_dtype.with_nullability(nullability)
     }
 }
 

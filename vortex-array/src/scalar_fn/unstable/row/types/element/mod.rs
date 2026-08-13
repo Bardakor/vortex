@@ -3,8 +3,8 @@
 
 //! The element types a row function can read and produce.
 //!
-//! [`InputElement::Elem`] may borrow from its decoded column. [`OutputElement`] is returned by an
-//! owned row computation; runtime-shaped output uses an
+//! [`InputElement::Elem`] can borrow from its decoded column. Owned row computations return an
+//! [`OutputElement`]. Runtime-shaped outputs use an
 //! [`OutputSink`](crate::scalar_fn::unstable::row::OutputSink).
 
 mod bool;

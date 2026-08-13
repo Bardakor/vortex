@@ -105,7 +105,7 @@ impl<T: InputElement> ArgColumn<T> {
 
 /// Return the batch-constant array, looking through masked and extension wrappers.
 ///
-/// Batch execution owns mask validity, so a masked constant may expose its constant child here. An
+/// Batch execution owns mask validity, so a masked constant can expose its constant child here. An
 /// extension over constant storage remains wrapped to preserve its extension dtype.
 pub fn batch_constant(array: &ArrayRef) -> Option<ArrayRef> {
     if array.is::<Constant>() {
@@ -124,7 +124,7 @@ pub fn batch_constant(array: &ArrayRef) -> Option<ArrayRef> {
 
 /// Typed argument tuples for arities zero through twelve.
 ///
-/// This trait is sealed; add a new row representation by implementing [`InputElement`] and placing
+/// This trait is sealed. Add a new row representation by implementing [`InputElement`] and placing
 /// it in one of the supplied tuples.
 pub trait ElementTuple: 'static + private::Sealed {
     /// The decoded column representations.
@@ -136,10 +136,9 @@ pub trait ElementTuple: 'static + private::Sealed {
     /// The borrowed row of element values.
     type Elems<'a>;
 
-    /// The batch-constant element values: [`Elems`](Self::Elems) with every argument wrapped in
-    /// `Option`.
+    /// The batch-constant element values.
     ///
-    /// `Some` carries the value of a batch-constant argument; `None` marks a per-row argument. A
+    /// `Some` carries the value of a batch-constant argument. `None` marks a per-row argument. A
     /// [`RowVisitor`] passes these values to its prepare closure so constant work can leave the row
     /// loop.
     ///
@@ -375,18 +374,18 @@ macro_rules! element_tuple {
     };
 }
 
-element_tuple!(1; A:0);
-element_tuple!(2; A:0, B:1);
-element_tuple!(3; A:0, B:1, C:2);
-element_tuple!(4; A:0, B:1, C:2, D:3);
-element_tuple!(5; A:0, B:1, C:2, D:3, E:4);
-element_tuple!(6; A:0, B:1, C:2, D:3, E:4, F:5);
-element_tuple!(7; A:0, B:1, C:2, D:3, E:4, F:5, G:6);
-element_tuple!(8; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
-element_tuple!(9; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8);
-element_tuple!(10; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9);
-element_tuple!(11; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10);
-element_tuple!(12; A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
+element_tuple!(1; A: 0);
+element_tuple!(2; A: 0, B: 1);
+element_tuple!(3; A: 0, B: 1, C: 2);
+element_tuple!(4; A: 0, B: 1, C: 2, D: 3);
+element_tuple!(5; A: 0, B: 1, C: 2, D: 3, E: 4);
+element_tuple!(6; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5);
+element_tuple!(7; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6);
+element_tuple!(8; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7);
+element_tuple!(9; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8);
+element_tuple!(10; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, J: 9);
+element_tuple!(11; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, J: 9, K: 10);
+element_tuple!(12; A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, J: 9, K: 10, L: 11);
 
 mod private {
     pub trait Sealed {}

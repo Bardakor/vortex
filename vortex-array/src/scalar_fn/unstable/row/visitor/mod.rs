@@ -8,7 +8,7 @@
 mod check;
 
 mod plan;
-pub(super) use plan::PlanRows;
+pub(super) use plan::BatchPlanner;
 
 mod row_visitor;
 pub use row_visitor::RowVisitor;

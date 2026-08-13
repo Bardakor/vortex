@@ -13,7 +13,7 @@ use vortex_error::vortex_ensure_eq;
 use vortex_session::VortexSession;
 
 use super::row_fn::RowFn;
-use super::visitor::PlanRows;
+use super::visitor::BatchPlanner;
 use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::dtype::DType;
@@ -86,7 +86,7 @@ pub fn row_fn_return_dtype<F: RowFn>(
 ) -> VortexResult<DType> {
     ensure_arity(function, args.len())?;
 
-    let plan = function.dispatch(options, args, PlanRows::<F>::new(args, options))?;
+    let plan = function.dispatch(options, args, BatchPlanner::<F>::new(args, options))?;
 
     Ok(plan.result_dtype(args))
 }
@@ -117,7 +117,7 @@ fn ensure_arity<F: RowFn>(function: &F, actual: usize) -> VortexResult<()> {
     vortex_ensure_eq!(
         actual,
         expected,
-        "row function {} must receive exactly {expected} input values, got {actual}",
+        "row function {} requires arity {expected}, got {actual}",
         RowFn::id(function),
     );
 
@@ -189,9 +189,7 @@ mod tests {
     #[track_caller]
     fn assert_arity_error(error: VortexError) {
         assert!(
-            error
-                .to_string()
-                .contains("must receive exactly 1 input values, got 0"),
+            error.to_string().contains("requires arity 1, got 0"),
             "unexpected error: {error}",
         );
     }

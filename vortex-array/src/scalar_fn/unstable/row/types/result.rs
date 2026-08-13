@@ -12,7 +12,7 @@ use super::InitializedElement;
 
 /// The result of writing one row: success or an immediate error.
 ///
-/// This trait is sealed; row functions choose one of its supplied implementations.
+/// This trait is sealed. Row functions choose one of its supplied implementations.
 pub trait SinkResult: 'static + private::Sealed {
     /// The [`OutputSink::WriteToken`](super::OutputSink::WriteToken) carried by a success.
     type WriteToken: 'static;

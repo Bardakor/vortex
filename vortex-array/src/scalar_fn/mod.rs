@@ -7,11 +7,11 @@
 //! implementations. Expressions ([`crate::expr::Expression`]) reference scalar functions
 //! at each node.
 //!
-//! Use `unstable::row::RowFn` for strict functions whose natural kernel computes one row at a
-//! time. It derives decoding, constant handling, null propagation, output construction, and
-//! validity. This experimental API requires the `unstable_row_fns` feature and has no compatibility
-//! guarantees. Implement [`ScalarFnVTable`] directly when the natural kernel is columnar, aliases
-//! an input, or may produce null from otherwise valid inputs.
+//! Strict functions with row-at-a-time kernels can implement [`unstable::row::RowFn`]. It handles
+//! decoding, constants, null propagation, output construction, and validity. This API requires the
+//! `unstable_row_fns` feature and has no compatibility guarantees. Implement [`ScalarFnVTable`]
+//! directly for columnar kernels and functions that alias an input or can produce null from valid
+//! inputs.
 
 use vortex_session::registry::Id;
 

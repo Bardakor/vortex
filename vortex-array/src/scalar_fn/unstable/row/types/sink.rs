@@ -17,11 +17,11 @@ use crate::scalar_fn::unstable::row::OutputElement;
 
 /// A column allocated once per batch that a row closure writes into, one row at a time.
 ///
-/// A sink may use function options and input dtypes to build a runtime-shaped output or own shared
+/// A sink can use function options and input dtypes to build a runtime-shaped output or own shared
 /// batch state. The executor passes each row slot into an [`Fn`] closure.
 ///
-/// Rows arrive in increasing index order. Ordinary execution visits `0..row_count` exactly once;
-/// skip-invalid execution can omit invalid rows when [`skipped_rows_initializer`] returns an
+/// Rows arrive in increasing index order. Ordinary execution visits `0..row_count` exactly once.
+/// Skip-invalid execution can omit invalid rows when [`skipped_rows_initializer`] returns an
 /// initializer.
 ///
 /// # Errors
@@ -44,8 +44,6 @@ use crate::scalar_fn::unstable::row::OutputElement;
 ///   executor can abandon a sink after any prefix of rows.
 /// - [`finish`] **must** be sound once every visited callback returned its required token and the
 ///   skipped-row initializer, when present, ran successfully.
-///
-/// The executor relies on these guarantees when it calls `finish`.
 ///
 /// [`Rows`]: Self::Rows
 /// [`WriteToken`]: Self::WriteToken
@@ -70,16 +68,15 @@ pub unsafe trait OutputSink<Options>: 'static + Sized {
 
     /// Proof that a successful row closure left its row handle initialized.
     ///
-    /// Use `()` for initialized row handles. A sink exposing uninitialized storage uses a distinct
-    /// token returned after initialization. A sink that uses this token to justify unsafe code
-    /// **must** prevent safe construction that does not establish the invariant. Make construction
-    /// unsafe when Rust cannot tie the token to the supplied row handle.
+    /// Use `()` for initialized row handles. A sink exposing uninitialized storage uses a token
+    /// returned after initialization. If a sink uses the token to justify unsafe code, safe code
+    /// **must not** be able to construct one without establishing the invariant.
     type WriteToken: 'static;
 
     /// The operation that initializes every output position before skip-invalid execution.
     ///
     /// `Some` enables skip-invalid execution. The initializer **must** make every row safe to
-    /// finish; callbacks overwrite valid rows and batch execution masks skipped rows.
+    /// finish. Callbacks overwrite valid rows, and batch execution masks skipped rows.
     ///
     /// `None` makes the executor fall back to filtering the inputs.
     fn skipped_rows_initializer() -> Option<for<'a> fn(&mut Self::Rows<'a>)> {
@@ -157,8 +154,8 @@ impl InitializedElement {
 /// success. The token is zero-sized, so the proof adds no runtime row state.
 ///
 /// Skip-invalid execution initializes placeholders before omitting rows. Errors and unwinds are
-/// safe because `values` keeps length zero until `finish`; `T: Copy` means initialized
-/// spare-capacity elements require no destruction.
+/// safe because `values` keeps length zero until `finish`. The `T: Copy` bound means that
+/// initialized spare-capacity elements require no destruction.
 pub struct UninitElementSink<T> {
     /// Spare storage written in increasing row order.
     values: Vec<T>,
@@ -168,8 +165,8 @@ pub struct UninitElementSink<T> {
 }
 
 // SAFETY: the row slice covers exactly the reserved spare-capacity range, so each accepted index
-// names one distinct slot. `InitializedElement` cannot be constructed by safe code; its unsafe
-// constructor writes the supplied slot and requires the caller to return that exact evidence. The
+// names one distinct slot. Safe code cannot construct `InitializedElement`. Its unsafe constructor
+// writes the supplied slot and requires the caller to return that exact evidence. The
 // skipped-row initializer writes `T::default()` into every slot before masked traversal.
 unsafe impl<T: OutputElement + Copy + Default, Options> OutputSink<Options>
     for UninitElementSink<T>

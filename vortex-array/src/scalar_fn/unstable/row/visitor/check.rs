@@ -28,21 +28,19 @@ pub(crate) const fn assert_owned_output_needs_no_drop<T>() {
     );
 }
 
-/// Assert that the input arity and decode fallibility match the function-wide declarations.
 const fn assert_input_visit_contract<F: RowFn, Args: ElementTuple>() {
     assert!(
         Args::ARITY == F::ARG_NAMES.len(),
         "the visited argument tuple must have the arity declared by RowFn::ARG_NAMES",
     );
-    // Dictionary pushdown treats an infallible function as safe to evaluate over values no code
-    // references, so every dispatch must fit the function-wide declaration.
+    // Dictionary push-down can evaluate values that no input row references. Every dispatch must
+    // therefore match the function-wide fallibility declaration.
     assert!(
         !Args::DECODE_FALLIBLE || F::FALLIBLE,
         "RowFn::FALLIBLE must be true when input decoding can fail",
     );
 }
 
-/// Assert the input contract and that owned output values do not require drop glue.
 pub(super) const fn assert_owned_visit_contract<Function, Args, Out>()
 where
     Function: RowFn,
@@ -53,7 +51,6 @@ where
     assert_owned_output_needs_no_drop::<Out>();
 }
 
-/// Assert that a sink visit obeys the input, fallibility, and deferred-error contracts.
 pub(super) const fn assert_sink_visit_contract<Function, Args, ApplyResult>()
 where
     Function: RowFn,
@@ -67,7 +64,6 @@ where
     );
 }
 
-/// Assert the owned-output contract, fallibility declaration, and failure-evidence width bound.
 pub(super) const fn assert_deferred_visit_contract<Function, Args, Out, Fail>()
 where
     Function: RowFn,
@@ -86,7 +82,6 @@ where
     );
 }
 
-/// Validate the input dtypes and return the non-nullable dtype built by `Out`.
 pub(super) fn validate_owned_visit<Args: ElementTuple, Out: OutputElement>(
     dtypes: &[DType],
 ) -> VortexResult<DType> {
@@ -101,7 +96,6 @@ pub(super) fn validate_owned_visit<Args: ElementTuple, Out: OutputElement>(
     Ok(dtype)
 }
 
-/// Validate the input dtypes and return the non-nullable dtype built by `Sink`.
 pub(super) fn validate_sink_visit<Args, Sink, Options>(
     options: &Options,
     dtypes: &[DType],
