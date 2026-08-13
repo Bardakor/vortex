@@ -63,6 +63,16 @@ impl<T: InputElement> ArgColumn<T> {
             .map(Self))
     }
 
+    fn can_decode_null_tolerant(array: &ArrayRef) -> VortexResult<bool> {
+        // Batch execution short-circuits null constants before selecting this path, so a
+        // non-empty constant can always use the ordinary decode.
+        if batch_constant(array).is_some() && !array.is_empty() {
+            return Ok(true);
+        }
+
+        T::can_decode_null_tolerant(array)
+    }
+
     fn get(&self, index: usize) -> T::Elem<'_> {
         match &self.0 {
             ArgColumnKind::PerRow(column) => T::get(column, index),
@@ -153,6 +163,12 @@ pub trait ElementTuple: 'static + private::Sealed {
     /// A dense deferred-error retry starts another invocation over filtered valid rows.
     fn decode(args: &dyn ExecutionArgs, ctx: &mut ExecutionCtx) -> VortexResult<Self::Columns>;
 
+    /// Whether every input can be decoded without assuming that all rows are valid.
+    ///
+    /// The tuple checks this before decoding any column, so a decline does not discard work from
+    /// earlier arguments.
+    fn can_decode_null_tolerant(args: &dyn ExecutionArgs) -> VortexResult<bool>;
+
     /// Decode every input column once while tolerating null rows.
     ///
     /// Return `Ok(None)` when an argument has no null-tolerant representation. The skip-invalid
@@ -225,6 +241,10 @@ impl ElementTuple for () {
         Ok(())
     }
 
+    fn can_decode_null_tolerant(_args: &dyn ExecutionArgs) -> VortexResult<bool> {
+        Ok(true)
+    }
+
     fn decode_null_tolerant(
         _args: &dyn ExecutionArgs,
         _ctx: &mut ExecutionCtx,
@@ -291,10 +311,21 @@ macro_rules! element_tuple {
                 Ok(($(ArgColumn::<$t>::decode(args.get($idx)?, ctx)?,)+))
             }
 
+            fn can_decode_null_tolerant(args: &dyn ExecutionArgs) -> VortexResult<bool> {
+                Ok($({
+                    let array = args.get($idx)?;
+                    ArgColumn::<$t>::can_decode_null_tolerant(&array)?
+                } &&)+ true)
+            }
+
             fn decode_null_tolerant(
                 args: &dyn ExecutionArgs,
                 ctx: &mut ExecutionCtx,
             ) -> VortexResult<Option<Self::Columns>> {
+                if !Self::can_decode_null_tolerant(args)? {
+                    return Ok(None);
+                }
+
                 Ok(Some((
                     $(match ArgColumn::<$t>::decode_null_tolerant(args.get($idx)?, ctx)? {
                         Some(column) => column,

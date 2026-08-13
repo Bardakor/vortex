@@ -57,8 +57,17 @@ pub unsafe trait InputElement: 'static {
     /// invocation-invariant work into this method.
     fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column>;
 
-    /// Decode `array` _without_ assuming every row is valid, or `Ok(None)` when this element
-    /// cannot for this particular array.
+    /// Whether [`decode_null_tolerant`](Self::decode_null_tolerant) can decode this array.
+    ///
+    /// The conservative default declines. An implementation whose ordinary decode is safe and
+    /// infallible over null payloads can return `true`. Other implementations can inspect `array`
+    /// and opt in only for supported representations.
+    fn can_decode_null_tolerant(_array: &ArrayRef) -> VortexResult<bool> {
+        Ok(false)
+    }
+
+    /// Decode `array` _without_ assuming every row is valid, or return `Ok(None)` when this element
+    /// cannot decode this particular array.
     ///
     /// Override this for a non-dense-safe representation that can still place safe placeholders in
     /// null slots. The skip-invalid executor never reads those slots.
@@ -69,7 +78,7 @@ pub unsafe trait InputElement: 'static {
         array: ArrayRef,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<Self::Column>> {
-        if Self::DENSE_SAFE {
+        if Self::can_decode_null_tolerant(&array)? {
             Self::decode(array, ctx).map(Some)
         } else {
             Ok(None)

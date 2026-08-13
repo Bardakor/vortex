@@ -37,6 +37,10 @@ unsafe impl InputElement for bool {
         Ok(array.execute::<BoolArray>(ctx)?.into_bit_buffer())
     }
 
+    fn can_decode_null_tolerant(_array: &ArrayRef) -> VortexResult<bool> {
+        Ok(true)
+    }
+
     fn get(column: &Self::Column, index: usize) -> bool {
         column.value(index)
     }

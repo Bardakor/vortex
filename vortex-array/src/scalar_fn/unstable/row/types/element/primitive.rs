@@ -44,6 +44,10 @@ unsafe impl<T: NativePType> InputElement for T {
         Ok(array.execute::<PrimitiveArray>(ctx)?.into_buffer::<T>())
     }
 
+    fn can_decode_null_tolerant(_array: &ArrayRef) -> VortexResult<bool> {
+        Ok(true)
+    }
+
     fn get(column: &Self::Column, index: usize) -> T {
         column[index]
     }
