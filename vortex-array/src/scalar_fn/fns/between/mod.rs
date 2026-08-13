@@ -32,7 +32,6 @@ use crate::scalar_fn::ChildName;
 use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::fns::operators::CompareOperator;
 use crate::scalar_fn::fns::operators::Operator;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -67,13 +66,6 @@ pub enum StrictComparison {
 }
 
 impl StrictComparison {
-    pub const fn to_compare_operator(&self) -> CompareOperator {
-        match self {
-            StrictComparison::Strict => CompareOperator::Lt,
-            StrictComparison::NonStrict => CompareOperator::Lte,
-        }
-    }
-
     pub const fn to_operator(&self) -> Operator {
         match self {
             StrictComparison::Strict => Operator::Lt,
