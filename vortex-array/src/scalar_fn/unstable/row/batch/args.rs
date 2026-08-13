@@ -55,11 +55,6 @@ impl<'a> BorrowedExecutionArgs<'a> {
         }
     }
 
-    /// Return the concrete arrays used by this row-kernel invocation.
-    pub(crate) fn arrays(&self) -> &'a [ArrayRef] {
-        self.arrays
-    }
-
     /// Return the original input dtypes used to select the row implementation.
     pub(crate) fn dtypes(&self) -> &'a [DType] {
         self.dtypes

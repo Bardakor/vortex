@@ -31,6 +31,7 @@ use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::Nullability;
 use crate::scalar_fn::EmptyOptions;
+use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::VecExecutionArgs;
 use crate::scalar_fn::unstable::row::InputElement;
@@ -518,7 +519,7 @@ fn test_resolve_validity_array_masks(#[case] validity: [bool; 2]) -> VortexResul
     let mut ctx = array_session().create_execution_ctx();
 
     let actual = batch.execute(
-        |args, _ctx| Ok(RowExecution::Output(args.arrays()[0].clone())),
+        |args, _ctx| Ok(RowExecution::Output(args.get(0)?)),
         |_args, _valid, _ctx| Ok(None),
         &mut ctx,
     )?;
@@ -546,7 +547,7 @@ fn test_valid_only_filters_and_scatters() -> VortexResult<()> {
     let mut ctx = array_session().create_execution_ctx();
 
     let actual = batch.execute(
-        |args, _ctx| Ok(RowExecution::Output(args.arrays()[0].clone())),
+        |args, _ctx| Ok(RowExecution::Output(args.get(0)?)),
         |_args, _valid, _ctx| Ok(None),
         &mut ctx,
     )?;
