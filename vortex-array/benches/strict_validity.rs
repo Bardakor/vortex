@@ -81,6 +81,7 @@ impl RowFn for LazyDouble {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["input"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("bench.lazy_double");

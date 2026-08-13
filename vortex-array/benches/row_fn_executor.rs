@@ -51,6 +51,7 @@ impl RowFn for RowWrappingAdd {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("bench.row_wrapping_add");
@@ -119,11 +120,11 @@ unsafe impl<Options> OutputSink<Options> for I64Sink {
     type Row<'a> = &'a mut i64;
     type WriteToken = ();
 
-    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
+    fn output_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(DType::from(i64::PTYPE))
     }
 
-    fn with_capacity(rows: usize, _dtype: &DType) -> VortexResult<Self> {
+    fn with_capacity(rows: usize) -> VortexResult<Self> {
         Ok(Self(BufferMut::zeroed(rows)))
     }
 
@@ -152,6 +153,7 @@ impl RowFn for RowSinkWrappingAdd {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("bench.row_sink_wrapping_add");
