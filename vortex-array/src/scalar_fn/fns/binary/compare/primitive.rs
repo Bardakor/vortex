@@ -94,6 +94,7 @@ impl RowFn for PrimitiveCompare {
     type Options = CompareOperator;
 
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         // `PrimitiveCompare` is a private implementation detail of `Binary`: it is never registered
