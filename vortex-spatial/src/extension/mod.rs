@@ -184,6 +184,22 @@ pub(crate) fn placeholder_geometry() -> Geometry<f64> {
     Geometry::Point(geo_types::Point::new(0.0, 0.0))
 }
 
+/// Whether [`geometries_null_tolerant`] supports this array without filtering null rows first.
+pub(crate) fn can_decode_geometries_null_tolerant(array: &ArrayRef) -> VortexResult<bool> {
+    if array.validity()?.definitely_no_nulls() {
+        return Ok(true);
+    }
+
+    let Some(ext) = array.dtype().as_extension_opt() else {
+        vortex_bail!(
+            "spatial: operand is not a geometry extension type, was {}",
+            array.dtype()
+        );
+    };
+
+    Ok(ext.is::<Point>() || ext.is::<Polygon>())
+}
+
 /// Decode a native geometry column that may contain null rows, writing [`placeholder_geometry`]
 /// into their slots. The caller guarantees null rows are never read.
 ///

@@ -12,6 +12,7 @@ use vortex_array::scalar_fn::unstable::row::InputElement;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 
+use crate::extension::can_decode_geometries_null_tolerant;
 use crate::extension::geometries;
 use crate::extension::geometries_null_tolerant;
 use crate::extension::is_native_geometry;
@@ -47,6 +48,10 @@ unsafe impl InputElement for GeometryRow {
 
     fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column> {
         geometries(&array, ctx)
+    }
+
+    fn can_decode_null_tolerant(array: &ArrayRef) -> VortexResult<bool> {
+        can_decode_geometries_null_tolerant(array)
     }
 
     fn get(column: &Self::Column, index: usize) -> &Geometry<f64> {
