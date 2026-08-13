@@ -125,11 +125,7 @@ impl<F: RowFn> RowVisitor<F::Options> for ExecuteRows<'_, '_, F> {
         )?;
 
         execute_sink::<Args, Prepared, Sink, ApplyResult, F::Options>(
-            self.args,
-            self.output_dtype,
-            self.ctx,
-            prepare,
-            apply,
+            self.args, self.ctx, prepare, apply,
         )
     }
 
@@ -261,12 +257,7 @@ impl<F: RowFn> RowVisitor<F::Options> for ExecuteValidRows<'_, '_, F> {
         )?;
 
         execute_sink_valid_rows::<Args, Prepared, Sink, ApplyResult, F::Options>(
-            self.args,
-            self.output_dtype,
-            self.valid,
-            self.ctx,
-            prepare,
-            apply,
+            self.args, self.valid, self.ctx, prepare, apply,
         )
     }
 

@@ -15,7 +15,6 @@ use vortex_mask::Mask;
 
 use super::RowExecution;
 use crate::ExecutionCtx;
-use crate::dtype::DType;
 use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::unstable::row::ElementTuple;
 use crate::scalar_fn::unstable::row::OutputSink;
@@ -44,7 +43,6 @@ fn ensure_decoded_lengths<Args: ElementTuple>(
 /// does not need to be captured by the closure.
 pub fn execute_sink<Args, Prepared, Sink, ApplyResult, Options>(
     args: &dyn ExecutionArgs,
-    sink_dtype: &DType,
     ctx: &mut ExecutionCtx,
     prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
     apply: impl Fn(&Prepared, Args::Elems<'_>, <Sink as OutputSink<Options>>::Row<'_>) -> ApplyResult,
@@ -55,7 +53,7 @@ where
     ApplyResult: SinkResult<WriteToken = <Sink as OutputSink<Options>>::WriteToken>,
 {
     let row_count = args.row_count();
-    let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count, sink_dtype)?;
+    let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count)?;
     let columns = Args::decode(args, ctx)?;
     let prepared = prepare(Args::constants(&columns));
     let views = Args::per_row_views(&columns);
@@ -98,7 +96,6 @@ where
 /// Run a prepared sink over only the rows set in `valid`, or decline when the sink cannot skip.
 pub fn execute_sink_valid_rows<Args, Prepared, Sink, ApplyResult, Options>(
     args: &dyn ExecutionArgs,
-    sink_dtype: &DType,
     valid: &Mask,
     ctx: &mut ExecutionCtx,
     prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
@@ -123,7 +120,7 @@ where
     };
     let prepared = prepare(Args::constants(&columns));
     let row_count = args.row_count();
-    let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count, sink_dtype)?;
+    let mut sink = <Sink as OutputSink<Options>>::with_capacity(row_count)?;
 
     // Batch execution resolves all-valid and all-null inputs before selecting this path.
     let AllOr::Some(valid) = valid.bit_buffer() else {
@@ -226,11 +223,11 @@ mod tests {
         type Row<'a> = ();
         type WriteToken = ();
 
-        fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
+        fn output_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
             Ok(DType::from(i64::PTYPE))
         }
 
-        fn with_capacity(_rows: usize, _dtype: &DType) -> VortexResult<Self> {
+        fn with_capacity(_rows: usize) -> VortexResult<Self> {
             Err(vortex_err!(
                 "a non-skipping sink must decline before allocation"
             ))
@@ -264,11 +261,11 @@ mod tests {
             })
         }
 
-        fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
+        fn output_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
             Ok(DType::from(i64::PTYPE))
         }
 
-        fn with_capacity(rows: usize, _dtype: &DType) -> VortexResult<Self> {
+        fn with_capacity(rows: usize) -> VortexResult<Self> {
             Ok(Self(vec![0; rows]))
         }
 
@@ -298,7 +295,6 @@ mod tests {
 
         let execution = execute_sink_valid_rows::<(i64,), (), NonSkippingSink, (), EmptyOptions>(
             &args,
-            &DType::from(i64::PTYPE),
             &valid,
             &mut ctx,
             |_| (),
@@ -324,7 +320,6 @@ mod tests {
             EmptyOptions,
         >(
             &args,
-            &DType::from(i64::PTYPE),
             &valid,
             &mut ctx,
             |_| (),
@@ -351,7 +346,6 @@ mod tests {
 
         let result = execute_sink_valid_rows::<(i64,), (), ShrinkingSink, (), EmptyOptions>(
             &args,
-            &DType::from(i64::PTYPE),
             &valid,
             &mut ctx,
             |_| (),

@@ -82,7 +82,7 @@ unsafe impl OutputSink<bool> for OptionsCheckingSink {
     type Row<'a> = ();
     type WriteToken = ();
 
-    fn sink_dtype(enabled: &bool, _args: &[DType]) -> VortexResult<DType> {
+    fn output_dtype(enabled: &bool, _args: &[DType]) -> VortexResult<DType> {
         if !enabled {
             vortex_bail!(InvalidArgument: "the test sink is disabled");
         }
@@ -90,7 +90,7 @@ unsafe impl OutputSink<bool> for OptionsCheckingSink {
         Ok(DType::from(i64::PTYPE))
     }
 
-    fn with_capacity(_rows: usize, _dtype: &DType) -> VortexResult<Self> {
+    fn with_capacity(_rows: usize) -> VortexResult<Self> {
         vortex_bail!("the planning-only test sink must not be allocated")
     }
 
@@ -129,11 +129,11 @@ unsafe impl<Options> OutputSink<Options> for I64Sink {
     type Row<'a> = &'a mut i64;
     type WriteToken = ();
 
-    fn sink_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
+    fn output_dtype(_options: &Options, _args: &[DType]) -> VortexResult<DType> {
         Ok(DType::from(i64::PTYPE))
     }
 
-    fn with_capacity(rows: usize, _dtype: &DType) -> VortexResult<Self> {
+    fn with_capacity(rows: usize) -> VortexResult<Self> {
         Ok(Self(BufferMut::zeroed(rows)))
     }
 
@@ -159,6 +159,7 @@ impl RowFn for NullarySeven {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &[];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("test.nullary_seven");
@@ -181,6 +182,7 @@ impl RowFn for AddThree {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["first", "second", "third"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("test.add_three");
@@ -231,6 +233,7 @@ impl RowFn for Identity {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["value"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("test.identity");
@@ -251,6 +254,7 @@ impl RowFn for SinkOptions {
     type Options = bool;
 
     const ARG_NAMES: &'static [&'static str] = &[];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("test.sink_options");
@@ -271,6 +275,7 @@ impl RowFn for InvalidKernelOutput {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["value"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("test.invalid_kernel_output");
@@ -470,7 +475,7 @@ fn test_finalize_kernel_output_validates_shape_and_dtype() -> VortexResult<()> {
 }
 
 #[test]
-fn test_sink_dtype_receives_function_options() -> VortexResult<()> {
+fn test_output_dtype_receives_function_options() -> VortexResult<()> {
     assert_eq!(
         row_fn_return_dtype(&SinkOptions, &true, &[])?,
         DType::from(i64::PTYPE)
