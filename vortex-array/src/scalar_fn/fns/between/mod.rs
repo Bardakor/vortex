@@ -123,18 +123,18 @@ pub(super) fn precondition(
     }
 
     // Every kernel requires non-null constant bounds, so a single null bound leaves nothing to
-    // dispatch to. Desugaring keeps the surviving comparison, which can still falsify rows.
+    // dispatch to. The two compares keep the surviving bound, which can still falsify rows.
     if lower_is_null || upper_is_null {
-        return desugar(arr, lower, upper, options).map(Some);
+        return as_two_compares(arr, lower, upper, options).map(Some);
     }
 
     Ok(None)
 }
 
-/// `Between` rewritten as the two comparisons it stands for, combined with Kleene `AND`.
+/// The two compares that `Between` stands for, combined with Kleene `AND`.
 ///
 /// The returned array is lazy, so a reduce rule can call this function.
-fn desugar(
+fn as_two_compares(
     arr: &ArrayRef,
     lower: &ArrayRef,
     upper: &ArrayRef,
@@ -174,7 +174,7 @@ fn between_canonical(
 
     // TODO(joe): return lazy compare once the executor supports this
     // Fall back to compare + boolean and
-    desugar(arr, lower, upper, options)?.execute::<ArrayRef>(ctx)
+    as_two_compares(arr, lower, upper, options)?.execute::<ArrayRef>(ctx)
 }
 
 /// An optimized scalar expression to compute whether values fall between two bounds.
@@ -321,7 +321,7 @@ impl ScalarFnVTable for Between {
         _options: &Self::Options,
         _expression: &Expression,
     ) -> VortexResult<Option<Expression>> {
-        // `Between` desugars to two comparisons under Kleene `AND`, and `null AND false` is
+        // `Between` stands for two comparisons under Kleene `AND`, and `null AND false` is
         // `false`, so a null bound does not make a row null. There is no validity expression to
         // derive, which is also why `Binary` returns `None` for `Operator::And`.
         Ok(None)
