@@ -7,7 +7,7 @@
 //! implementations. Expressions ([`crate::expr::Expression`]) reference scalar functions
 //! at each node.
 //!
-//! Strict functions with row-at-a-time kernels can implement [`unstable::row::RowFn`]. It handles
+//! Strict functions with row-at-a-time kernels can implement `unstable::row::RowFn`. It handles
 //! decoding, constants, null propagation, output construction, and validity. This API requires the
 //! `unstable_row_fns` feature and has no compatibility guarantees. Implement [`ScalarFnVTable`]
 //! directly for columnar kernels and functions that alias an input or can produce null from valid

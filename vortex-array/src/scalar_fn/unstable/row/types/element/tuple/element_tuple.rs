@@ -187,13 +187,17 @@ pub trait ElementTuple: 'static + private::Sealed {
     fn per_row_views(columns: &Self::Columns) -> Option<Self::Views<'_>>;
 
     /// Whether every view contains exactly `row_count` rows.
+    ///
+    /// The executor calls this once before the all-per-row hot loop. A successful check gives LLVM
+    /// a dominating equality between the loop bound and every source length, which lets it optimize
+    /// the tuple access as one fixed-length traversal.
     fn view_lens_match(views: &Self::Views<'_>, row_count: usize) -> bool;
 
     /// Whether every per-row argument contains exactly `row_count` rows.
     ///
-    /// This provides the same guarantee as [`view_lens_match`](Self::view_lens_match) when
-    /// [`per_row_views`](Self::per_row_views) declines a mixed per-row and batch-constant tuple. A
-    /// batch constant is exempt because it was collapsed to one row.
+    /// This is the mixed-shape equivalent of [`view_lens_match`](Self::view_lens_match) when
+    /// [`per_row_views`](Self::per_row_views) declines. It runs once before the hot loop for the
+    /// same LLVM optimization. A batch constant is exempt because decoding collapsed it to one row.
     fn decoded_lens_match(columns: &Self::Columns, row_count: usize) -> bool;
 
     /// Read one row from borrowed views.
