@@ -11,6 +11,7 @@ use vortex_error::vortex_err;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
+#[cfg(target_arch = "x86_64")]
 use crate::arrays::Constant;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
@@ -118,6 +119,7 @@ impl RowFn for PrimitiveCompare {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn use_columnar_comparison(
     lhs: &ArrayRef,
     rhs: &ArrayRef,
