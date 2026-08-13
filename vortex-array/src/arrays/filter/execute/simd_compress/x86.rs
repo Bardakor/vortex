@@ -50,8 +50,23 @@ use super::compress_tail;
 
 /// Choose the widest available kernel above its benchmarked density crossover.
 ///
-/// Sparse masks stay on the scalar set-bit walk. See `benches/filter_fixed_width.rs` when
-/// changing these thresholds.
+/// Below its crossover a chunk mostly compacts zeros, so the mask stays on a scalar strategy. The
+/// crossovers rise with element width (fewer lanes per register) and are lower for AVX-512, where
+/// `vpcompress` replaces a LUT load plus shuffle:
+///
+/// | Width | AVX-512 (VBMI2 for 1/2-byte) | AVX2 |
+/// | ----- | ---------------------------- | ---- |
+/// | 1     | 0.00 (always)                | 0.15 (`pshufb`) |
+/// | 2     | 0.15                         | 0.25 (`pshufb`) |
+/// | 4     | 0.25                         | 0.25 (`vpermd`) |
+/// | 8     | 0.30                         | 0.45 (`vpermd`) |
+///
+/// Arm order lets AVX-512F without VBMI2 (Skylake-X) take the 4- and 8-byte kernels and fall
+/// through to `pshufb` for 1- and 2-byte. Other widths have no kernel.
+///
+/// Below a crossover, `byte_compress_density_threshold` in [`buffer`](super::super::buffer) keeps
+/// only 1-byte elements on byte compress; its wider thresholds are for CPUs without AVX2. Re-run
+/// `benches/filter_fixed_width.rs` when changing these.
 pub(super) fn select_kernel<T, const IN_PLACE: bool>(mask: &MaskValues) -> Option<Kernel> {
     let (kernel, min_density) = match size_of::<T>() {
         1 if avx512_vbmi2() => (compress_avx512_epi8::<IN_PLACE> as Kernel, 0.0),

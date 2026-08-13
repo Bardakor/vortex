@@ -31,12 +31,29 @@ use crate::dtype::DType;
 use crate::executor::ExecutionCtx;
 use crate::scalar::Scalar;
 
+/// Filter output length above which a take covering the whole filter is materialized rather than
+/// translated index by index.
 const BIG_TAKE_FALLBACK_LEN: usize = 4096;
+
+/// Take length above which even a short filter output is materialized for fixed-width children,
+/// whose dedicated take (see [`take_primitive`] / [`take_decimal`]) keeps translation competitive
+/// much longer.
 const BIG_TAKE_FALLBACK_MIN_FIXED_WIDTH_TAKE_LEN: usize = 25_000;
+
+/// How many times over a take must revisit the filter output to amortize materializing it. Guards
+/// against materializing for a take that is only long because the filter output is.
 const BIG_TAKE_FALLBACK_MIN_FIXED_WIDTH_RATIO: usize = 10;
+
+/// Cost of one `Mask::rank` probe in materialized filter indices.
+/// [`translate_ranks`](rank::translate_ranks) probes per take index rather than making one
+/// `O(true_count)` pass while `take_len * DIVISOR < true_count`.
 const SMALL_TAKE_RANK_LOOKUP_DIVISOR: usize = 80;
+
+/// Absolute ceiling on probes, so a huge filter cannot license unbounded per-probe work on the
+/// strength of the ratio alone.
 const SMALL_TAKE_RANK_LOOKUP_MAX: usize = 256;
 
+/// Largest take that should translate indices by probing the mask rather than materializing it.
 #[inline]
 fn small_take_rank_lookup_len(filter: &Mask) -> usize {
     (filter.true_count() / SMALL_TAKE_RANK_LOOKUP_DIVISOR).clamp(1, SMALL_TAKE_RANK_LOOKUP_MAX)
@@ -99,6 +116,11 @@ fn take_impl(
     }
 }
 
+/// Whether to give up on taking through the filter and let the filter execute normally.
+///
+/// A take at least as long as the filter output reads every surviving row on average, so the one
+/// pass that materializes the filter pays for itself. The lengths above set how much larger the
+/// take must be before that holds, and are tuned against `benches/take_filter.rs`.
 fn should_materialize_big_take(array: ArrayView<'_, Filter>, indices: &ArrayRef) -> bool {
     let filtered_len = array.len();
     let take_len = indices.len();

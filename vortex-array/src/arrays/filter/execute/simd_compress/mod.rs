@@ -20,8 +20,12 @@ mod tests;
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 mod x86;
 
+/// Shortest mask worth a SIMD kernel: one full mask word, below which every chunk is a tail chunk
+/// and setup dominates.
 const MIN_LEN: usize = 64;
 
+/// Extra output bytes so a full-width store can overrun the selected elements. Sized to the widest
+/// vector in use, a 512-bit AVX-512 register.
 const SLACK_BYTES: usize = 64;
 
 /// `dst == src` for in-place kernels.
@@ -74,6 +78,9 @@ pub(super) fn filter_slice_mut_by_bitmap<T: Copy>(
 }
 
 /// Choose the widest profitable kernel available for `T`.
+///
+/// `None` for short masks, unsupported widths, targets without a kernel, or masks outside the
+/// architecture's measured density band; the caller then falls back to a scalar strategy.
 fn select_kernel<T, const IN_PLACE: bool>(mask: &MaskValues) -> Option<Kernel> {
     if mask.len() < MIN_LEN {
         return None;

@@ -22,6 +22,19 @@ use super::compress_lut;
 use super::compress_tail;
 
 /// Return the benchmarked density range where NEON beats the scalar strategies.
+///
+/// `tbl` compacts one table of lanes at a time — 8 for 1- and 2-byte elements, 4 for 4-byte, 2 for
+/// 8-byte — so the lower bounds rise with width, and 8-byte also has an upper bound where two-lane
+/// shuffling loses to byte compress bulk-copying runs:
+///
+/// | Width | Band         | Below       | Above |
+/// | ----- | ------------ | ----------- | ----- |
+/// | 1, 2  | `0.15..`     | scalar walk | — |
+/// | 4     | `0.30..`     | scalar walk | — |
+/// | 8     | `0.50..0.80` | scalar walk | byte compress |
+///
+/// These pair with `byte_compress_density_threshold` in [`buffer`](super::super::buffer) (`0.75`
+/// for 8-byte on aarch64, `0.9` otherwise); re-check both against `benches/filter_fixed_width.rs`.
 fn density_band<T>() -> Option<std::ops::Range<f64>> {
     match size_of::<T>() {
         1 | 2 => Some(0.15..f64::INFINITY),

@@ -2,6 +2,14 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 //! Buffer-level filter dispatch across cached, SIMD, and scalar strategies.
+//!
+//! [`filter_buffer`] tries, in order: cached slices (one `memcpy` per run), cached indices (one
+//! gather per selected element), a SIMD compress kernel, byte compress (a permutation LUT per mask
+//! byte), then the scalar bitmap walk (one copy per set bit).
+//!
+//! The thresholds below and in [`simd_compress`] are measured crossovers, not derived bounds: they
+//! are hardware-specific, so re-run `benches/filter_fixed_width.rs` on the target before changing
+//! them.
 
 use std::mem::size_of;
 
@@ -12,8 +20,18 @@ use crate::arrays::filter::execute::byte_compress;
 use crate::arrays::filter::execute::simd_compress;
 use crate::arrays::filter::execute::slice;
 
+/// Density above which cached indices lose to the bitmap strategies, which work a word at a time
+/// rather than one gather per selected element.
 const CACHED_INDICES_MAX_DENSITY: f64 = 0.5;
+
+/// Density above which a uniquely-owned buffer is compacted in place.
+///
+/// In-place skips the output allocation but keeps the original capacity (`truncate` only lowers the
+/// length), so a sparse mask would strand most of the buffer.
 const IN_PLACE_MIN_DENSITY: f64 = 0.5;
+
+/// Minimum average run length before cached slices beat the bitmap strategies, since each run costs
+/// a separate `memcpy`. A single slice is always taken.
 const MIN_SLICES_AVERAGE_RUN_LENGTH: usize = 8;
 
 /// Filter a [`Buffer<T>`] by [`MaskValues`], returning a new buffer.
@@ -38,6 +56,7 @@ pub(crate) fn filter_buffer<T: Copy>(buffer: Buffer<T>, mask: &MaskValues) -> Bu
     filter_slice(buffer.as_slice(), mask)
 }
 
+/// Compact `values` into a new buffer, walking the strategy ladder in the module docs.
 fn filter_slice<T: Copy>(values: &[T], mask: &MaskValues) -> Buffer<T> {
     if let Some(slices) = useful_cached_slices(mask) {
         return slice::filter_slice_by_slices(values, slices, mask.true_count());
@@ -60,6 +79,10 @@ fn filter_slice<T: Copy>(values: &[T], mask: &MaskValues) -> Buffer<T> {
     }
 }
 
+/// In-place counterpart of [`filter_slice`], returning the compacted length.
+///
+/// The same ladder applies minus byte compress, which builds its output in a fresh buffer and so
+/// has no in-place form; those masks fall through to the scalar walk.
 fn filter_slice_in_place<T: Copy>(values: &mut [T], mask: &MaskValues) -> usize {
     if let Some(slices) = useful_cached_slices(mask) {
         return slice::filter_slice_mut_by_slices(values, slices);
@@ -78,12 +101,20 @@ fn filter_slice_in_place<T: Copy>(values: &mut [T], mask: &MaskValues) -> usize 
     slice::filter_slice_mut_by_bitmap(values, mask)
 }
 
+/// Cached slices, but only when copying run by run beats filtering from the bitmap.
 fn useful_cached_slices(mask: &MaskValues) -> Option<&[(usize, usize)]> {
     mask.cached_slices().filter(|slices| {
         slices.len() == 1 || mask.true_count() / slices.len() >= MIN_SLICES_AVERAGE_RUN_LENGTH
     })
 }
 
+/// Density above which byte compress beats the scalar walk, per element width. Its per-mask-byte
+/// LUT lookup only pays off once bytes are dense, and later as elements widen.
+///
+/// Only masks that no SIMD kernel claimed get here, so these pair with the density bands in
+/// [`simd_compress`]: x86 1-byte uses `0.0` because `pshufb` starts at `0.15`, aarch64 8-byte uses
+/// `0.75` to cover the dense end NEON gives up at `0.80`. Widths other than 1/2/4/8 have no kernel
+/// and always land here.
 fn byte_compress_density_threshold<T>() -> f64 {
     let width = size_of::<T>();
 
@@ -103,13 +134,30 @@ fn byte_compress_density_threshold<T>() -> f64 {
     }
 }
 
+/// Density below which indexing a mask up front pays for itself across two consumers. Building the
+/// indices is a full pass over the bitmap, so with one extra consumer the mask must be very sparse.
+const REUSE_INDICES_MAX_DENSITY: f64 = 0.05;
+
+/// As [`REUSE_INDICES_MAX_DENSITY`], but for a fan-out wide enough to amortize a denser mask.
+const REUSE_INDICES_MAX_DENSITY_WIDE: f64 = 0.1;
+
+/// Consumer count at which [`REUSE_INDICES_MAX_DENSITY_WIDE`] applies.
+const REUSE_INDICES_MIN_CONSUMERS: usize = 3;
+
 /// Materialize sparse indices when enough sibling arrays will reuse the same mask.
+///
+/// [`filter_slice`] never builds indices itself, so this decides whether that path is reachable at
+/// all.
 pub(super) fn prepare_mask_for_reuse(mask: &MaskValues, consumers: usize) {
     if consumers <= 1 || mask.cached_indices().is_some() || mask.cached_slices().is_some() {
         return;
     }
 
-    let density_threshold = if consumers >= 3 { 0.1 } else { 0.05 };
+    let density_threshold = if consumers >= REUSE_INDICES_MIN_CONSUMERS {
+        REUSE_INDICES_MAX_DENSITY_WIDE
+    } else {
+        REUSE_INDICES_MAX_DENSITY
+    };
     if mask.density() > density_threshold {
         return;
     }
