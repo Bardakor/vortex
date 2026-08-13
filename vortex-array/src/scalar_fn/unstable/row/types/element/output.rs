@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! Owned scalar values that can be collected into all-valid output columns.
+//!
+//! [`OutputElement`] describes fixed-dtype values returned independently by each row invocation.
+
 use crate::ArrayRef;
 use crate::dtype::DType;
 

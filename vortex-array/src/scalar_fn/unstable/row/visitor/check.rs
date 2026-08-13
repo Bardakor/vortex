@@ -21,7 +21,7 @@ use crate::scalar_fn::unstable::row::RowFn;
 use crate::scalar_fn::unstable::row::SinkResult;
 
 /// Assert the no-drop contract that makes partially initialized output safe to abandon on unwind.
-pub(in crate::scalar_fn::unstable::row) const fn assert_owned_output_needs_no_drop<T>() {
+pub(crate) const fn assert_owned_output_needs_no_drop<T>() {
     assert!(
         !needs_drop::<T>(),
         "owned row outputs must not require drop glue"

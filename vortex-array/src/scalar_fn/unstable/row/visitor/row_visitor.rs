@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! The typed dispatch interface implemented by [`RowFn`] planning and execution.
+//!
+//! [`RowVisitor`] lets a function select its concrete input and output capabilities without
+//! exposing framework-specific planning or execution state.
+//!
+//! [`RowFn`]: crate::scalar_fn::unstable::row::RowFn
+
 use std::ops::BitOrAssign;
 
 use vortex_error::VortexResult;

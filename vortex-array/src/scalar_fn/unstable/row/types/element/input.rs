@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! Typed decoding and row access for one input column.
+//!
+//! [`InputElement`] separates invocation-wide decoding from the checked and unchecked access paths
+//! used by row kernels.
+
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;

@@ -28,7 +28,7 @@ use crate::scalar_fn::unstable::row::RowFn;
 use crate::scalar_fn::unstable::row::SinkResult;
 
 /// The plan-time visit that validates dtypes and derives the nullable execution policy.
-pub(in crate::scalar_fn::unstable::row) struct PlanRows<'a, F: RowFn> {
+pub(crate) struct PlanRows<'a, F: RowFn> {
     /// The input dtypes for this plan.
     dtypes: &'a [DType],
 
@@ -40,10 +40,7 @@ pub(in crate::scalar_fn::unstable::row) struct PlanRows<'a, F: RowFn> {
 }
 
 impl<'a, F: RowFn> PlanRows<'a, F> {
-    pub(in crate::scalar_fn::unstable::row) fn new(
-        dtypes: &'a [DType],
-        options: &'a F::Options,
-    ) -> Self {
+    pub(crate) fn new(dtypes: &'a [DType], options: &'a F::Options) -> Self {
         Self {
             dtypes,
             options,
@@ -114,19 +111,19 @@ impl<F: RowFn> RowVisitor<F::Options> for PlanRows<'_, F> {
 }
 
 /// The execution policy and output dtype selected by a planning visit.
-pub(in crate::scalar_fn::unstable::row) struct BatchPlan {
+pub(crate) struct BatchPlan {
     /// The non-nullable dtype built by the selected output capability.
-    pub(in crate::scalar_fn::unstable::row) output_dtype: DType,
+    pub(crate) output_dtype: DType,
 
     /// How this concrete dispatch executes nullable rows.
     // TODO(connor)[RowFn]: The execution backend tracked by #9130 consumes this field.
     #[allow(dead_code)]
-    pub(in crate::scalar_fn::unstable::row) policy: RowPolicy,
+    pub(crate) policy: RowPolicy,
 }
 
 impl BatchPlan {
     /// Return the output dtype widened with strict input nullability.
-    pub(in crate::scalar_fn::unstable::row) fn result_dtype(self, args: &[DType]) -> DType {
+    pub(crate) fn result_dtype(self, args: &[DType]) -> DType {
         let Self {
             output_dtype,
             policy: _,
@@ -140,7 +137,7 @@ impl BatchPlan {
 
 /// The nullable execution policy derived from one concrete dispatch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::scalar_fn::unstable::row) enum RowPolicy {
+pub(crate) enum RowPolicy {
     /// Evaluate all rows and mask the result.
     Dense,
 
@@ -153,8 +150,7 @@ pub(in crate::scalar_fn::unstable::row) enum RowPolicy {
 
 impl RowPolicy {
     /// The policy for an infallible owned output.
-    pub(in crate::scalar_fn::unstable::row) const fn for_owned_output<Args: ElementTuple>() -> Self
-    {
+    pub(crate) const fn for_owned_output<Args: ElementTuple>() -> Self {
         if Args::DENSE_SAFE && !Args::DECODE_FALLIBLE {
             Self::Dense
         } else {
@@ -163,8 +159,7 @@ impl RowPolicy {
     }
 
     /// The policy for an owned output carrying batch-deferred failure evidence.
-    pub(in crate::scalar_fn::unstable::row) const fn for_deferred_output<Args: ElementTuple>()
-    -> Self {
+    pub(crate) const fn for_deferred_output<Args: ElementTuple>() -> Self {
         if Args::DENSE_SAFE && !Args::DECODE_FALLIBLE {
             Self::DenseWithRetry
         } else {
@@ -173,10 +168,7 @@ impl RowPolicy {
     }
 
     /// The policy for a sink-writing output.
-    pub(in crate::scalar_fn::unstable::row) const fn for_sink<
-        Args: ElementTuple,
-        ApplyResult: SinkResult,
-    >() -> Self {
+    pub(crate) const fn for_sink<Args: ElementTuple, ApplyResult: SinkResult>() -> Self {
         if Args::DENSE_SAFE && !Args::DECODE_FALLIBLE && !ApplyResult::FALLIBLE {
             Self::Dense
         } else {

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! Validated indexed access to tuples of decoded input columns.
+//!
+//! [`IndexedElementTuple`] adapts row arguments to the lane-kernel interface after batch execution
+//! proves that every input covers the requested row range.
+
 use vortex_compute::lane_kernels::IndexedSource;
 use vortex_compute::lane_kernels::LaneZip;
 

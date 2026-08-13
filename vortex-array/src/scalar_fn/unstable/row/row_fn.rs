@@ -37,7 +37,8 @@ pub trait RowFn: 'static + Sized + Clone + Send + Sync {
 
     /// Whether any dispatch can raise a semantic error.
     ///
-    /// See [`ScalarFnVTable::is_fallible`] for a more detailed explanation of semantic errors.
+    /// See [`ScalarFnVTable::is_fallible`](crate::scalar_fn::ScalarFnVTable::is_fallible) for a
+    /// more detailed explanation of semantic errors.
     ///
     /// The framework checks dispatched element and result types. A conservative `true` is allowed.
     const FALLIBLE: bool;

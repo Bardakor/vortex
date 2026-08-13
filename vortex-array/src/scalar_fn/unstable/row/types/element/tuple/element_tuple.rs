@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! Decoding and row access for tuples of input element types.
+//!
+//! [`ElementTuple`] combines per-column [`InputElement`] implementations, preserves batch
+//! constants outside the hot loop, and supports row functions with up to twelve arguments.
+
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure_eq;
 
