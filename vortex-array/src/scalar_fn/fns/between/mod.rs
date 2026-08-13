@@ -156,6 +156,8 @@ fn between_canonical(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     if let Some(result) = precondition(arr, lower, upper, options)? {
+        // TODO(joe): return the lazy array directly, blocked on the same executor support as the
+        // fallback below. Only the single-null-bound case is lazy, so this forces it for now.
         return result.execute::<ArrayRef>(ctx);
     }
 

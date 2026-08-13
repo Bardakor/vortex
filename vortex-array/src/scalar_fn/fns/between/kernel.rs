@@ -106,6 +106,9 @@ where
         let upper = &children[2];
         let arr = array.array().clone();
         if let Some(result) = precondition(&arr, lower, upper, parent.options)? {
+            // TODO(joe): return the lazy array directly, blocked on the same executor support as
+            // the fallback in `between_canonical`. The reduce adaptor above already passes it
+            // through unexecuted, since a reduce rule can return a lazy array.
             return result.execute::<ArrayRef>(ctx).map(Some);
         }
         <V as BetweenKernel>::between(array, lower, upper, parent.options, ctx)
