@@ -330,6 +330,8 @@ impl ScalarFnVTable for Between {
     }
 
     fn is_strict(&self, _options: &Self::Options) -> bool {
+        // `Between` stands for two compares under Kleene `AND`, so a null bound does not force a
+        // null row, which is consistent with `validity` returning `None` above.
         false
     }
 
