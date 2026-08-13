@@ -15,8 +15,8 @@ See [`src/main.rs`](./src/main.rs) for the dataset list and CLI flags (`--format
 cargo run -p compress-bench --profile release_debug
 ```
 
-GPU decompression is opt-in and runs only the existing benchmark names allow-listed in
-`src/main.rs`:
+GPU decompression is opt-in and runs the full compress suite, including `airquality`.
+Use `--datasets` to narrow it to a subset:
 
 ```bash
 cargo run -p compress-bench --profile release_debug \

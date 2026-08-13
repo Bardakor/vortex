@@ -178,14 +178,6 @@ async fn run_compress(
         // ),
     ];
 
-    // Add an existing benchmark name here only after its CUDA-compatible compression and
-    // decompression kernels have been verified end to end.
-    #[expect(
-        clippy::useless_vec,
-        reason = "this is an intentionally incremental allow-list of benchmark names"
-    )]
-    let gpu_decompress_benchmarks = vec!["TPC-H l_comment canonical"];
-
     let datasets: Vec<&dyn Dataset> = [
         &TaxiData as &dyn Dataset,
         PBI_DATASETS.get(Arade),
@@ -207,11 +199,11 @@ async fn run_compress(
     .into_iter()
     .chain(structlistofints.iter().map(|d| d as &dyn Dataset))
     .filter(|d| {
-        if gpu_decompress && !gpu_decompress_benchmarks.contains(&d.name()) {
-            return false;
-        }
         if let Some(filter) = datasets_filter.as_ref() {
             filter.is_match(d.name())
+        } else if gpu_decompress {
+            // The GPU suite runs the whole compress suite, including airquality.
+            d.name() != "rplace"
         } else {
             // These download data from pcodec's public bucket, presumably creating egress charges
             // for pcodec. As such, we do not run in CI.
