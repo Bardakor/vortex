@@ -168,13 +168,16 @@ mod tests {
             .apply(&expr)?
             .execute::<BoolArray>(ctx)?
             .opt_bool_vec(ctx);
+
         let after = data
             .apply(&find_between(expr))?
             .execute::<BoolArray>(ctx)?
             .opt_bool_vec(ctx);
 
+        // Row 0 is false rather than null because `$.x <= 5` falsifies it on its own.
         assert_eq!(before, [Some(false), None]);
         assert_eq!(before, after);
+
         Ok(())
     }
 

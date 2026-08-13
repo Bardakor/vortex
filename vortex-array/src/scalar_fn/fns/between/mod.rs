@@ -89,12 +89,14 @@ impl StrictComparison {
 /// Common preconditions for between operations that apply to all arrays.
 ///
 /// Returns `Some(result)` if the precondition short-circuits the between operation
-/// (empty array, null bounds), or `None` if between should proceed with the
+/// (empty array, null bounds), or `None` if between must proceed with the
 /// encoding-specific implementation. Kernels can therefore rely on both bounds being
 /// non-null.
 ///
-/// The returned array may be a lazy [`crate::arrays::ScalarFn`] array, which the caller must
-/// execute if it needs a computed result.
+/// The result can be a lazy [`ScalarFn`] array, so a caller that needs a computed array
+/// **must** execute it.
+///
+/// [`ScalarFn`]: crate::arrays::ScalarFn
 pub(super) fn precondition(
     arr: &ArrayRef,
     lower: &ArrayRef,
@@ -109,22 +111,20 @@ pub(super) fn precondition(
         return Ok(Some(Canonical::empty(&return_dtype).into_array()));
     }
 
-    let lower_null = lower.as_constant().is_some_and(|v| v.is_null());
-    let upper_null = upper.as_constant().is_some_and(|v| v.is_null());
+    let lower_is_null = lower.as_constant().is_some_and(|v| v.is_null());
+    let upper_is_null = upper.as_constant().is_some_and(|v| v.is_null());
 
-    // A null bound falsifies nothing on its own: `Between` is not strict, and Kleene `AND` gives
-    // `null AND false = false`. So a row is null only when the surviving comparison is not
-    // already false, which means every row is null only when both bounds are null.
-    if lower_null && upper_null {
+    // `Between` is not strict, and Kleene `AND` gives `null AND false = false`, so a null bound
+    // cannot falsify a row on its own. Every row is null only when both bounds are null.
+    if lower_is_null && upper_is_null {
         return Ok(Some(
             ConstantArray::new(Scalar::null(return_dtype), arr.len()).into_array(),
         ));
     }
 
-    // With one null bound there is nothing for the kernels to do, since they all require
-    // non-null constant bounds. Hand back the two comparisons that `Between` stands for so that
-    // the surviving one can still falsify rows.
-    if lower_null || upper_null {
+    // Every kernel requires non-null constant bounds, so a single null bound leaves nothing to
+    // dispatch to. Desugaring keeps the surviving comparison, which can still falsify rows.
+    if lower_is_null || upper_is_null {
         return desugar(arr, lower, upper, options).map(Some);
     }
 
@@ -133,7 +133,7 @@ pub(super) fn precondition(
 
 /// `Between` rewritten as the two comparisons it stands for, combined with Kleene `AND`.
 ///
-/// Returns a lazy array, so this is safe to call from a reduce rule.
+/// The returned array is lazy, so a reduce rule can call this function.
 fn desugar(
     arr: &ArrayRef,
     lower: &ArrayRef,
@@ -156,8 +156,6 @@ fn between_canonical(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     if let Some(result) = precondition(arr, lower, upper, options)? {
-        // `precondition` may return a lazy `ScalarFn` array, which callers of `execute` do not
-        // expect, so apply it immediately.
         return result.execute::<ArrayRef>(ctx);
     }
 
@@ -323,9 +321,9 @@ impl ScalarFnVTable for Between {
         _options: &Self::Options,
         _expression: &Expression,
     ) -> VortexResult<Option<Expression>> {
-        // `Between` desugars to two comparisons combined with Kleene `AND`, which has no
-        // derivable validity expression: `null AND false` is `false`, so a null bound does not
-        // make the row null. `Binary` returns `None` for `Operator::And` for the same reason.
+        // `Between` desugars to two comparisons under Kleene `AND`, and `null AND false` is
+        // `false`, so a null bound does not make a row null. There is no validity expression to
+        // derive, which is also why `Binary` returns `None` for `Operator::And`.
         Ok(None)
     }
 
@@ -374,6 +372,12 @@ mod tests {
         upper_strict: StrictComparison::NonStrict,
     };
 
+    /// `len` null `i32` values held as a [`ConstantArray`], which is what `as_constant` sees.
+    fn null_i32s(len: usize) -> ArrayRef {
+        let null = Scalar::null(DType::Primitive(PType::I32, Nullability::Nullable));
+        ConstantArray::new(null, len).into_array()
+    }
+
     /// A declared validity expression must agree with the mask of the executed result.
     ///
     /// The bounds are columns rather than literals so that a null bound reaches execution
@@ -381,21 +385,15 @@ mod tests {
     #[test]
     fn validity_agrees_with_execution() -> VortexResult<()> {
         let ctx = &mut SESSION.create_execution_ctx();
-        let data = StructArray::from_fields(&[
-            (
-                "x",
-                PrimitiveArray::from_option_iter([Some(10), Some(10), Some(1)]).into_array(),
-            ),
-            (
-                "lo",
-                PrimitiveArray::from_option_iter([None, None, Some(0)]).into_array(),
-            ),
-            (
-                "hi",
-                PrimitiveArray::from_option_iter([Some(5), Some(50), Some(5)]).into_array(),
-            ),
-        ])?
-        .into_array();
+
+        //  x     lo     hi     expected
+        //  10    null   5      false, since the upper bound alone falsifies the row
+        //  10    null   50     null, since neither bound falsifies the row
+        //  1     0      5      true
+        let x = PrimitiveArray::from_option_iter([Some(10), Some(10), Some(1)]).into_array();
+        let lo = PrimitiveArray::from_option_iter([None, None, Some(0)]).into_array();
+        let hi = PrimitiveArray::from_option_iter([Some(5), Some(50), Some(5)]).into_array();
+        let data = StructArray::from_fields(&[("x", x), ("lo", lo), ("hi", hi)])?.into_array();
 
         let expr = between(col("x"), col("lo"), col("hi"), NON_STRICT);
 
@@ -404,6 +402,7 @@ mod tests {
             .apply(&expr)?
             .execute::<BoolArray>(ctx)?
             .opt_bool_vec(ctx);
+
         let declared = data
             .apply(&expr.validity()?)?
             .execute::<BoolArray>(ctx)?
@@ -414,6 +413,7 @@ mod tests {
             executed.iter().map(Option::is_some).collect::<Vec<_>>(),
             declared
         );
+
         Ok(())
     }
 
@@ -562,16 +562,11 @@ mod tests {
     }
 
     /// `Between` is not strict, so a null bound only makes a row null when the surviving
-    /// comparison is not already false. This must not depend on how the bound is encoded.
+    /// comparison is not already false. This must not depend on how the bound is encoded, and
+    /// compression stores an all-null chunk as a [`ConstantArray`].
     #[rstest]
     #[case::primitive_nulls(PrimitiveArray::from_option_iter([None::<i32>, None]).into_array())]
-    #[case::constant_null(
-        ConstantArray::new(
-            Scalar::null(DType::Primitive(PType::I32, Nullability::Nullable)),
-            2,
-        )
-        .into_array()
-    )]
+    #[case::constant_null(null_i32s(2))]
     fn null_lower_bound(#[case] lower: ArrayRef) -> VortexResult<()> {
         let ctx = &mut SESSION.create_execution_ctx();
         let array = buffer![10, 10].into_array();
@@ -580,7 +575,9 @@ mod tests {
         let result = between_canonical(&array, &lower, &upper, &NON_STRICT, ctx)?
             .execute::<BoolArray>(ctx)?;
 
+        // Row 0 stays false because the upper bound falsifies it on its own.
         assert_eq!(result.opt_bool_vec(ctx), [Some(false), None]);
+
         Ok(())
     }
 
@@ -589,16 +586,13 @@ mod tests {
     fn both_bounds_null() -> VortexResult<()> {
         let ctx = &mut SESSION.create_execution_ctx();
         let array = buffer![10, 10].into_array();
-        let bound = ConstantArray::new(
-            Scalar::null(DType::Primitive(PType::I32, Nullability::Nullable)),
-            2,
-        )
-        .into_array();
+        let bound = null_i32s(2);
 
         let result = between_canonical(&array, &bound, &bound, &NON_STRICT, ctx)?
             .execute::<BoolArray>(ctx)?;
 
         assert_eq!(result.opt_bool_vec(ctx), [None, None]);
+
         Ok(())
     }
 

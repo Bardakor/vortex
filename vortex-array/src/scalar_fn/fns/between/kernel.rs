@@ -106,8 +106,6 @@ where
         let upper = &children[2];
         let arr = array.array().clone();
         if let Some(result) = precondition(&arr, lower, upper, parent.options)? {
-            // `precondition` may return a lazy `ScalarFn` array, which callers of the execution
-            // kernels do not expect, so apply it immediately.
             return result.execute::<ArrayRef>(ctx).map(Some);
         }
         <V as BetweenKernel>::between(array, lower, upper, parent.options, ctx)
