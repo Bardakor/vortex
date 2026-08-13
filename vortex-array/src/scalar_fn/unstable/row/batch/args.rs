@@ -20,7 +20,7 @@ use crate::scalar_fn::unstable::row::visitor::RowPolicy;
 /// original planned batch. Keeping them together prevents an execution path from pairing an input
 /// view with unrelated planning metadata.
 #[derive(Clone, Copy)]
-pub(in crate::scalar_fn::unstable::row) struct BorrowedExecutionArgs<'a> {
+pub(crate) struct BorrowedExecutionArgs<'a> {
     /// The input arrays for this kernel invocation.
     arrays: &'a [ArrayRef],
 
@@ -39,7 +39,7 @@ pub(in crate::scalar_fn::unstable::row) struct BorrowedExecutionArgs<'a> {
 
 impl<'a> BorrowedExecutionArgs<'a> {
     /// Pair one input view with the planning metadata selected for its batch.
-    pub(in crate::scalar_fn::unstable::row) fn new(
+    pub(crate) fn new(
         arrays: &'a [ArrayRef],
         row_count: usize,
         dtypes: &'a [DType],
@@ -56,22 +56,22 @@ impl<'a> BorrowedExecutionArgs<'a> {
     }
 
     /// Return the concrete arrays used by this row-kernel invocation.
-    pub(in crate::scalar_fn::unstable::row) fn arrays(&self) -> &'a [ArrayRef] {
+    pub(crate) fn arrays(&self) -> &'a [ArrayRef] {
         self.arrays
     }
 
     /// Return the original input dtypes used to select the row implementation.
-    pub(in crate::scalar_fn::unstable::row) fn dtypes(&self) -> &'a [DType] {
+    pub(crate) fn dtypes(&self) -> &'a [DType] {
         self.dtypes
     }
 
     /// Return the non-nullable dtype built by the selected output capability.
-    pub(in crate::scalar_fn::unstable::row) fn output_dtype(&self) -> &'a DType {
+    pub(crate) fn output_dtype(&self) -> &'a DType {
         self.output_dtype
     }
 
     /// Return the nullable execution policy selected during planning.
-    pub(in crate::scalar_fn::unstable::row) fn policy(&self) -> RowPolicy {
+    pub(crate) fn policy(&self) -> RowPolicy {
         self.policy
     }
 }
