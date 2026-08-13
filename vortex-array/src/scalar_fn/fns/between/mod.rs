@@ -147,7 +147,7 @@ fn as_two_compares(
 
 /// Between on a canonical array by directly dispatching to the appropriate kernel.
 ///
-/// Falls back to compare + boolean and if no kernel handles the input.
+/// Falls back to [`as_two_compares`] if no kernel handles the input.
 fn between_canonical(
     arr: &ArrayRef,
     lower: &ArrayRef,
@@ -323,15 +323,15 @@ impl ScalarFnVTable for Between {
         _options: &Self::Options,
         _expression: &Expression,
     ) -> VortexResult<Option<Expression>> {
-        // `Between` stands for two comparisons under Kleene `AND`, and `null AND false` is
-        // `false`, so a null bound does not make a row null. There is no validity expression to
-        // derive, which is also why `Binary` returns `None` for `Operator::And`.
+        // `Between` stands for two compares under Kleene `AND`, and `null AND false` is `false`,
+        // so a null bound does not make a row null. There is no validity expression to derive,
+        // which is also why `Binary` returns `None` for `Operator::And`.
         Ok(None)
     }
 
     fn is_strict(&self, _options: &Self::Options) -> bool {
-        // `Between` stands for two compares under Kleene `AND`, so a null bound does not force a
-        // null row, which is consistent with `validity` returning `None` above.
+        // Not strict for the same reason `validity` returns `None` above: under Kleene `AND` a
+        // null bound does not force a null row.
         false
     }
 
