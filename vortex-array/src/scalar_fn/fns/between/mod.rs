@@ -8,7 +8,6 @@ use std::fmt::Formatter;
 
 pub use kernel::*;
 use prost::Message;
-use vortex_array::expr::and;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_proto::expr as pb;
@@ -299,12 +298,12 @@ impl ScalarFnVTable for Between {
     fn validity(
         &self,
         _options: &Self::Options,
-        expression: &Expression,
+        _expression: &Expression,
     ) -> VortexResult<Option<Expression>> {
-        let arr = expression.child(0).validity()?;
-        let lower = expression.child(1).validity()?;
-        let upper = expression.child(2).validity()?;
-        Ok(Some(and(and(arr, lower), upper)))
+        // `Between` desugars to two comparisons combined with Kleene `AND`, which has no
+        // derivable validity expression: `null AND false` is `false`, so a null bound does not
+        // make the row null. `Binary` returns `None` for `Operator::And` for the same reason.
+        Ok(None)
     }
 
     fn is_strict(&self, _options: &Self::Options) -> bool {
@@ -328,12 +327,15 @@ mod tests {
     use crate::VortexSessionExecute;
     use crate::arrays::BoolArray;
     use crate::arrays::DecimalArray;
+    use crate::arrays::PrimitiveArray;
+    use crate::arrays::StructArray;
     use crate::assert_arrays_eq;
     use crate::dtype::DType;
     use crate::dtype::DecimalDType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
     use crate::expr::between;
+    use crate::expr::col;
     use crate::expr::get_item;
     use crate::expr::lit;
     use crate::expr::root;
@@ -343,6 +345,54 @@ mod tests {
     use crate::validity::Validity;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(crate::array_session);
+
+    const NON_STRICT: BetweenOptions = BetweenOptions {
+        lower_strict: StrictComparison::NonStrict,
+        upper_strict: StrictComparison::NonStrict,
+    };
+
+    /// A declared validity expression must agree with the mask of the executed result.
+    ///
+    /// The bounds are columns rather than literals so that a null bound reaches execution
+    /// instead of being intercepted as a constant.
+    #[test]
+    fn validity_agrees_with_execution() -> VortexResult<()> {
+        let ctx = &mut SESSION.create_execution_ctx();
+        let data = StructArray::from_fields(&[
+            (
+                "x",
+                PrimitiveArray::from_option_iter([Some(10), Some(10), Some(1)]).into_array(),
+            ),
+            (
+                "lo",
+                PrimitiveArray::from_option_iter([None, None, Some(0)]).into_array(),
+            ),
+            (
+                "hi",
+                PrimitiveArray::from_option_iter([Some(5), Some(50), Some(5)]).into_array(),
+            ),
+        ])?
+        .into_array();
+
+        let expr = between(col("x"), col("lo"), col("hi"), NON_STRICT);
+
+        let executed = data
+            .clone()
+            .apply(&expr)?
+            .execute::<BoolArray>(ctx)?
+            .opt_bool_vec(ctx);
+        let declared = data
+            .apply(&expr.validity()?)?
+            .execute::<BoolArray>(ctx)?
+            .bool_vec(ctx);
+
+        assert_eq!(executed, [Some(false), None, Some(true)]);
+        assert_eq!(
+            executed.iter().map(Option::is_some).collect::<Vec<_>>(),
+            declared
+        );
+        Ok(())
+    }
 
     #[test]
     fn is_not_strict() {
