@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use rstest::rstest;
+use vortex_buffer::Buffer;
 use vortex_buffer::BufferMut;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -18,6 +19,7 @@ use super::BatchPlan;
 use super::RowPolicy;
 use super::finalize_kernel_output;
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
 use crate::array_session;
@@ -31,6 +33,7 @@ use crate::dtype::Nullability;
 use crate::scalar_fn::EmptyOptions;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::VecExecutionArgs;
+use crate::scalar_fn::unstable::row::InputElement;
 use crate::scalar_fn::unstable::row::OutputElement;
 use crate::scalar_fn::unstable::row::OutputSink;
 use crate::scalar_fn::unstable::row::RowFn;
@@ -47,6 +50,12 @@ struct NullarySeven;
 
 #[derive(Clone)]
 struct AddThree;
+
+#[derive(Clone)]
+struct AddShort;
+
+/// An element whose decode drops the last row, standing in for an invalid element implementation.
+struct ShortDecodeI64;
 
 #[derive(Clone)]
 struct Identity;
@@ -73,6 +82,54 @@ enum PreparedVisit {
     Owned,
     Sink,
     Deferred,
+}
+
+// SAFETY: the view and unchecked access delegate to the `i64` implementation. The implementation
+// deliberately returns a short column so the executor's pre-loop length guard can be tested.
+unsafe impl InputElement for ShortDecodeI64 {
+    type Column = Buffer<i64>;
+    type View<'a> = &'a [i64];
+    type Elem<'a> = i64;
+
+    const DENSE_SAFE: bool = true;
+    const DECODE_FALLIBLE: bool = false;
+
+    fn validate(dtype: &DType) -> VortexResult<()> {
+        <i64 as InputElement>::validate(dtype)
+    }
+
+    fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column> {
+        let column = <i64 as InputElement>::decode(array, ctx)?;
+
+        Ok(column.slice(0..column.len().saturating_sub(1)))
+    }
+
+    fn get(column: &Self::Column, index: usize) -> i64 {
+        <i64 as InputElement>::get(column, index)
+    }
+
+    fn view(column: &Self::Column) -> Self::View<'_> {
+        <i64 as InputElement>::view(column)
+    }
+
+    fn view_len(view: &Self::View<'_>) -> usize {
+        <i64 as InputElement>::view_len(view)
+    }
+
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> i64
+    where
+        Self: 'a,
+    {
+        <i64 as InputElement>::get_from_view(view, index)
+    }
+
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> i64
+    where
+        Self: 'a,
+    {
+        // SAFETY: forwarded from this method's contract.
+        unsafe { <i64 as InputElement>::get_from_view_unchecked(view, index) }
+    }
 }
 
 // SAFETY: `with_capacity` always returns an error, so no sink value can reach `rows`, `row`, or
@@ -196,6 +253,29 @@ impl RowFn for AddThree {
         visitor: V,
     ) -> VortexResult<V::VisitResult> {
         visitor.visit::<(i64, i64, i64), i64>(|(first, second, third)| first + second + third)
+    }
+}
+
+impl RowFn for AddShort {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.add_short");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit_into::<(ShortDecodeI64, i64), I64Sink, _>(|(lhs, rhs), output| {
+            *output = lhs + rhs;
+        })
     }
 }
 
@@ -355,6 +435,27 @@ fn test_batch_rejects_input_length_mismatch() -> VortexResult<()> {
     });
 
     assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_short_decode_beside_constant_is_rejected() -> VortexResult<()> {
+    let lhs = PrimitiveArray::from_iter(0..64_i64).into_array();
+    let rhs = ConstantArray::new(10_i64, 64).into_array();
+    let args = VecExecutionArgs::new(vec![lhs, rhs], 64);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let error = match execute_rows(&AddShort, &EmptyOptions, &args, &mut ctx) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("a short decoded column passed the pre-loop length check"),
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not address exactly 64 rows"),
+        "unexpected error: {error}",
+    );
     Ok(())
 }
 
