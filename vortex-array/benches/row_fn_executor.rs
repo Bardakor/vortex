@@ -132,8 +132,8 @@ unsafe impl<Options> OutputSink<Options> for I64Sink {
         self.0.as_mut_slice()
     }
 
-    fn row_count_matches(rows: &Self::Rows<'_>, row_count: usize) -> bool {
-        rows.len() == row_count
+    fn row_count(rows: &Self::Rows<'_>) -> usize {
+        rows.len()
     }
 
     unsafe fn row_unchecked<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a> {
