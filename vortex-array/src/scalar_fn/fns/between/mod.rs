@@ -78,18 +78,17 @@ impl StrictComparison {
     }
 }
 
-/// Common preconditions for between operations that apply to all arrays.
+/// Short-circuits between for the inputs that need no encoding-specific work.
 ///
-/// Returns `Some(result)` if the precondition short-circuits the between operation
-/// (empty array, null bounds), or `None` if between must proceed with the
-/// encoding-specific implementation. Kernels can therefore rely on both bounds being
-/// non-null.
+/// Returns `Some(result)` when the answer is already known (empty array, null bounds), or `None`
+/// when between must proceed with the encoding-specific implementation. Kernels can therefore rely
+/// on both bounds being non-null.
 ///
 /// The result can be a lazy [`ScalarFn`] array, so a caller that needs a computed array
 /// **must** execute it.
 ///
 /// [`ScalarFn`]: crate::arrays::ScalarFn
-pub(super) fn precondition(
+pub(super) fn short_circuit(
     arr: &ArrayRef,
     lower: &ArrayRef,
     upper: &ArrayRef,
@@ -147,7 +146,7 @@ fn between_canonical(
     options: &BetweenOptions,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    if let Some(result) = precondition(arr, lower, upper, options)? {
+    if let Some(result) = short_circuit(arr, lower, upper, options)? {
         // TODO(joe): return the lazy array directly, blocked on the same executor support as the
         // fallback below. Only the single-null-bound case is lazy, so this forces it for now.
         return result.execute::<ArrayRef>(ctx);
