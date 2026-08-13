@@ -64,7 +64,7 @@ where
         // scope releases the borrow before `finish_sink` consumes the sink.
         let mut rows = <Sink as OutputSink<Options>>::rows(&mut sink);
         vortex_ensure!(
-            <Sink as OutputSink<Options>>::row_count_matches(&rows, row_count),
+            <Sink as OutputSink<Options>>::row_count(&rows) == row_count,
             "the output sink does not address exactly {row_count} rows",
         );
 
@@ -75,14 +75,14 @@ where
                 // SAFETY: `ensure_decoded_lengths` proved every view has `row_count` rows before
                 // the loop.
                 let elements = unsafe { Args::get_from_views_unchecked(&views, index) };
-                // SAFETY: `row_count_matches` proved the sink addresses every loop index.
+                // SAFETY: `row_count` proved the sink addresses every loop index.
                 let output =
                     unsafe { <Sink as OutputSink<Options>>::row_unchecked(&mut rows, index) };
                 apply(&prepared, elements, output).into_result()?;
             }
         } else {
             for index in 0..row_count {
-                // SAFETY: `row_count_matches` proved the sink addresses every loop index.
+                // SAFETY: `row_count` proved the sink addresses every loop index.
                 let output =
                     unsafe { <Sink as OutputSink<Options>>::row_unchecked(&mut rows, index) };
                 apply(&prepared, Args::get(&columns, index), output).into_result()?;
@@ -141,7 +141,7 @@ where
         // initializer mutably borrows the row representation.
         initialize_skipped_rows(&mut rows);
         vortex_ensure!(
-            <Sink as OutputSink<Options>>::row_count_matches(&rows, row_count),
+            <Sink as OutputSink<Options>>::row_count(&rows) == row_count,
             "the output sink does not address exactly {row_count} rows after initializing skipped rows",
         );
 
@@ -153,7 +153,7 @@ where
                 return;
             }
 
-            // SAFETY: `row_count_matches` proved that the sink addresses every mask index, which
+            // SAFETY: `row_count` proved that the sink addresses every mask index, which
             // is below the mask's validated `row_count`.
             let output = unsafe { <Sink as OutputSink<Options>>::row_unchecked(&mut rows, index) };
             let result = match &views {
@@ -235,8 +235,8 @@ mod tests {
 
         fn rows(&mut self) -> Self::Rows<'_> {}
 
-        fn row_count_matches(_rows: &Self::Rows<'_>, _row_count: usize) -> bool {
-            true
+        fn row_count(_rows: &Self::Rows<'_>) -> usize {
+            0
         }
 
         unsafe fn row_unchecked<'a>(_rows: &'a mut Self::Rows<'_>, _index: usize) -> Self::Row<'a> {
@@ -273,8 +273,8 @@ mod tests {
             &mut self.0
         }
 
-        fn row_count_matches(rows: &Self::Rows<'_>, row_count: usize) -> bool {
-            rows.len() == row_count
+        fn row_count(rows: &Self::Rows<'_>) -> usize {
+            rows.len()
         }
 
         unsafe fn row_unchecked<'a>(rows: &'a mut Self::Rows<'_>, index: usize) -> Self::Row<'a> {
