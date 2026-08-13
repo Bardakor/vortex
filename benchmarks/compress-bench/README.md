@@ -15,8 +15,9 @@ See [`src/main.rs`](./src/main.rs) for the dataset list and CLI flags (`--format
 cargo run -p compress-bench --profile release_debug
 ```
 
-GPU decompression is opt-in and runs the full compress suite, including `airquality`.
-Use `--datasets` to narrow it to a subset:
+GPU decompression is opt-in and runs the full compress suite, including the
+pcodec-hosted `airquality` and `rplace` datasets. Use `--datasets` to narrow it to a
+subset:
 
 ```bash
 cargo run -p compress-bench --profile release_debug \

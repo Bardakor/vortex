@@ -202,8 +202,8 @@ async fn run_compress(
         if let Some(filter) = datasets_filter.as_ref() {
             filter.is_match(d.name())
         } else if gpu_decompress {
-            // The GPU suite runs the whole compress suite, including airquality.
-            d.name() != "rplace"
+            // The GPU suite runs every dataset, including the pcodec-hosted ones.
+            true
         } else {
             // These download data from pcodec's public bucket, presumably creating egress charges
             // for pcodec. As such, we do not run in CI.
