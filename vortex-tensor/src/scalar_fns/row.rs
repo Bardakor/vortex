@@ -127,6 +127,10 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
         })
     }
 
+    fn can_decode_null_tolerant(_array: &ArrayRef) -> VortexResult<bool> {
+        Ok(true)
+    }
+
     fn get(column: &Self::Column, index: usize) -> &[T] {
         let start = index * column.stride;
         &column.elements.as_slice()[start..start + column.list_size]
