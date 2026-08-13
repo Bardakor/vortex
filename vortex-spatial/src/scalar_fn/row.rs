@@ -8,10 +8,11 @@ use geo_types::Geometry;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::dtype::DType;
-use vortex_array::scalar_fn::InputElement;
+use vortex_array::scalar_fn::unstable::row::InputElement;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 
+use crate::extension::can_decode_geometries_null_tolerant;
 use crate::extension::geometries;
 use crate::extension::geometries_null_tolerant;
 use crate::extension::is_native_geometry;
@@ -21,8 +22,8 @@ use crate::extension::is_native_geometry;
 ///
 /// The two operands of a binary geo function need not share a geometry type, since distance,
 /// containment and intersection across types are all meaningful, so this validates only that the
-/// column is *some* native geometry.
-pub struct GeometryRow;
+/// column is _some_ native geometry.
+pub(crate) struct GeometryRow;
 
 // SAFETY: [`view`](InputElement::view) returns the decoded geometry slice and
 // [`view_len`](InputElement::view_len) reports that slice's exact length.
@@ -31,10 +32,10 @@ unsafe impl InputElement for GeometryRow {
     type View<'a> = &'a [Geometry<f64>];
     type Elem<'a> = &'a Geometry<f64>;
 
-    // A geometry row is decoded from its coordinate storage, which behind a null row holds arbitrary
-    // coordinates that need not describe a well-formed geometry.
+    // A geometry row is decoded from its coordinate storage, which behind a null row holds
+    // arbitrary coordinates that need not describe a well-formed geometry.
     const DENSE_SAFE: bool = false;
-    // Decoding builds a geometry from stored coordinates, and a malformed one in a *valid* row is a
+    // Decoding builds a geometry from stored coordinates, and a malformed one in a _valid_ row is a
     // domain error rather than an infrastructural failure.
     const DECODE_FALLIBLE: bool = true;
     fn validate(dtype: &DType) -> VortexResult<()> {
@@ -47,6 +48,10 @@ unsafe impl InputElement for GeometryRow {
 
     fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column> {
         geometries(&array, ctx)
+    }
+
+    fn can_decode_null_tolerant(array: &ArrayRef) -> VortexResult<bool> {
+        can_decode_geometries_null_tolerant(array)
     }
 
     fn get(column: &Self::Column, index: usize) -> &Geometry<f64> {

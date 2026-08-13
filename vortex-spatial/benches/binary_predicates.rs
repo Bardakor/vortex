@@ -12,11 +12,6 @@
 //! column-x-column arms are the control: no operand is constant, so a prepared path has nothing to
 //! hoist and must not regress them.
 //!
-//! `contains` has no all-overlapping arm. One `contains(query polygon, contained square)` row
-//! builds a topology graph over the constant's 128 edges, which CodSpeed's CPU simulation charges
-//! around 120 µs, so no row count both fits the per-iteration budget and exercises the row loop.
-//! [`intersects::polygons_overlapping_x_constant`] covers the never-rejects case instead.
-//!
 //! Run with `cargo bench -p vortex-spatial --bench binary_predicates`.
 
 #![expect(clippy::unwrap_used)]
@@ -63,6 +58,10 @@ const ROWS: usize = 1 << 7;
 /// The all-overlapping polygon arm never rejects on bounding boxes, so every row pays for the full
 /// pairwise predicate. It needs a smaller fixture than [`ROWS`] to stay inside the same budget.
 const OVERLAPPING_POLYGON_ROWS: usize = 1 << 5;
+
+/// Containment builds a topology graph for each polygon pair. Four rows fit the benchmark budget
+/// while exercising construction followed by reuse of the prepared constant geometry.
+const CONTAINED_POLYGON_ROWS: usize = 4;
 
 /// Deterministic pseudo-random value in `[0, 1)`.
 fn unit(i: usize) -> f64 {
@@ -223,6 +222,23 @@ mod contains {
                 &mut ctx,
             )
         });
+    }
+
+    /// Constant container against contained polygons: every bbox check passes, the first row
+    /// prepares the constant geometry, and the remaining rows reuse it for the full predicate.
+    #[divan::bench]
+    fn constant_x_polygons_overlapping(bencher: Bencher) {
+        let mut ctx = SESSION.create_execution_ctx();
+        let query = query_constant(&mut ctx, CONTAINED_POLYGON_ROWS);
+        let polygons = squares_mostly_overlapping(CONTAINED_POLYGON_ROWS);
+        bencher
+            .counter(ItemsCount::new(CONTAINED_POLYGON_ROWS))
+            .bench_local(|| {
+                execute(
+                    SpatialContains::try_new_array(query.clone(), polygons.clone()),
+                    &mut ctx,
+                )
+            });
     }
 
     /// Constant container against a point column with one null row in eight.

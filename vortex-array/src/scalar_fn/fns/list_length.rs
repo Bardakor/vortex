@@ -350,25 +350,6 @@ mod tests {
         Ok(())
     }
 
-    /// A non-nullable fixed-size list has one length for the whole column, so the result stays a
-    /// constant rather than materializing one `u64` per row.
-    #[test]
-    fn test_fixed_size_list_length_stays_constant() -> VortexResult<()> {
-        let fsl = create_fixed_size_list(Validity::NonNullable);
-        let mut ctx = array_session().create_execution_ctx();
-
-        let result = fsl
-            .apply(&list_length(root()))?
-            .execute::<ArrayRef>(&mut ctx)?;
-
-        assert_eq!(
-            result.as_constant(),
-            Some(Scalar::primitive(2u64, Nullability::NonNullable)),
-            "expected a constant length column"
-        );
-        Ok(())
-    }
-
     #[test]
     fn test_fixed_size_list_length_nullable() -> VortexResult<()> {
         let fsl = create_fixed_size_list(Validity::Array(

@@ -38,9 +38,59 @@ static SESSION: LazyLock<VortexSession> = LazyLock::new(array_session);
 
 const LEN: usize = 32_768;
 
+const ROWFN_MATRIX_CASES: &[(usize, RowFnShape)] = &[
+    (128, RowFnShape::PerRowPerRow),
+    (128, RowFnShape::PerRowConstant),
+    (128, RowFnShape::ConstantPerRow),
+    (128, RowFnShape::PerRowNullableConstant),
+    (LEN, RowFnShape::PerRowPerRow),
+    (LEN, RowFnShape::PerRowConstant),
+    (LEN, RowFnShape::ConstantPerRow),
+    (LEN, RowFnShape::PerRowNullableConstant),
+];
+
+#[derive(Clone, Copy, Debug)]
+enum RowFnShape {
+    PerRowPerRow,
+    PerRowConstant,
+    ConstantPerRow,
+    PerRowNullableConstant,
+}
+
 /// Decimal Mul and Div cost far more per lane than Add, so they run over a shorter array to keep
 /// the instrumented CodSpeed runs quick.
 const DECIMAL_MUL_DIV_LEN: usize = 8_192;
+
+#[divan::bench(args = ROWFN_MATRIX_CASES)]
+fn rowfn_add(bencher: Bencher, &(len, shape): &(usize, RowFnShape)) {
+    bench_rowfn_shape(bencher, len, shape, Operator::Add);
+}
+
+#[divan::bench(args = ROWFN_MATRIX_CASES)]
+fn rowfn_subtract(bencher: Bencher, &(len, shape): &(usize, RowFnShape)) {
+    bench_rowfn_shape(bencher, len, shape, Operator::Sub);
+}
+
+#[divan::bench(args = ROWFN_MATRIX_CASES)]
+fn rowfn_multiply(bencher: Bencher, &(len, shape): &(usize, RowFnShape)) {
+    bench_rowfn_shape(bencher, len, shape, Operator::Mul);
+}
+
+fn bench_rowfn_shape(bencher: Bencher, len: usize, shape: RowFnShape, operator: Operator) {
+    let per_row =
+        || PrimitiveArray::from_iter((0..len).map(|index| (index % 1_024) as i64 + 1)).into_array();
+    let constant = || ConstantArray::new(17_i64, len).into_array();
+    let nullable_constant = || ConstantArray::new(Some(17_i64), len).into_array();
+
+    let (lhs, rhs) = match shape {
+        RowFnShape::PerRowPerRow => (per_row(), per_row()),
+        RowFnShape::PerRowConstant => (per_row(), constant()),
+        RowFnShape::ConstantPerRow => (constant(), per_row()),
+        RowFnShape::PerRowNullableConstant => (per_row(), nullable_constant()),
+    };
+
+    bench_primitive(bencher, lhs, rhs, operator);
+}
 
 #[divan::bench]
 fn add_i64_nonnull(bencher: Bencher) {

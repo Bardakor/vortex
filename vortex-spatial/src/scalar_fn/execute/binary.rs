@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Binary pairwise dispatch for native geometry scalar functions.
+//! Binary constant-and-column operand dispatch.
 
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
@@ -61,7 +61,6 @@ where
         (None, None) => {
             let left_valid = left.validity()?.execute_mask(len, ctx)?;
             let right_valid = right.validity()?.execute_mask(len, ctx)?;
-
             (
                 Operand::Column(left.clone()),
                 Operand::Column(right.clone()),

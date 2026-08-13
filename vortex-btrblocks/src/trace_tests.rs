@@ -49,7 +49,7 @@ use vortex_array::session::ArraySession;
 use vortex_array::session::ArraySessionExt;
 use vortex_array::test_harness::trace::Traced;
 use vortex_array::test_harness::trace::trace_op;
-use vortex_arrow::FromArrowArray;
+use vortex_arrow::ArrowSessionExt;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 use vortex_session::VortexSession;
@@ -122,7 +122,10 @@ fn lineitem() -> VortexResult<ArrayRef> {
         .with_batch_size(1 << 12)
         .next()
         .expect("at least one batch");
-    ArrayRef::from_arrow(&batch, false)
+    let schema = batch.schema();
+    trace_session()
+        .arrow()
+        .from_arrow_record_batch(batch, &schema)
 }
 
 fn compressed_lineitem() -> VortexResult<ArrayRef> {
@@ -206,6 +209,14 @@ fn trace_scan_compare_on_compressed_shipdate() -> VortexResult<()> {
         Done array=vortex.primitive(i32, len=4096)
       iter 1 current=vortex.primitive(i32, len=4096) builder_active=false
       return output=vortex.primitive(i32, len=4096)
+    optimize root=vortex.slice(i32, len=1) session=false
+      reduce_parent static:SliceReduceAdaptor(Constant) slot=0 parent=vortex.slice(i32, len=1) child=vortex.constant(i32, len=4096) -> vortex.constant(i32, len=1)
+      done output=vortex.constant(i32, len=1)
+    execute_until target=AnyCanonical root=vortex.constant(i32, len=1)
+      iter 0 current=vortex.constant(i32, len=1) builder_active=false
+        Done array=vortex.primitive(i32, len=1)
+      iter 1 current=vortex.primitive(i32, len=1) builder_active=false
+      return output=vortex.primitive(i32, len=1)
         Done array=vortex.bool(bool, len=4096)
       iter 2 current=vortex.bool(bool, len=4096) builder_active=false
       return output=vortex.bool(bool, len=4096)
@@ -264,6 +275,14 @@ fn trace_scan_compare_on_compressed_quantity() -> VortexResult<()> {
         Done array=vortex.primitive(i16, len=50)
       iter 1 current=vortex.primitive(i16, len=50) builder_active=false
       return output=vortex.primitive(i16, len=50)
+    optimize root=vortex.slice(i16, len=1) session=false
+      reduce_parent static:SliceReduceAdaptor(Constant) slot=0 parent=vortex.slice(i16, len=1) child=vortex.constant(i16, len=50) -> vortex.constant(i16, len=1)
+      done output=vortex.constant(i16, len=1)
+    execute_until target=AnyCanonical root=vortex.constant(i16, len=1)
+      iter 0 current=vortex.constant(i16, len=1) builder_active=false
+        Done array=vortex.primitive(i16, len=1)
+      iter 1 current=vortex.primitive(i16, len=1) builder_active=false
+      return output=vortex.primitive(i16, len=1)
         Done array=vortex.bool(bool, len=50)
       iter 6 current=vortex.bool(bool, len=50) stack_parent=vortex.dict(bool, len=4096) slot=1 builder_active=false
         pop_frame slot=1 output=vortex.dict(bool, len=4096)

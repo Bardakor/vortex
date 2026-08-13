@@ -511,6 +511,7 @@ fn test_primitive_comparison_paths_preserve_semantics_and_encoding(
         PrimitiveComparisonPath::Row => assert!(actual.as_opt::<ScalarFn>().is_some()),
         PrimitiveComparisonPath::Auto => unreachable!(),
     }
+
     Ok(())
 }
 

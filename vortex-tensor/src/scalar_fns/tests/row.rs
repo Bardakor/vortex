@@ -12,11 +12,11 @@ use vortex_array::dtype::NativePType;
 use vortex_array::dtype::PType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::InitializedElement;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
-use vortex_array::scalar_fn::UninitElementSink;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_array::validity::Validity;
 use vortex_error::VortexResult;
 use vortex_session::registry::CachedId;
@@ -36,6 +36,7 @@ impl RowFn for L1Norm {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["input"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("vortex.test.l1_norm");

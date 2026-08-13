@@ -7,9 +7,8 @@
 //! propagation without prescribing how a kernel represents geometries or builds its output.
 //! Native columnar kernels such as `ST_MakeLine` use these dispatchers directly.
 //!
-//! [`execute_unary_geo_types`] is a convenience adapter for row-oriented algorithms from the `geo`
-//! ecosystem. It decodes valid inputs into `geo_types::Geometry`; the final output is still a
-//! Vortex [`ArrayRef`], such as an `f64` array.
+//! [`execute_unary_geo_types`] adapts row-oriented algorithms from the `geo` ecosystem. It decodes
+//! valid inputs into `geo_types::Geometry`; the final output is still a Vortex [`ArrayRef`].
 
 mod binary;
 mod geo_types;

@@ -87,9 +87,13 @@ fn like_regex(bencher: Bencher) {
     bench_like(bencher, "h_llo%w%d", LikeOptions::default());
 }
 
-fn bench_per_row_patterns(bencher: Bencher, patterns: ArrayRef) {
+#[divan::bench]
+fn like_per_row_patterns(bencher: Bencher) {
     let session = vortex_array::array_session();
     let array = strings();
+    // A non-constant pattern child takes the per-row path; repeated patterns hit the
+    // compile cache.
+    let patterns = VarBinViewArray::from_iter_str((0..ARRAY_SIZE).map(|_| "hello%")).into_array();
     bencher
         .with_inputs(|| {
             (
@@ -103,43 +107,6 @@ fn bench_per_row_patterns(bencher: Bencher, patterns: ArrayRef) {
             )
         })
         .bench_values(|(array, mut ctx)| array.execute::<BoolArray>(&mut ctx).unwrap());
-}
-
-#[divan::bench]
-fn like_per_row_patterns(bencher: Bencher) {
-    // A non-constant pattern child takes the per-row path; repeated patterns hit the
-    // compile cache.
-    let patterns = VarBinViewArray::from_iter_str((0..ARRAY_SIZE).map(|_| "hello%")).into_array();
-    bench_per_row_patterns(bencher, patterns);
-}
-
-/// The per-row path with the compile cache hit on every row, carrying the infix pattern that
-/// [`like_per_row_distinct_patterns`] varies. Both compile the same shape and match the same way,
-/// so the only difference between them is how often a pattern is compiled.
-#[divan::bench]
-fn like_per_row_repeated_patterns(bencher: Bencher) {
-    let patterns = VarBinViewArray::from_iter_str((0..ARRAY_SIZE).map(|_| "%aaa%")).into_array();
-    bench_per_row_patterns(bencher, patterns);
-}
-
-/// The per-row path with the compile cache defeated: every row carries a distinct pattern of the
-/// same shape, so each row pays one [`LikePattern`] compilation.
-///
-/// Paired with [`like_per_row_repeated_patterns`] this isolates the cost of compiling a pattern from
-/// the cost of matching against it, which is what any kernel that cannot cache across rows pays.
-#[divan::bench]
-fn like_per_row_distinct_patterns(bencher: Bencher) {
-    let patterns = VarBinViewArray::from_iter_str(
-        (0..ARRAY_SIZE).map(|i| format!("%{}%", distinct_trigram(i))),
-    )
-    .into_array();
-    bench_per_row_patterns(bencher, patterns);
-}
-
-/// A distinct three-letter lowercase infix for each index below 26³.
-fn distinct_trigram(i: usize) -> String {
-    let letter = |place: usize| char::from(b'a' + u8::try_from((i / place) % 26).unwrap());
-    [letter(1), letter(26), letter(26 * 26)].iter().collect()
 }
 
 #[divan::bench]

@@ -7,19 +7,24 @@ use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::array_session;
+use vortex_array::arrays::ChunkedArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::StructArray;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::field_path;
+use vortex_array::session::ArraySessionExt;
 use vortex_array::stream::ArrayStreamExt;
 use vortex_btrblocks::BtrBlocksCompressorBuilder;
 use vortex_buffer::ByteBufferMut;
+use vortex_edition::ComponentKind;
 use vortex_edition::Edition;
 use vortex_edition::EditionDeclaration;
 use vortex_edition::EditionError;
 use vortex_edition::EditionId;
+use vortex_edition::EditionInclusion;
+use vortex_edition::EditionMember;
 use vortex_edition::EditionSession;
 use vortex_edition::EditionSessionExt;
 use vortex_edition::test_harness::validate_edition;
@@ -35,6 +40,7 @@ use vortex_layout::layouts::flat::writer::FlatLayoutStrategy;
 use vortex_layout::session::LayoutSession;
 use vortex_sequence::Sequence;
 use vortex_session::VortexSession;
+use vortex_session::registry::Id;
 use vortex_utils::aliases::hash_set::HashSet;
 
 use super::CORE_2025_05_0;
@@ -68,10 +74,10 @@ fn every_declared_edition_validates() -> Result<(), EditionError> {
 #[test]
 fn core_2026_07_encoding_set_is_pinned() {
     let session = session().unwrap_or_else(|e| panic!("registering editions: {e}"));
-    let encodings = session.encodings_in(&CORE_2026_07_0);
+    let encodings = session.components_in(&CORE_2026_07_0, ComponentKind::Array);
     let ids: Vec<&str> = encodings
         .iter()
-        .map(|inclusion| inclusion.encoding_id.as_str())
+        .map(|inclusion| inclusion.component_id.as_str())
         .collect();
     assert_eq!(
         ids,
@@ -115,16 +121,16 @@ fn core_2026_07_encoding_set_is_pinned() {
 fn encodings_in_editions_unions_families() {
     let session = session().unwrap_or_else(|e| panic!("registering editions: {e}"));
     let core_only: Vec<_> = session
-        .encodings_in(&CORE_2026_07_0)
+        .components_in(&CORE_2026_07_0, ComponentKind::Array)
         .into_iter()
-        .map(|inclusion| inclusion.encoding_id)
+        .map(|inclusion| inclusion.component_id)
         .collect();
     let mut both = core_only.clone();
     both.extend(
         session
-            .encodings_in(&UNSTABLE_2026_06_0)
+            .components_in(&UNSTABLE_2026_06_0, ComponentKind::Array)
             .into_iter()
-            .map(|inclusion| inclusion.encoding_id),
+            .map(|inclusion| inclusion.component_id),
     );
     both.sort_unstable();
     both.dedup();
@@ -138,12 +144,12 @@ fn encodings_in_editions_unions_families() {
 #[test]
 fn earlier_editions_are_subsets() {
     let session = session().unwrap_or_else(|e| panic!("registering editions: {e}"));
-    let first = session.encodings_in(&CORE_2025_05_0);
-    let latest = session.encodings_in(&CORE_2026_08);
+    let first = session.components_in(&CORE_2025_05_0, ComponentKind::Array);
+    let latest = session.components_in(&CORE_2026_08, ComponentKind::Array);
     assert!(first.iter().all(|inclusion| {
         latest
             .iter()
-            .any(|latest| latest.encoding_id == inclusion.encoding_id)
+            .any(|latest| latest.component_id == inclusion.component_id)
     }));
     assert!(first.len() < latest.len());
 }
@@ -170,13 +176,97 @@ fn core_edition_ids_are_registered_array_encodings() {
 
     let session = VortexSession::default();
     let registry = session.arrays().registry().clone();
-    for inclusion in session.editions().encodings_in(&CORE_2026_08) {
+    for inclusion in session
+        .editions()
+        .components_in(&CORE_2026_08, ComponentKind::Array)
+    {
         assert!(
-            registry.contains_key(&inclusion.encoding_id),
+            registry.contains_key(&inclusion.component_id),
             "{} is declared in core but not registered as an array encoding",
-            inclusion.encoding_id
+            inclusion.component_id
         );
     }
+}
+
+/// A declared aggregate that no longer resolves would fail every write that records it, since
+/// aggregates outside the enabled editions are rejected rather than dropped.
+#[test]
+fn core_aggregate_ids_are_registered_aggregate_fns() {
+    use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
+
+    use crate::VortexSessionDefault;
+
+    let session = VortexSession::default();
+    let declared = session
+        .editions()
+        .components_in(&CORE_2026_08, ComponentKind::Aggregate);
+    assert!(
+        declared
+            .iter()
+            .any(|inclusion| inclusion.component_id.as_str() == "vortex.min")
+    );
+    for inclusion in declared {
+        assert!(
+            session
+                .aggregate_fns()
+                .find_plugin(&inclusion.component_id)
+                .is_some(),
+            "{} is declared in core but not registered as an aggregate function",
+            inclusion.component_id
+        );
+    }
+}
+
+/// The default session enables an edition declaring aggregates, which arms the writer's
+/// aggregate filter. The declared set must therefore cover every aggregate the default zone
+/// maps record, for every dtype, or ordinary writes fail.
+#[tokio::test]
+async fn default_session_writes_every_default_zone_aggregate() -> VortexResult<()> {
+    use crate::VortexSessionDefault;
+
+    let session = VortexSession::default();
+    // Strings take the bounded min/max branch of the default aggregates, integers the plain
+    // min/max branch, so one file exercises both.
+    let strings = || {
+        vortex_array::arrays::VarBinViewArray::from_iter_str((0..4096).map(|i| format!("row-{i}")))
+            .into_array()
+    };
+    let array = StructArray::from_fields(&[
+        ("numbers", sequential_integers().into_array()),
+        (
+            "strings",
+            ChunkedArray::from_iter((0..16).map(|_| strings())).into_array(),
+        ),
+    ])?
+    .into_array();
+
+    let mut buffer = ByteBufferMut::empty();
+    session
+        .write_options()
+        .write(&mut buffer, array.to_array_stream())
+        .await?;
+
+    // The write succeeding is not enough: a file with no zone maps at all would also succeed.
+    // Every zone map names its aggregates in the stats table's field names.
+    let file = session.open_options().open_buffer(buffer)?;
+    let mut zone_stat_names = Vec::new();
+    let mut stack = vec![file.footer().layout().to_layout()];
+    while let Some(layout) = stack.pop() {
+        let children = layout.children()?;
+        if layout.encoding_id().as_str() == "vortex.zoned"
+            && let Some(DType::Struct(fields, _)) = children.get(1).map(|zones| zones.dtype())
+        {
+            zone_stat_names.extend(fields.names().iter().map(|name| name.to_string()));
+        }
+        stack.extend(children);
+    }
+    for aggregate in ["vortex.min", "vortex.max", "vortex.bounded_min"] {
+        assert!(
+            zone_stat_names.iter().any(|name| name.contains(aggregate)),
+            "no {aggregate} zone stat in {zone_stat_names:?}"
+        );
+    }
+    Ok(())
 }
 
 fn baseline_core_session() -> VortexResult<VortexSession> {
@@ -201,10 +291,10 @@ static WRITER_TEST_DECLARATION: EditionDeclaration = EditionDeclaration {
         min_vortex_version: None,
     },
     added: &[
-        &"vortex.chunked",
-        &"vortex.constant",
-        &"vortex.primitive",
-        &"vortex.struct",
+        EditionMember::array(&"vortex.chunked"),
+        EditionMember::array(&"vortex.constant"),
+        EditionMember::array(&"vortex.primitive"),
+        EditionMember::array(&"vortex.struct"),
     ],
 };
 
@@ -221,6 +311,102 @@ fn writer_test_session() -> VortexResult<VortexSession> {
         .enable_edition(WRITER_TEST_EDITION)
         .map_err(|error| vortex_err!("{error}"))?;
     Ok(session)
+}
+
+/// Write `array` with `session` and return the buffer, or the error the writer raised.
+async fn write_with(session: &VortexSession, array: ArrayRef) -> VortexResult<ByteBufferMut> {
+    let mut buffer = ByteBufferMut::empty();
+    session
+        .write_options()
+        .write(&mut buffer, array.to_array_stream())
+        .await?;
+    Ok(buffer)
+}
+
+/// The layout encodings a written file actually contains, depth first.
+fn written_layout_ids(session: &VortexSession, buffer: ByteBufferMut) -> VortexResult<Vec<Id>> {
+    let file = session.open_options().open_buffer(buffer)?;
+    let mut ids = Vec::new();
+    let mut stack = vec![file.footer().layout().to_layout()];
+    while let Some(layout) = stack.pop() {
+        ids.push(layout.encoding_id());
+        stack.extend(layout.children()?);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// A session enabling a draft edition that declares every registered array, plus the given
+/// members of other kinds.
+fn session_declaring(members: &[(ComponentKind, Id)]) -> VortexResult<VortexSession> {
+    const EDITION: EditionId = EditionId::new("kind-test", 2026, 8, 0);
+
+    let session = array_session()
+        .with::<EditionSession>()
+        .with::<LayoutSession>()
+        .with::<RuntimeSession>();
+    vortex_file::register_default_encodings(&session);
+    let editions = session.editions();
+    editions
+        .declare_edition(Edition {
+            id: EDITION,
+            min_vortex_version: None,
+        })
+        .map_err(|error| vortex_err!("{error}"))?;
+    for inclusion in session
+        .arrays()
+        .registry()
+        .read(|map| map.keys().copied().collect::<Vec<_>>())
+        .iter()
+        .map(|id| EditionInclusion::array(id, EDITION))
+        .chain(
+            members
+                .iter()
+                .map(|(kind, id)| EditionInclusion::new(*kind, id, EDITION)),
+        )
+    {
+        editions
+            .declare_inclusion(inclusion)
+            .map_err(|error| vortex_err!("{error}"))?;
+    }
+    session
+        .enable_edition(EDITION)
+        .map_err(|error| vortex_err!("{error}"))?;
+    Ok(session)
+}
+
+/// A kind with no declared members is unrestricted, and declaring the layouts a write emits
+/// permits it; declaring only some of them fails the write instead of silently writing a
+/// layout an older reader could not decode.
+#[tokio::test]
+async fn writer_restricts_layouts_to_the_enabled_editions() -> VortexResult<()> {
+    let array = sequential_integers().into_array();
+
+    // No layout members declared: the layout filter stays disarmed.
+    let session = session_declaring(&[])?;
+    let written = written_layout_ids(&session, write_with(&session, array.clone()).await?)?;
+    assert!(written.len() > 1, "expected a layout tree, got {written:?}");
+
+    // Declaring every layout the write emits permits exactly the same file.
+    let members: Vec<_> = written
+        .iter()
+        .map(|id| (ComponentKind::Layout, *id))
+        .collect();
+    let session = session_declaring(&members)?;
+    write_with(&session, array.clone()).await?;
+
+    // Dropping one of them fails the write at the layout it may not emit.
+    let session = session_declaring(&members[1..])?;
+    let error = write_with(&session, array)
+        .await
+        .err()
+        .ok_or_else(|| vortex_err!("write emitted layout {} outside its edition", written[0]))?;
+    assert!(
+        error.to_string().contains("not permitted by ctx"),
+        "unexpected error: {error}"
+    );
+    Ok(())
 }
 
 fn forbidden_sequence(len: usize) -> VortexResult<ArrayRef> {
@@ -282,7 +468,10 @@ async fn assert_round_trip_encodings_are_enabled(
         .depth_first_traversal()
         .map(|array| array.encoding_id())
         .collect();
-    let allowed: HashSet<_> = session.enabled_encoding_ids().into_iter().collect();
+    let allowed: HashSet<_> = session
+        .enabled_component_ids(ComponentKind::Array)
+        .into_iter()
+        .collect();
     let mut forbidden: Vec<_> = actual.difference(&allowed).map(|id| id.as_str()).collect();
     forbidden.sort_unstable();
     if !forbidden.is_empty() {
@@ -421,7 +610,10 @@ async fn default_writer_filters_compressor_to_enabled_editions() -> VortexResult
 #[tokio::test]
 async fn configured_btrblocks_builder_uses_enabled_editions_in_either_order() -> VortexResult<()> {
     let session = baseline_core_session()?;
-    let allowed: HashSet<_> = session.enabled_encoding_ids().into_iter().collect();
+    let allowed: HashSet<_> = session
+        .enabled_component_ids(ComponentKind::Array)
+        .into_iter()
+        .collect();
     let strategies = [
         WriteStrategyBuilder::default()
             .with_btrblocks_builder(BtrBlocksCompressorBuilder::default())
@@ -451,7 +643,10 @@ async fn configured_btrblocks_builder_uses_enabled_editions_in_either_order() ->
 #[tokio::test]
 async fn opaque_compressor_cannot_write_outside_enabled_editions() -> VortexResult<()> {
     let session = baseline_core_session()?;
-    let allowed = session.enabled_encoding_ids().into_iter().collect();
+    let allowed = session
+        .enabled_component_ids(ComponentKind::Array)
+        .into_iter()
+        .collect();
     let strategy = WriteStrategyBuilder::default()
         .with_compressor(BtrBlocksCompressorBuilder::default().build())
         .with_allow_encodings(allowed)

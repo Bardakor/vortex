@@ -14,6 +14,7 @@ use vortex_array::arrays::fixed_size_list::FixedSizeListArrayExt;
 use vortex_array::arrays::fixed_size_list::FixedSizeListArraySlotsExt;
 use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
+use vortex_array::dtype::NativePType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::fns::operators::Operator;
@@ -23,7 +24,6 @@ use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 
 use crate::matcher::AnyTensor;
-use crate::utils::build_tensor_array;
 use crate::utils::extract_flat_elements;
 use crate::utils::unit_norm_tolerance;
 
@@ -111,6 +111,26 @@ fn denormalize_constant_norms(
     let storage = unsafe {
         FixedSizeListArray::new_unchecked(elements, storage.list_size(), validity, storage.len())
     };
+
+    Ok(ExtensionArray::new(dtype.as_extension().clone(), storage.into_array()).into_array())
+}
+
+/// Rebuilds a tensor-like extension array from flat primitive elements.
+fn build_tensor_array<T: NativePType>(
+    dtype: DType,
+    tensor_flat_size: usize,
+    row_count: usize,
+    validity: Validity,
+    elements: Buffer<T>,
+) -> VortexResult<ArrayRef> {
+    let list_size =
+        u32::try_from(tensor_flat_size).vortex_expect("tensor flat size must fit into `u32`");
+
+    // SAFETY: Tensor elements are always non-nullable, so the validity carries no length.
+    let elements = unsafe { PrimitiveArray::new_unchecked(elements, Validity::NonNullable) };
+
+    let storage =
+        FixedSizeListArray::try_new(elements.into_array(), list_size, validity, row_count)?;
 
     Ok(ExtensionArray::new(dtype.as_extension().clone(), storage.into_array()).into_array())
 }

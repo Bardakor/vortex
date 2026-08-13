@@ -132,12 +132,6 @@ Notes:
 Avoid hidden-cost per-element accessors in hot loops, follow the performance guidance in
 `STYLE.md`, and benchmark changes to hot paths.
 
-Treat branchless indexing as a code-generation hypothesis, not as an optimization by itself. A
-runtime expression such as `index & mask` can make a slice index non-affine, retain bounds checks,
-and block vectorization. Inspect generated code before replacing a loop-invariant enum match because
-LLVM can unswitch the match into specialized loops. For binary kernels, benchmark varying x varying,
-varying x constant, constant x varying, and nullable constant shapes separately.
-
 ## Tests
 
 - Strongly consider `rstest` cases when parameterizing repetitive test logic.

@@ -18,13 +18,13 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::InitializedElement;
-use vortex_array::scalar_fn::RowExecution;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::TypedScalarFnInstance;
-use vortex_array::scalar_fn::UninitElementSink;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::RowExecution;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
@@ -85,6 +85,7 @@ impl RowFn for CosineSimilarity {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("vortex.tensor.cosine_similarity");
@@ -114,7 +115,7 @@ impl RowFn for CosineSimilarity {
                 |(lhs, rhs)| {
                     #[cfg(test)]
                     probe::record(lhs.is_some(), rhs.is_some());
-                    ConstNorms {
+                    ConstantNorms {
                         lhs: lhs.map(l2_norm_row),
                         rhs: rhs.map(l2_norm_row),
                     }
@@ -132,7 +133,7 @@ impl RowFn for CosineSimilarity {
         })
     }
 
-    /// [`Normalized`]-encoded operands make the *stored* norms and normalized children
+    /// [`Normalized`]-encoded operands make the _stored_ norms and normalized children
     /// authoritative: `cos(D(x, s), D(y, t)) = dot(x, y)` and `cos(D(x, s), y) = dot(x, y) /
     /// ||y||`, in both cases forced to `0.0` on rows where any authoritative norm is `0.0` (even
     /// for lossy children whose decoded coordinates are nonzero).
@@ -193,7 +194,7 @@ impl ScalarFnArrayVTable for CosineSimilarity {
 /// every row too. Computing it in the prepare step hoists an `O(width)` pass and a `sqrt` per row
 /// out of the row loop. `None` marks an operand that varies by row, whose norm the row closure
 /// computes exactly as it did before the hoist.
-struct ConstNorms<T> {
+struct ConstantNorms<T> {
     /// The norm of the lhs when it is batch-constant.
     lhs: Option<T>,
 
@@ -209,36 +210,36 @@ struct ConstNorms<T> {
 /// hoisted or not. The match costs one predictable branch per row: the arm is the same for the
 /// whole batch.
 fn cosine_similarity_row_prepared<T: Float + NativePType>(
-    norms: &ConstNorms<T>,
-    a: &[T],
-    b: &[T],
+    norms: &ConstantNorms<T>,
+    lhs: &[T],
+    rhs: &[T],
 ) -> T {
     match (norms.lhs, norms.rhs) {
-        (None, None) => cosine_similarity_row(a, b),
-        (Some(norm_a), None) => {
+        (None, None) => cosine_similarity_row(lhs, rhs),
+        (Some(lhs_norm), None) => {
             let mut dot = T::zero();
-            let mut norm_sq_b = T::zero();
-            for (&x, &y) in a.iter().zip(b.iter()) {
-                dot = dot + x * y;
-                norm_sq_b = norm_sq_b + y * y;
+            let mut rhs_norm_squared = T::zero();
+            for (&lhs_element, &rhs_element) in lhs.iter().zip(rhs) {
+                dot = dot + lhs_element * rhs_element;
+                rhs_norm_squared = rhs_norm_squared + rhs_element * rhs_element;
             }
-            cosine_from_parts(dot, norm_a * norm_sq_b.sqrt())
+            cosine_from_parts(dot, lhs_norm * rhs_norm_squared.sqrt())
         }
-        (None, Some(norm_b)) => {
+        (None, Some(rhs_norm)) => {
             let mut dot = T::zero();
-            let mut norm_sq_a = T::zero();
-            for (&x, &y) in a.iter().zip(b.iter()) {
-                dot = dot + x * y;
-                norm_sq_a = norm_sq_a + x * x;
+            let mut lhs_norm_squared = T::zero();
+            for (&lhs_element, &rhs_element) in lhs.iter().zip(rhs) {
+                dot = dot + lhs_element * rhs_element;
+                lhs_norm_squared = lhs_norm_squared + lhs_element * lhs_element;
             }
-            cosine_from_parts(dot, norm_sq_a.sqrt() * norm_b)
+            cosine_from_parts(dot, lhs_norm_squared.sqrt() * rhs_norm)
         }
-        (Some(norm_a), Some(norm_b)) => {
+        (Some(lhs_norm), Some(rhs_norm)) => {
             let mut dot = T::zero();
-            for (&x, &y) in a.iter().zip(b.iter()) {
-                dot = dot + x * y;
+            for (&lhs_element, &rhs_element) in lhs.iter().zip(rhs) {
+                dot = dot + lhs_element * rhs_element;
             }
-            cosine_from_parts(dot, norm_a * norm_b)
+            cosine_from_parts(dot, lhs_norm * rhs_norm)
         }
     }
 }
@@ -246,31 +247,31 @@ fn cosine_similarity_row_prepared<T: Float + NativePType>(
 /// Computes the cosine similarity of two equal-length float slices.
 ///
 /// Returns `dot(a, b) / (||a|| * ||b||)`, or `0.0` when either norm is zero.
-fn cosine_similarity_row<T: Float + NativePType>(a: &[T], b: &[T]) -> T {
+fn cosine_similarity_row<T: Float + NativePType>(lhs: &[T], rhs: &[T]) -> T {
     let mut dot = T::zero();
-    let mut norm_sq_a = T::zero();
-    let mut norm_sq_b = T::zero();
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        dot = dot + x * y;
-        norm_sq_a = norm_sq_a + x * x;
-        norm_sq_b = norm_sq_b + y * y;
+    let mut lhs_norm_squared = T::zero();
+    let mut rhs_norm_squared = T::zero();
+    for (&lhs_element, &rhs_element) in lhs.iter().zip(rhs) {
+        dot = dot + lhs_element * rhs_element;
+        lhs_norm_squared = lhs_norm_squared + lhs_element * lhs_element;
+        rhs_norm_squared = rhs_norm_squared + rhs_element * rhs_element;
     }
 
-    cosine_from_parts(dot, norm_sq_a.sqrt() * norm_sq_b.sqrt())
+    cosine_from_parts(dot, lhs_norm_squared.sqrt() * rhs_norm_squared.sqrt())
 }
 
-/// The shared tail of every cosine arm: `dot / denom`, guarded to `0.0` when the denominator is
+/// The shared tail of every cosine arm: `dot / denominator`, guarded to `0.0` when it is
 /// zero.
-fn cosine_from_parts<T: Float>(dot: T, denom: T) -> T {
-    if denom == T::zero() {
+fn cosine_from_parts<T: Float>(dot: T, denominator: T) -> T {
+    if denominator == T::zero() {
         T::zero()
     } else {
-        dot / denom
+        dot / denominator
     }
 }
 
 /// Both sides are [`Normalized`]-encoded: the normalized children are authoritative, so their dot
-/// product is the cosine similarity, except that a row with a zero *stored* norm is a zero vector.
+/// product is the cosine similarity, except that a row with a zero _stored_ norm is a zero vector.
 ///
 /// Unlike [`InnerProduct::reduce_encoded`], which composes lazy `Mul` arrays over the norm columns,
 /// this executes and materializes. The zero-norm guard is a conditional per row rather than an

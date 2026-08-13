@@ -83,7 +83,7 @@ impl<A: IndexedSource, B: IndexedSource> IndexedSource for LaneZip<A, B> {
     }
     #[inline]
     unsafe fn get_unchecked(&self, i: usize) -> (A::Item, B::Item) {
-        // SAFETY: caller guarantees i < self.len(), and `new` enforces matching lengths.
+        // SAFETY: caller guarantees i < self.len(); `new` enforces matching lengths.
         unsafe { (self.0.get_unchecked(i), self.1.get_unchecked(i)) }
     }
 }

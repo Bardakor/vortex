@@ -4,17 +4,22 @@
 use rstest::rstest;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
 
 use super::*;
 use crate::Canonical;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
+use crate::array::Array;
 use crate::array_session;
+use crate::arrays::ConstantArray;
 use crate::arrays::ListViewArray;
 use crate::arrays::PrimitiveArray;
 use crate::assert_arrays_eq;
 use crate::dtype::DType;
+use crate::dtype::NativePType;
 use crate::dtype::Nullability;
+use crate::scalar::Scalar;
 use crate::validity::Validity;
 
 #[rstest]
@@ -52,6 +57,32 @@ fn test_canonical_dtype_matches_array_dtype() -> VortexResult<()> {
         .into_array()
         .execute::<Canonical>(&mut array_session().create_execution_ctx())?;
     assert_eq!(canonical.dtype(), array.dtype());
+    Ok(())
+}
+
+#[test]
+fn test_try_from_parts_rejects_null_child() -> VortexResult<()> {
+    let child = PrimitiveArray::from_iter([1_i64]).into_array();
+    let masked = MaskedArray::try_new(child, Validity::AllValid)?;
+    let mut parts = match masked.try_into_parts() {
+        Ok(parts) => parts,
+        Err(_) => vortex_bail!("the uniquely owned masked array must expose its parts"),
+    };
+    let dtype = DType::Primitive(i64::PTYPE, Nullability::Nullable);
+    parts.slots[MaskedSlots::CHILD] =
+        Some(ConstantArray::new(Scalar::null(dtype), parts.len).into_array());
+
+    let error = match Array::<Masked>::try_from_parts(parts) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("rebuilding must reject a child containing nulls"),
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("MaskedArray children must not have nulls"),
+        "unexpected error: {error}",
+    );
     Ok(())
 }
 

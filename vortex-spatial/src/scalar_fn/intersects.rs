@@ -11,12 +11,12 @@ use vortex_array::ArrayRef;
 use vortex_array::arrays::ScalarFnArray;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::InitializedElement;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::TypedScalarFnInstance;
-use vortex_array::scalar_fn::UninitElementSink;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_error::VortexResult;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
@@ -162,6 +162,7 @@ mod tests {
     use vortex_array::scalar_fn::EmptyOptions;
     use vortex_array::scalar_fn::ScalarFnVTable;
     use vortex_array::validity::Validity;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_buffer::BitBuffer;
     use vortex_error::VortexResult;
     use vortex_error::vortex_err;
@@ -209,7 +210,8 @@ mod tests {
         let mut buf = Vec::new();
         wkb::writer::write_geometry(&mut buf, geometry, &WriteOptions::default())
             .map_err(|e| vortex_err!("writing WKB failed: {e}"))?;
-        let scalar = crate::extension::native_geometry_scalar_from_wkb(&buf)?
+        let session = vortex_array::array_session();
+        let scalar = crate::extension::native_geometry_scalar_from_wkb(&buf, &session.arrow())?
             .ok_or_else(|| vortex_err!("unsupported geometry type"))?;
         Ok(ConstantArray::new(scalar, len).into_array())
     }

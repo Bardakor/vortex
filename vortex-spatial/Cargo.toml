@@ -22,9 +22,10 @@ geo-types = { workspace = true }
 geoarrow = { workspace = true }
 geoarrow-cast = { workspace = true }
 prost = { workspace = true }
-vortex-array = { workspace = true }
+vortex-array = { workspace = true, features = ["unstable_row_fns"] }
 vortex-arrow = { workspace = true }
 vortex-buffer = { workspace = true }
+vortex-edition = { workspace = true }
 vortex-error = { workspace = true }
 vortex-mask = { workspace = true }
 vortex-session = { workspace = true }
@@ -47,11 +48,11 @@ name = "envelope"
 harness = false
 
 [[bench]]
-name = "binary_predicates"
+name = "predicate_bbox"
 harness = false
 
 [[bench]]
-name = "predicate_bbox"
+name = "binary_predicates"
 harness = false
 
 [[bench]]
@@ -69,5 +70,14 @@ harness = false
 [[bench]]
 name = "length"
 harness = false
+
+[[bench]]
+name = "collect"
+harness = false
+
+[[bench]]
+name = "convex_hull"
+harness = false
+
 [lints]
 workspace = true

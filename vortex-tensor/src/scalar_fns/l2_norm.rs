@@ -20,13 +20,13 @@ use vortex_array::dtype::proto::dtype as pb;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::InitializedElement;
-use vortex_array::scalar_fn::RowExecution;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::TypedScalarFnInstance;
-use vortex_array::scalar_fn::UninitElementSink;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::RowExecution;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -80,6 +80,7 @@ impl RowFn for L2Norm {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["input"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("vortex.tensor.l2_norm");

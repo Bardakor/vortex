@@ -9739,6 +9739,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vortex-bench-support"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "vortex-btrblocks"
 version = "0.1.0"
 dependencies = [
@@ -9789,6 +9798,7 @@ dependencies = [
  "serde",
  "simdutf8",
  "tracing",
+ "vortex-bench-support",
  "vortex-error",
 ]
 
@@ -10225,6 +10235,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
+ "crossbeam-channel",
  "custom-labels",
  "futures",
  "glob",
@@ -10454,12 +10465,12 @@ dependencies = [
  "arrow-array 58.4.0",
  "arrow-data 58.4.0",
  "arrow-schema 58.4.0",
- "async-fs",
  "bytes",
  "itertools 0.14.0",
  "log",
  "object_store",
  "parking_lot",
+ "prost 0.14.4",
  "pyo3",
  "pyo3-bytes",
  "pyo3-log",
@@ -10606,6 +10617,7 @@ dependencies = [
  "vortex-array",
  "vortex-arrow",
  "vortex-buffer",
+ "vortex-edition",
  "vortex-error",
  "vortex-layout",
  "vortex-mask",

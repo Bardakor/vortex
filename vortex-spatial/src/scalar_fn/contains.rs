@@ -15,12 +15,12 @@ use vortex_array::ArrayRef;
 use vortex_array::arrays::ScalarFnArray;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::InitializedElement;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::TypedScalarFnInstance;
-use vortex_array::scalar_fn::UninitElementSink;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_error::VortexResult;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
@@ -371,6 +371,7 @@ mod tests {
     use vortex_array::scalar_fn::EmptyOptions;
     use vortex_array::scalar_fn::ScalarFnVTable;
     use vortex_array::validity::Validity;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_buffer::BitBuffer;
     use vortex_error::VortexResult;
     use vortex_error::vortex_err;
@@ -399,7 +400,8 @@ mod tests {
         let mut buf = Vec::new();
         wkb::writer::write_geometry(&mut buf, geometry, &WriteOptions::default())
             .map_err(|e| vortex_err!("writing WKB failed: {e}"))?;
-        let scalar = crate::extension::native_geometry_scalar_from_wkb(&buf)?
+        let session = vortex_array::array_session();
+        let scalar = crate::extension::native_geometry_scalar_from_wkb(&buf, &session.arrow())?
             .ok_or_else(|| vortex_err!("unsupported geometry type"))?;
         Ok(ConstantArray::new(scalar, len).into_array())
     }
@@ -803,7 +805,7 @@ mod tests {
     /// Every case is a containment geo answers `true`, which the test asserts: a pairing that is
     /// false regardless of route (a lower-dimensional container, say) also agrees regardless of
     /// route, and pins nothing. A true case fails when the prepared substitution diverges from
-    /// geo — a table row whose relate phrasing disagrees with geo's dispatch on this input, or a
+    /// geo: a table row whose relate phrasing disagrees with geo's dispatch on this input, or a
     /// bounding-rect prescreen that wrongly rejects a contained row. It is **not** a version
     /// tripwire: a geo release that reshuffles its dispatch stays green wherever relate and the
     /// direct algorithm agree, which is why the workspace pins `geo` exactly.

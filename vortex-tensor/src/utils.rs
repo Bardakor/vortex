@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Shared helpers for the tensor scalar functions.
+//! Shared helpers for tensor scalar functions.
 
 use half::f16;
 use num_traits::Float;
@@ -11,7 +11,6 @@ use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::arrays::Constant;
 use vortex_array::arrays::ConstantArray;
-use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::FixedSizeListArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::ScalarFn;
@@ -24,7 +23,6 @@ use vortex_array::dtype::NativePType;
 use vortex_array::dtype::PType;
 use vortex_array::dtype::proto::dtype as pb;
 use vortex_array::scalar_fn::ScalarFnVTable;
-use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -64,18 +62,17 @@ pub fn unit_norm_tolerance(element_ptype: PType, dimensions: usize) -> f64 {
     SAFETY_FACTOR as f64 * machine_epsilon * dimensions_root
 }
 
-/// The L2 norm of one row: `sqrt(sum(v_i^2))`. A zero-length or all-zero row gives `0.0`.
+/// Computes `sqrt(sum(v_i^2))` for one row. An empty or all-zero row produces `0.0`.
 ///
-/// Shared by `l2_norm` and by cosine similarity's hoisted constant norm. The accumulation order is
-/// part of the contract rather than an implementation detail: cosine's prepared and per-row arms
-/// must agree bit for bit, which only holds while both sum in this order. Keeping one copy is what
-/// stops the two drifting apart.
-pub(crate) fn l2_norm_row<T: Float + NativePType>(v: &[T]) -> T {
-    let mut sum_sq = T::zero();
-    for &x in v {
-        sum_sq = sum_sq + x * x;
+/// L2 norm and cosine similarity share this implementation so prepared constant norms use the
+/// same accumulation order as rows from per-row inputs.
+pub(crate) fn l2_norm_row<T: Float + NativePType>(row: &[T]) -> T {
+    let mut sum_squared = T::zero();
+    for &element in row {
+        sum_squared = sum_squared + element * element;
     }
-    sum_sq.sqrt()
+
+    sum_squared.sqrt()
 }
 
 /// Extracts the `(normalized, norms)` children of a [`Normalized`]-encoded array.
@@ -117,19 +114,151 @@ pub fn validate_tensor_float_input(input_dtype: &DType) -> VortexResult<TensorMa
     Ok(tensor_match)
 }
 
-/// Validates that all arguments of an N-ary tensor-like operator share the same float tensor
-/// dtype (ignoring top-level nullability), returning the shared [`TensorMatch`].
+/// Validates that every argument has the same float tensor dtype, ignoring nullability.
 pub fn validate_tensor_float_inputs(args: &[DType]) -> VortexResult<TensorMatch<'_>> {
     let (first, rest) = args
         .split_first()
         .ok_or_else(|| vortex_err!("tensor expression expects at least one input"))?;
+
     for arg in rest {
         vortex_ensure!(
             first.eq_ignore_nullability(arg),
             "tensor expression expects inputs to have the same dtype, got {first} and {arg}"
         );
     }
+
     validate_tensor_float_input(first)
+}
+
+/// The flat primitive elements of a tensor storage array, with typed row access.
+///
+/// This struct hides the stride detail that arises from the [`ConstantArray`] optimization: a
+/// constant-backed input materializes only a single row that every index reads (`is_constant =
+/// true`), while a full array stores one row per index.
+pub struct FlatElements {
+    elems: PrimitiveArray,
+    list_size: usize,
+    is_constant: bool,
+}
+
+impl FlatElements {
+    /// Returns the [`PType`] of the underlying elements.
+    #[must_use]
+    pub fn ptype(&self) -> PType {
+        self.elems.ptype()
+    }
+
+    /// Returns the `i`-th row as a typed slice of length `list_size`.
+    ///
+    /// When the source was a constant-backed storage, all indices resolve to the single stored
+    /// row.
+    #[must_use]
+    pub fn row<T: NativePType>(&self, i: usize) -> &[T] {
+        let row_idx = if self.is_constant { 0 } else { i };
+        let slice = self.elems.as_slice::<T>();
+        &slice[row_idx * self.list_size..][..self.list_size]
+    }
+
+    /// Returns the number of elements in each row.
+    #[must_use]
+    pub fn list_size(&self) -> usize {
+        self.list_size
+    }
+
+    /// Returns the physical distance between rows, or zero when every row uses one stored value.
+    #[must_use]
+    pub fn row_stride(&self) -> usize {
+        if self.is_constant { 0 } else { self.list_size }
+    }
+
+    /// Returns the elements as a typed buffer, performing the ptype check once for the batch.
+    pub fn into_buffer<T: NativePType>(self) -> Buffer<T> {
+        self.elems.into_buffer::<T>()
+    }
+}
+
+/// Extracts the flat primitive elements from a tensor storage array (FixedSizeList).
+///
+/// When the input is a [`ConstantArray`] (e.g., a literal query vector), only a single row is
+/// materialized to avoid expanding it to the full column length. Callers that have already
+/// confirmed the storage is constant-backed should prefer [`extract_constant_flat_row`].
+pub fn extract_flat_elements(
+    storage: &ArrayRef,
+    list_size: usize,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<FlatElements> {
+    // Constant-backed storage: materialize just the single stored row so canonicalization does
+    // not expand the array to the full column length.
+    let (source, is_constant) = if let Some(constant) = storage.as_opt::<Constant>() {
+        let single = ConstantArray::new(constant.scalar().clone(), 1).into_array();
+        (single, true)
+    } else {
+        (storage.clone(), false)
+    };
+
+    let fsl: FixedSizeListArray = source.execute(ctx)?;
+    let elems: PrimitiveArray = fsl.elements().clone().execute(ctx)?;
+    vortex_ensure!(
+        !elems.nullability().is_nullable(),
+        "tensor storage elements must be non-nullable, got {}",
+        elems.dtype(),
+    );
+    Ok(FlatElements {
+        elems,
+        list_size,
+        is_constant,
+    })
+}
+
+/// The single stored row of a constant-backed tensor storage array.
+///
+/// Contrast with [`FlatElements`], which exposes arbitrary row indices: a `FlatRow` statically
+/// encodes "there is exactly one row available," so call sites that have gated on a constant input
+/// read the row via [`Self::as_slice`] instead of `row(0)`.
+pub struct FlatRow {
+    elems: PrimitiveArray,
+}
+
+impl FlatRow {
+    /// Returns the [`PType`] of the underlying elements.
+    #[must_use]
+    pub fn ptype(&self) -> PType {
+        self.elems.ptype()
+    }
+
+    /// Returns the stored row as a typed slice. Its length equals the storage scalar's
+    /// fixed-size-list size.
+    #[must_use]
+    pub fn as_slice<T: NativePType>(&self) -> &[T] {
+        self.elems.as_slice::<T>()
+    }
+}
+
+/// Extracts the single stored row from a [`Constant`]-backed tensor storage array.
+///
+/// The caller must have confirmed that `storage` is a [`Constant`] encoding whose scalar is a
+/// non-null fixed-size list. This is the fast path for constant query vectors: exactly one row is
+/// materialized regardless of the column length.
+///
+/// # Panics
+///
+/// Panics if `storage` is not a [`Constant`] encoding.
+pub fn extract_constant_flat_row(
+    storage: &ArrayRef,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<FlatRow> {
+    let constant = storage
+        .as_opt::<Constant>()
+        .vortex_expect("extract_constant_flat_row requires Constant-backed storage");
+    let single = ConstantArray::new(constant.scalar().clone(), 1).into_array();
+    let fsl: FixedSizeListArray = single.execute(ctx)?;
+    let elems: PrimitiveArray = fsl.elements().clone().execute(ctx)?;
+    vortex_ensure!(
+        !elems.nullability().is_nullable(),
+        "tensor storage elements must be non-nullable, got {}",
+        elems.dtype(),
+    );
+    Ok(FlatRow { elems })
 }
 
 /// Metadata for a serialized binary tensor-op array (shared by [`InnerProduct`] and
@@ -189,166 +318,6 @@ impl BinaryTensorOpMetadata {
         let rhs = children.get(1, &rhs_dtype, len)?;
         Ok(vec![lhs, rhs])
     }
-}
-
-/// The flat primitive elements of a tensor storage array, with typed row access.
-///
-/// This struct hides the stride detail that arises from the [`ConstantArray`] optimization: a
-/// constant-backed input materializes only a single row that every index reads (`is_constant =
-/// true`), while a full array stores one row per index.
-pub struct FlatElements {
-    elems: PrimitiveArray,
-    list_size: usize,
-    is_constant: bool,
-}
-
-impl FlatElements {
-    /// Returns the [`PType`] of the underlying elements.
-    #[must_use]
-    pub fn ptype(&self) -> PType {
-        self.elems.ptype()
-    }
-
-    /// Returns the `i`-th row as a typed slice of length `list_size`.
-    ///
-    /// When the source was a constant-backed storage, all indices resolve to the single stored
-    /// row.
-    ///
-    /// This re-derives the typed slice on every call, which costs a ptype check and a buffer
-    /// downcast per row. A caller reading every row in a loop should take [`into_buffer`](Self::into_buffer)
-    /// instead and pay that once.
-    #[must_use]
-    pub fn row<T: NativePType>(&self, i: usize) -> &[T] {
-        let row_idx = if self.is_constant { 0 } else { i };
-        let slice = self.elems.as_slice::<T>();
-        &slice[row_idx * self.list_size..][..self.list_size]
-    }
-
-    /// Elements per row.
-    #[must_use]
-    pub fn list_size(&self) -> usize {
-        self.list_size
-    }
-
-    /// The row stride: `list_size` for a full column, and `0` for constant-backed storage, whose
-    /// single materialized row every index reads.
-    #[must_use]
-    pub fn row_stride(&self) -> usize {
-        if self.is_constant { 0 } else { self.list_size }
-    }
-
-    /// The elements as a typed buffer, checking the ptype once instead of once per row.
-    pub fn into_buffer<T: NativePType>(self) -> Buffer<T> {
-        self.elems.into_buffer::<T>()
-    }
-}
-
-/// Rebuilds a tensor-like extension array from flat primitive elements.
-///
-/// # Errors
-///
-/// Returns an error if `elements` does not hold exactly `tensor_flat_size * row_count` values.
-pub(crate) fn build_tensor_array<T: NativePType>(
-    dtype: DType,
-    tensor_flat_size: usize,
-    row_count: usize,
-    validity: Validity,
-    elements: Buffer<T>,
-) -> VortexResult<ArrayRef> {
-    let list_size =
-        u32::try_from(tensor_flat_size).vortex_expect("tensor flat size must fit into `u32`");
-
-    // SAFETY: Tensor elements are always non-nullable, so the validity carries no length.
-    let elements = unsafe { PrimitiveArray::new_unchecked(elements, Validity::NonNullable) };
-
-    let storage =
-        FixedSizeListArray::try_new(elements.into_array(), list_size, validity, row_count)?;
-
-    Ok(ExtensionArray::new(dtype.as_extension().clone(), storage.into_array()).into_array())
-}
-
-/// Extracts the flat primitive elements from a tensor storage array (FixedSizeList).
-///
-/// When the input is a [`ConstantArray`] (e.g., a literal query vector), only a single row is
-/// materialized to avoid expanding it to the full column length. Callers that have already
-/// confirmed the storage is constant-backed should prefer [`extract_constant_flat_row`].
-pub fn extract_flat_elements(
-    storage: &ArrayRef,
-    list_size: usize,
-    ctx: &mut ExecutionCtx,
-) -> VortexResult<FlatElements> {
-    // Constant-backed storage: materialize just the single stored row so canonicalization does
-    // not expand the array to the full column length.
-    let (source, is_constant) = if let Some(constant) = storage.as_opt::<Constant>() {
-        let single = ConstantArray::new(constant.scalar().clone(), 1).into_array();
-        (single, true)
-    } else {
-        (storage.clone(), false)
-    };
-
-    let fsl: FixedSizeListArray = source.execute(ctx)?;
-    let elems: PrimitiveArray = fsl.elements().clone().execute(ctx)?;
-    let dtype = elems.dtype();
-    vortex_ensure!(
-        !elems.nullability().is_nullable(),
-        "tensor storage elements must be non-nullable, got {dtype}",
-    );
-    Ok(FlatElements {
-        elems,
-        list_size,
-        is_constant,
-    })
-}
-
-/// The single stored row of a constant-backed tensor storage array.
-///
-/// Contrast with [`FlatElements`], which exposes arbitrary row indices: a `FlatRow` statically
-/// encodes "there is exactly one row available," so call sites that have gated on a constant input
-/// read the row via [`Self::as_slice`] instead of `row(0)`.
-pub struct FlatRow {
-    elems: PrimitiveArray,
-}
-
-impl FlatRow {
-    /// Returns the [`PType`] of the underlying elements.
-    #[must_use]
-    pub fn ptype(&self) -> PType {
-        self.elems.ptype()
-    }
-
-    /// Returns the stored row as a typed slice. Its length equals the storage scalar's
-    /// fixed-size-list size.
-    #[must_use]
-    pub fn as_slice<T: NativePType>(&self) -> &[T] {
-        self.elems.as_slice::<T>()
-    }
-}
-
-/// Extracts the single stored row from a [`Constant`]-backed tensor storage array.
-///
-/// The caller must have confirmed that `storage` is a [`Constant`] encoding whose scalar is a
-/// non-null fixed-size list. This is the fast path for constant query vectors: exactly one row is
-/// materialized regardless of the column length.
-///
-/// # Panics
-///
-/// Panics if `storage` is not a [`Constant`] encoding.
-pub fn extract_constant_flat_row(
-    storage: &ArrayRef,
-    ctx: &mut ExecutionCtx,
-) -> VortexResult<FlatRow> {
-    let constant = storage
-        .as_opt::<Constant>()
-        .vortex_expect("extract_constant_flat_row requires Constant-backed storage");
-    let single = ConstantArray::new(constant.scalar().clone(), 1).into_array();
-    let fsl: FixedSizeListArray = single.execute(ctx)?;
-    let elems: PrimitiveArray = fsl.elements().clone().execute(ctx)?;
-    let dtype = elems.dtype();
-    vortex_ensure!(
-        !elems.nullability().is_nullable(),
-        "tensor storage elements must be non-nullable, got {dtype}",
-    );
-    Ok(FlatRow { elems })
 }
 
 #[cfg(test)]
@@ -438,9 +407,9 @@ pub mod test_helpers {
     }
 
     /// Builds a [`ConstantArray`] whose scalar is itself a [`Vector`] extension scalar, broadcast
-    /// to `len` rows. This is the shape produced by an `lit(vector_scalar)` literal expression, where
-    /// the constant lives at the extension level rather than inside the FSL storage, in contrast to
-    /// [`Vector::constant_array`].
+    /// to `len` rows. This is the shape produced by an `lit(vector_scalar)` literal expression —
+    /// the constant lives at the extension level rather than inside the FSL storage, in contrast
+    /// to [`Vector::constant_array`].
     pub fn literal_vector_array<T: NativePType + Into<PValue>>(
         elements: &[T],
         len: usize,
@@ -481,10 +450,10 @@ pub mod test_helpers {
             if a.is_nan() && e.is_nan() {
                 continue;
             }
-            let diff = (a - e).abs();
             assert!(
                 (a - e).abs() < 1e-10,
-                "element {i}: got {a}, expected {e} (diff = {diff})"
+                "element {i}: got {a}, expected {e} (diff = {})",
+                (a - e).abs()
             );
         }
     }

@@ -13,9 +13,11 @@ use arrow_schema::Field;
 use arrow_schema::extension::ExtensionType;
 use geo_traits::to_geo::ToGeoGeometry;
 use geo_types::Geometry;
+use geoarrow::array::GeoArrowArray;
 use geoarrow::array::GeoArrowArrayAccessor;
 use geoarrow::array::IntoArrow;
 use geoarrow::array::PolygonArray;
+use geoarrow::array::PolygonBuilder;
 use geoarrow::datatypes::CoordType;
 use geoarrow::datatypes::PolygonType;
 use prost::Message;
@@ -24,6 +26,7 @@ use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::extension::ExtensionArrayExt;
+use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::extension::ExtDType;
@@ -36,7 +39,6 @@ use vortex_arrow::ArrowImport;
 use vortex_arrow::ArrowImportVTable;
 use vortex_arrow::ArrowSession;
 use vortex_arrow::ArrowSessionExt;
-use vortex_arrow::FromArrowArray;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -114,6 +116,27 @@ fn polygon_type(spatial_metadata: &SpatialMetadata, dimension: Dimension) -> Pol
     PolygonType::new(dimension.into(), geoarrow_metadata(spatial_metadata))
 }
 
+/// Build a native 2-D [`Polygon`] array from row-oriented `geo_types` polygons.
+pub(crate) fn build_polygon_array(
+    polygons: &[Option<geo_types::Polygon<f64>>],
+    metadata: SpatialMetadata,
+    nullability: Nullability,
+    session: &ArrowSession,
+) -> VortexResult<ArrayRef> {
+    let polygons =
+        PolygonBuilder::from_nullable_polygons(polygons, polygon_type(&metadata, Dimension::Xy))
+            .finish();
+    let storage_dtype = polygon_storage_dtype(Dimension::Xy, nullability);
+    let storage = session
+        .from_arrow_array(
+            polygons.to_array_ref(),
+            nullability == Nullability::Nullable,
+        )?
+        .cast(storage_dtype.clone())?;
+    let ext_dtype = ExtDType::<Polygon>::try_new(metadata, storage_dtype)?;
+    Ok(ExtensionArray::try_new(ext_dtype.erased(), storage)?.into_array())
+}
+
 /// Decode `Polygon` storage (`List<List<coordinate>>`) to `geo_types` polygons, for the spatial scalar
 /// functions. CRS does not affect planar geometry ops, so default metadata is used.
 pub(crate) fn polygon_geometries(
@@ -178,7 +201,10 @@ impl TryFrom<ExtensionArray> for PolygonData {
 impl PolygonData {
     /// Serialize polygons to WKB (a view array) — the form DuckDB `GEOMETRY` takes.
     pub fn to_wkb(&self, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
-        geoarrow_to_wkb(&polygon_array(self.0.storage_array(), ctx)?)
+        geoarrow_to_wkb(
+            &polygon_array(self.0.storage_array(), ctx)?,
+            &ctx.session().arrow(),
+        )
     }
 }
 
@@ -310,6 +336,7 @@ impl ArrowImportVTable for Polygon {
         array: ArrowArrayRef,
         field: &Field,
         dtype: &DType,
+        session: &ArrowSession,
     ) -> VortexResult<ArrowImport> {
         let Some(ext_dtype) = dtype.as_extension_opt() else {
             return Ok(ArrowImport::Unsupported(array));
@@ -321,7 +348,7 @@ impl ArrowImportVTable for Polygon {
             return Ok(ArrowImport::Unsupported(array));
         }
 
-        let storage = ArrayRef::from_arrow(array.as_ref(), field.is_nullable())?;
+        let storage = session.from_arrow_array(array, field.is_nullable())?;
         Ok(ArrowImport::Imported(
             ExtensionArray::try_new(ext_dtype.clone(), storage)?.into_array(),
         ))

@@ -322,6 +322,7 @@ mod tests {
     use vortex_array::session::ArraySessionExt;
     use vortex_array::stream::ArrayStreamExt;
     use vortex_array::validity::Validity;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_buffer::BitBuffer;
     use vortex_buffer::ByteBufferMut;
     use vortex_buffer::buffer;
@@ -387,7 +388,10 @@ mod tests {
             None,
         )?;
 
-        ParquetVariant::from_arrow_variant(&ArrowVariantArray::try_new(&arrow_storage)?)
+        ParquetVariant::from_arrow_variant(
+            &ArrowVariantArray::try_new(&arrow_storage)?,
+            &SESSION.arrow(),
+        )
     }
 
     #[fixture]
@@ -412,7 +416,7 @@ mod tests {
             .read(|map| map.keys().copied().collect::<Vec<_>>());
         for id in ids {
             editions
-                .declare_inclusion(EditionInclusion::new(&id, TEST_EDITION))
+                .declare_inclusion(EditionInclusion::array(&id, TEST_EDITION))
                 .map_err(|error| vortex_err!("{error}"))?;
         }
         session

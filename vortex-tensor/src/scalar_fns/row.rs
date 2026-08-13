@@ -16,7 +16,7 @@ use vortex_array::arrays::masked::MaskedArraySlotsExt;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::dtype::PType;
-use vortex_array::scalar_fn::InputElement;
+use vortex_array::scalar_fn::unstable::row::InputElement;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -127,6 +127,10 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
         })
     }
 
+    fn can_decode_null_tolerant(_array: &ArrayRef) -> VortexResult<bool> {
+        Ok(true)
+    }
+
     fn get(column: &Self::Column, index: usize) -> &[T] {
         let start = index * column.stride;
         &column.elements.as_slice()[start..start + column.list_size]
@@ -161,21 +165,18 @@ unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
     }
 }
 
-/// Test-only probe recording which operands the last `prepare` step saw as batch-constant, so a
-/// test can assert its inputs took the stride-0 decode path rather than merely producing the right
-/// values through the per-row path.
+/// Records which operands a test's prepare step received as batch constants.
 #[cfg(test)]
 pub(crate) mod probe {
     use std::cell::Cell;
 
     thread_local! {
-        /// Bitmask of the constant operands the last `prepare` saw (bit 0 for the lhs, bit 1 for
-        /// the rhs). Thread-local rather than a process global so concurrent tests in one process
-        /// (plain `cargo test`) cannot race it; execution runs on the calling thread.
+        /// Bit 0 records the lhs and bit 1 records the rhs. Thread-local storage prevents
+        /// concurrent tests from racing; row execution remains on the calling thread.
         pub(crate) static SEEN_CONSTANTS: Cell<u8> = const { Cell::new(u8::MAX) };
     }
 
-    /// Record which operands `prepare` saw as constant.
+    /// Records whether each operand was constant for the current batch.
     pub(crate) fn record(lhs_constant: bool, rhs_constant: bool) {
         SEEN_CONSTANTS.set(u8::from(lhs_constant) | (u8::from(rhs_constant) << 1));
     }

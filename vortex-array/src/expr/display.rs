@@ -9,7 +9,6 @@ use vortex_utils::tree::TreeDisplayAdapter;
 use vortex_utils::tree::write_branch_tree;
 
 use crate::expr::BoundExpression;
-use crate::expr::BoundKind;
 use crate::expr::Expression;
 use crate::scalar_fn::ChildName;
 
@@ -87,16 +86,16 @@ impl DisplayTreeNode for BoundExpression {
     }
 
     fn tree_child_name(&self, index: usize) -> ChildName {
-        match self.kind() {
-            BoundKind::Scalar { scalar_fn, .. } => scalar_fn.signature().child_name(index),
-            BoundKind::Root => unreachable!("the scope root has no children"),
+        match self {
+            BoundExpression::Scalar { scalar_fn, .. } => scalar_fn.signature().child_name(index),
+            BoundExpression::Root { .. } => unreachable!("the scope root has no children"),
         }
     }
 
     fn fmt_tree_node(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.kind() {
-            BoundKind::Scalar { scalar_fn, .. } => Display::fmt(scalar_fn, f),
-            BoundKind::Root => write!(f, "{ROOT_DISPLAY}"),
+        match self {
+            BoundExpression::Scalar { scalar_fn, .. } => Display::fmt(scalar_fn, f),
+            BoundExpression::Root { .. } => write!(f, "{ROOT_DISPLAY}"),
         }
     }
 }

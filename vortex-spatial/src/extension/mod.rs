@@ -57,7 +57,7 @@ use vortex_array::dtype::PType;
 use vortex_array::dtype::extension::ExtDType;
 use vortex_array::dtype::extension::ExtVTable;
 use vortex_array::scalar::Scalar;
-use vortex_arrow::FromArrowArray;
+use vortex_arrow::ArrowSession;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -184,6 +184,22 @@ pub(crate) fn placeholder_geometry() -> Geometry<f64> {
     Geometry::Point(geo_types::Point::new(0.0, 0.0))
 }
 
+/// Whether [`geometries_null_tolerant`] supports this array without filtering null rows first.
+pub(crate) fn can_decode_geometries_null_tolerant(array: &ArrayRef) -> VortexResult<bool> {
+    if array.validity()?.definitely_no_nulls() {
+        return Ok(true);
+    }
+
+    let Some(ext) = array.dtype().as_extension_opt() else {
+        vortex_bail!(
+            "spatial: operand is not a geometry extension type, was {}",
+            array.dtype()
+        );
+    };
+
+    Ok(ext.is::<Point>() || ext.is::<Polygon>())
+}
+
 /// Decode a native geometry column that may contain null rows, writing [`placeholder_geometry`]
 /// into their slots. The caller guarantees null rows are never read.
 ///
@@ -233,7 +249,10 @@ pub(crate) fn single_geometry(
 
 /// Decode a WKB geometry literal (DuckDB's wire form for `GEOMETRY` constants) to its native
 /// `Point`/`Polygon`/`MultiPolygon` scalar. `None` for unsupported types. Plan-time, one value only.
-pub fn native_geometry_scalar_from_wkb(bytes: &[u8]) -> VortexResult<Option<Scalar>> {
+pub fn native_geometry_scalar_from_wkb(
+    bytes: &[u8],
+    session: &ArrowSession,
+) -> VortexResult<Option<Scalar>> {
     let metadata = geoarrow_metadata(&SpatialMetadata::default());
     let binary = BinaryArray::from(vec![Some(bytes)]);
     let wkb = GenericWkbArray::<i32>::try_from((
@@ -246,7 +265,7 @@ pub fn native_geometry_scalar_from_wkb(bytes: &[u8]) -> VortexResult<Option<Scal
     let to_storage = |target: &GeoArrowType| -> VortexResult<ArrayRef> {
         let native =
             cast(&wkb, target).map_err(|e| vortex_err!("failed to cast WKB literal: {e}"))?;
-        ArrayRef::from_arrow(native.to_array_ref().as_ref(), false)
+        session.from_arrow_array(native.to_array_ref(), false)
     };
 
     let scalar = match Wkb::try_from_bytes(bytes)?.geometry_type() {
@@ -342,12 +361,15 @@ pub(crate) fn geoarrow_metadata(spatial_metadata: &SpatialMetadata) -> Arc<Metad
 
 /// Serialize a native geometry array to WKB (a `WkbView` array) via geoarrow's cast.
 /// Shared by the `to_wkb` methods on the geometry extension types.
-pub(crate) fn geoarrow_to_wkb(geoarrow_array: &dyn GeoArrowArray) -> VortexResult<ArrayRef> {
+pub(crate) fn geoarrow_to_wkb(
+    geoarrow_array: &dyn GeoArrowArray,
+    session: &ArrowSession,
+) -> VortexResult<ArrayRef> {
     let wkb_type =
         GeoArrowType::WkbView(WkbType::new(geoarrow_metadata(&SpatialMetadata::default())));
     let wkb = cast(geoarrow_array, &wkb_type)
         .map_err(|e| vortex_err!("failed to cast geometry to WKB: {e}"))?;
-    ArrayRef::from_arrow(wkb.to_array_ref().as_ref(), false)
+    session.from_arrow_array(wkb.to_array_ref(), false)
 }
 
 /// Recover [`SpatialMetadata`] from GeoArrow metadata.
@@ -368,6 +390,7 @@ pub(crate) fn spatial_metadata_from_arrow(metadata: &Metadata) -> SpatialMetadat
 mod tests {
     use prost::Message;
     use vortex_array::dtype::DType;
+    use vortex_arrow::ArrowSessionExt;
     use vortex_error::VortexResult;
     use vortex_error::vortex_err;
 
@@ -376,8 +399,15 @@ mod tests {
     use super::MultiPoint;
     use super::Point;
     use super::Polygon;
-    use super::native_geometry_scalar_from_wkb;
     use crate::extension::SpatialMetadata;
+
+    /// Test shim: decode with an explicitly constructed session.
+    fn native_geometry_scalar_from_wkb(
+        bytes: &[u8],
+    ) -> VortexResult<Option<vortex_array::scalar::Scalar>> {
+        let session = vortex_array::array_session();
+        super::native_geometry_scalar_from_wkb(bytes, &session.arrow())
+    }
 
     #[test]
     fn test_metadata() {

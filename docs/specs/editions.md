@@ -16,9 +16,39 @@ released through June 2026).
 Editions can be used to constrain your minimum required vortex reader, since latest version over vortex across all
 editions is the earliest version of vortex required to read that file.
 
+## What an edition contains
+
+Every member of an edition is recorded with a **component kind**: `array`, `layout`, or `aggregate`. The kind is
+recorded because ids are unique only within a kind — a layout named `vortex.flat` and an array encoding named
+`vortex.flat` are different members — and because membership is resolved one kind at a time. The writer holds a
+separate id set per kind and enforces each where that kind is written:
+
+| Kind | Written | Enforced at |
+| --- | --- | --- |
+| `array` | every serialized array | array serialization context |
+| `layout` | the footer's layout tree | layout serialization context |
+| `aggregate` | zone maps in zoned layouts | the layout writer context |
+
+**Writing a component outside the enabled editions fails the write, for every kind.** A zone map is only an
+optimization, so a forbidden aggregate could in principle be dropped instead — but a file that silently prunes
+worse than the writer was configured for is a bug you find in a benchmark six months later, not an error you can
+act on. Violations surface at write time or not at all.
+
+Aggregates are checked against the set the write would actually record: an aggregate that a column's dtype cannot
+hold is not written, so it is not a violation either.
+
+**A kind with no declared members is unrestricted.** An edition that declares no layouts makes no promise about
+layouts, so the writer leaves them alone rather than forbidding all of them; declaring the first member of a kind is
+what arms its filter. `core2026.08.0` declares the aggregates the default writer records in zone maps — `min`,
+`max`, `bounded_min`, `bounded_max`, `nan_count`, `null_count` — so that filter is armed by default. `sum` is not
+among them: a zone sum prunes nothing, so the writer records none. File-level statistics still carry a sum, which
+this filter does not govern. A
+session that registers components outside `core`, such as the spatial extension types, enables its own edition
+family alongside `core`, and the writer may emit the union.
+
 ## Resolving an unknown-encoding error
 
-If a read failed with an unknown encoding ID and pointed you here, the reader met an encoding
+If a read failed with an unknown encoding ID and pointed you here, the reader met an array encoding
 it does not support. Find the encoding ID in the [registry](#edition-registry) below:
 
 1. **The ID is listed under an edition.** The file is newer than your Vortex build. Upgrade to
@@ -39,7 +69,7 @@ someone else's read error later.
 
 The enabled editions are stored on the writer's Vortex session. Registering an edition makes
 its declaration available to the session; enabling it separately allows the writer to emit its
-encodings. Enabling another edition from the same family replaces the earlier selection.
+array encodings. Enabling another edition from the same family replaces the earlier selection.
 
 Two knobs exist when the default is not what you want:
 
@@ -47,7 +77,7 @@ Two knobs exist when the default is not what you want:
 - **Opt in to additional edition families.** Editions come in independently versioned,
   additive families — `core` today, with families for more specialised encoding groups (for
   example spatial encodings) possible later. A writer targets at most one edition per family
-  and may emit any encoding in their union; each encoding belongs to exactly one family.
+  and may emit any encoding in their union; each member belongs to exactly one family.
 
 Lower-level sessions without an enabled-editions store opt out of editions entirely and can write
 custom or experimental encodings. A raw `with_allow_encodings` writer policy is another explicit
@@ -56,12 +86,15 @@ encodings can read the files.
 
 ## How editions change
 
-A published edition is frozen — its encoding list never grows or shrinks. New encodings are
+A published edition is frozen — its member list never grows or shrinks. New members are
 staged in a **draft** edition and become guaranteed only when that draft is frozen as the next
-edition; each encoding's registry entry records the edition it joined in. In the future an
-encoding may be *deprecated*, meaning writers stop emitting it — but readers keep decoding it
-indefinitely, so deprecation never invalidates existing files.
+edition; each member's registry entry records its component kind and the edition it joined in.
+Declaring the first member of a kind arms that kind's write-time filter, so a kind gains
+enforcement at the edition that first declares one.
+In the future an encoding may be *deprecated*, meaning writers stop emitting it — but readers
+keep decoding it indefinitely, so deprecation never invalidates existing files.
 
 ## Edition registry
 
-Coming soon..
+Coming soon.. It will list each edition's members with their component kind, the edition they
+joined in, and the Vortex release required to read them.

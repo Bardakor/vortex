@@ -63,6 +63,7 @@ members = [
     "encodings/parquet-variant",
     "encodings/onpair",
     # Benchmarks
+    "benchmarks/bench-support",
     "benchmarks/lance-bench",
     "benchmarks/compress-bench",
     "benchmarks/datafusion-bench",
@@ -128,6 +129,7 @@ cfg-if = "1.0.1"
 chrono = "0.4.44"
 clap = "4.5"
 criterion = { package = "codspeed-criterion-compat-walltime", version = "5.0.0" }
+crossbeam-channel = "0.5.16"
 crossterm = "0.29"
 cudarc = { version = "0.19.0", features = [
     # The NSight Compute version available on lambda.ai hosts does not inject a symbol for
@@ -160,12 +162,12 @@ flatbuffers = "25.2.10"
 fsst-rs = "0.6.0"
 futures = { version = "0.3.31", default-features = false }
 fuzzy-matcher = "0.3"
-# `vortex-spatial`'s `contains_route` transcribes geo's `impl_contains_from_relate!` dispatch table, so
-# any bump that moves a row silently changes containment verdicts — the tests stay green wherever
-# relate and the direct algorithm agree. Pinned exactly so that taking any new geo, patch releases
-# included, is a deliberate edit of this line that re-verifies the table; a caret requirement would
-# let `cargo update` (or automated lockfile maintenance) take 0.31.x with no diff to review. See
-# `vortex-spatial/src/scalar_fn/contains.rs`.
+# `vortex-spatial`'s `contains_route` transcribes geo's `impl_contains_from_relate!` dispatch
+# table, so any bump that moves a row silently changes containment verdicts. The tests stay green
+# wherever relate and the direct algorithm agree. Pinned exactly so that taking any new geo,
+# patch releases included, is a deliberate edit of this line that re-verifies the table; a caret
+# requirement would let `cargo update` (or automated lockfile maintenance) take 0.31.x with no diff
+# to review. See `vortex-spatial/src/scalar_fn/contains.rs`.
 geo = "=0.31.0"
 geo-traits = "0.3.0"
 geo-types = "0.7.19"
@@ -341,6 +343,7 @@ vortex-zstd = { version = "0.1.0", path = "./encodings/zstd", default-features =
 
 # No version constraints for unpublished crates.
 vortex-bench = { path = "./vortex-bench", default-features = false }
+vortex-bench-support = { path = "./benchmarks/bench-support" }
 vortex-cuda = { path = "./vortex-cuda", default-features = false }
 vortex-cuda-macros = { path = "./vortex-cuda/macros" }
 vortex-duckdb = { path = "./vortex-duckdb", default-features = false }

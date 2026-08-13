@@ -23,15 +23,15 @@ use crate::dtype::NativePType;
 use crate::dtype::PType;
 use crate::match_each_native_ptype;
 use crate::scalar::NumericOperator;
-use crate::scalar_fn::BorrowedExecutionArgs;
-use crate::scalar_fn::RowFn;
-use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::execute_rows;
+use crate::scalar_fn::VecExecutionArgs;
 use crate::scalar_fn::fns::binary::Binary;
-use crate::scalar_fn::row::InitializedElement;
-use crate::scalar_fn::row::UninitElementSink;
+use crate::scalar_fn::unstable::row::InitializedElement;
+use crate::scalar_fn::unstable::row::RowFn;
+use crate::scalar_fn::unstable::row::RowVisitor;
+use crate::scalar_fn::unstable::row::UninitElementSink;
+use crate::scalar_fn::unstable::row::execute_rows;
 
 pub(super) fn execute_numeric_primitive(
     lhs: &ArrayRef,
@@ -39,8 +39,7 @@ pub(super) fn execute_numeric_primitive(
     op: NumericOperator,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    let inputs = [lhs.clone(), rhs.clone()];
-    let args = BorrowedExecutionArgs::new(&inputs, lhs.len());
+    let args = VecExecutionArgs::new(vec![lhs.clone(), rhs.clone()], lhs.len());
 
     execute_rows(&NumericBinary, &op, &args, ctx)
 }

@@ -11,19 +11,20 @@ use vortex_error::vortex_err;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
+#[cfg(target_arch = "x86_64")]
 use crate::arrays::Constant;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::PType;
 use crate::match_each_native_ptype;
-use crate::scalar_fn::BorrowedExecutionArgs;
-use crate::scalar_fn::RowFn;
-use crate::scalar_fn::RowVisitor;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::execute_rows;
+use crate::scalar_fn::VecExecutionArgs;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::operators::CompareOperator;
+use crate::scalar_fn::unstable::row::RowFn;
+use crate::scalar_fn::unstable::row::RowVisitor;
+use crate::scalar_fn::unstable::row::execute_rows;
 
 /// Compare two primitive arrays of the same [`PType`].
 ///
@@ -81,8 +82,7 @@ pub(super) fn compare_primitive_with_path(
         return columnar::compare_primitive(lhs, rhs, op, ctx);
     }
 
-    let inputs = [lhs.clone(), rhs.clone()];
-    let args = BorrowedExecutionArgs::new(&inputs, lhs.len());
+    let args = VecExecutionArgs::new(vec![lhs.clone(), rhs.clone()], lhs.len());
 
     execute_rows(&PrimitiveCompare, &op, &args, ctx)
 }
@@ -95,6 +95,7 @@ impl RowFn for PrimitiveCompare {
     type Options = CompareOperator;
 
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         // `PrimitiveCompare` is a private implementation detail of `Binary`: it is never registered
@@ -118,6 +119,7 @@ impl RowFn for PrimitiveCompare {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn use_columnar_comparison(
     lhs: &ArrayRef,
     rhs: &ArrayRef,
@@ -132,7 +134,9 @@ fn use_columnar_comparison(
         // The fused comparison and bit-packing loop produces better x86 code for signed 64-bit
         // integers and f64. The RowFn byte-output loop remains faster for narrower lanes.
         (PType::I64 | PType::F64, _) => true,
-        // LLVM vectorizes per-row u64 inputs, but not the mixed-constant RowFn loop.
+        // LLVM 22 vectorizes the mixed-constant RowFn loop at 16 CGUs without LTO. However, the
+        // fused comparison and bit-packing path is still about 38% faster in
+        // `compare_u64_constant`. Recheck that benchmark before changing this dispatch.
         (PType::U64, _) => lhs.is::<Constant>() || rhs.is::<Constant>(),
         _ => false,
     })

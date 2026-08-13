@@ -16,14 +16,14 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::scalar_fn::EmptyOptions;
-use vortex_array::scalar_fn::InitializedElement;
-use vortex_array::scalar_fn::RowExecution;
-use vortex_array::scalar_fn::RowFn;
-use vortex_array::scalar_fn::RowVisitor;
 use vortex_array::scalar_fn::ScalarFnId;
 use vortex_array::scalar_fn::TypedScalarFnInstance;
-use vortex_array::scalar_fn::UninitElementSink;
 use vortex_array::scalar_fn::fns::operators::Operator;
+use vortex_array::scalar_fn::unstable::row::InitializedElement;
+use vortex_array::scalar_fn::unstable::row::RowExecution;
+use vortex_array::scalar_fn::unstable::row::RowFn;
+use vortex_array::scalar_fn::unstable::row::RowVisitor;
+use vortex_array::scalar_fn::unstable::row::UninitElementSink;
 use vortex_array::serde::ArrayChildren;
 use vortex_error::VortexResult;
 use vortex_session::VortexSession;
@@ -71,6 +71,7 @@ impl RowFn for InnerProduct {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["lhs", "rhs"];
+    const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
         static ID: CachedId = CachedId::new("vortex.tensor.inner_product");
@@ -174,9 +175,9 @@ impl ScalarFnArrayVTable for InnerProduct {
 /// Computes the inner product (dot product) of two equal-length float slices.
 ///
 /// Returns `sum(a_i * b_i)`.
-fn inner_product_row<T: Float + NativePType>(a: &[T], b: &[T]) -> T {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| x * y)
-        .fold(T::zero(), |acc, v| acc + v)
+fn inner_product_row<T: Float + NativePType>(lhs: &[T], rhs: &[T]) -> T {
+    lhs.iter()
+        .zip(rhs)
+        .map(|(&lhs_element, &rhs_element)| lhs_element * rhs_element)
+        .fold(T::zero(), |sum, product| sum + product)
 }
