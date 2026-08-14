@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! Shared helpers for tensor scalar functions.
+
 use half::f16;
+use num_traits::Float;
 use prost::Message;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
@@ -22,6 +25,7 @@ use vortex_array::dtype::PType;
 use vortex_array::dtype::proto::dtype as pb;
 use vortex_array::scalar_fn::ScalarFnVTable;
 use vortex_array::validity::Validity;
+use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
@@ -58,6 +62,16 @@ pub fn unit_norm_tolerance(element_ptype: PType, dimensions: usize) -> f64 {
     let dimensions_root = (dimensions as f64).sqrt();
 
     SAFETY_FACTOR as f64 * machine_epsilon * dimensions_root
+}
+
+/// Computes `sqrt(sum(v_i^2))` for one row. An empty or all-zero row produces `0.0`.
+pub(crate) fn l2_norm_row<T: Float + NativePType>(row: &[T]) -> T {
+    let mut sum_squared = T::zero();
+    for &element in row {
+        sum_squared = sum_squared + element * element;
+    }
+
+    sum_squared.sqrt()
 }
 
 /// Extracts the `(normalized, norms)` children of a [`Normalized`]-encoded array.
@@ -120,6 +134,22 @@ pub fn validate_binary_tensor_float_inputs<'a>(
     validate_tensor_float_input(lhs)
 }
 
+/// Validates that every argument has the same float tensor dtype, ignoring nullability.
+pub fn validate_tensor_float_inputs(args: &[DType]) -> VortexResult<TensorMatch<'_>> {
+    let (first, rest) = args
+        .split_first()
+        .ok_or_else(|| vortex_err!("tensor expression expects at least one input"))?;
+
+    for arg in rest {
+        vortex_ensure!(
+            first.eq_ignore_nullability(arg),
+            "tensor expression expects inputs to have the same dtype, got {first} and {arg}"
+        );
+    }
+
+    validate_tensor_float_input(first)
+}
+
 /// The flat primitive elements of a tensor storage array, with typed row access.
 ///
 /// This struct hides the stride detail that arises from the [`ConstantArray`] optimization: a
@@ -147,6 +177,23 @@ impl FlatElements {
         let row_idx = if self.is_constant { 0 } else { i };
         let slice = self.elems.as_slice::<T>();
         &slice[row_idx * self.list_size..][..self.list_size]
+    }
+
+    /// Returns the number of elements in each row.
+    #[must_use]
+    pub fn list_size(&self) -> usize {
+        self.list_size
+    }
+
+    /// Returns the physical distance between rows, or zero when every row uses one stored value.
+    #[must_use]
+    pub fn row_stride(&self) -> usize {
+        if self.is_constant { 0 } else { self.list_size }
+    }
+
+    /// Returns the elements as a typed buffer, performing the ptype check once for the batch.
+    pub fn into_buffer<T: NativePType>(self) -> Buffer<T> {
+        self.elems.into_buffer::<T>()
     }
 }
 
@@ -351,6 +398,18 @@ pub mod test_helpers {
     /// Builds a [`Vector`] extension array from flat `elements` and a vector dimension size.
     pub fn vector_array<T: NativePType>(dim: u32, elements: &[T]) -> VortexResult<ArrayRef> {
         Vector::try_new_vector_array(flat_fsl(elements, dim))
+    }
+
+    /// Builds `rows` zero-width vectors over an empty typed element buffer.
+    pub fn zero_width_vector_array<T: NativePType>(rows: usize) -> VortexResult<ArrayRef> {
+        let storage = FixedSizeListArray::new(
+            Buffer::<T>::empty().into_array(),
+            0,
+            Validity::NonNullable,
+            rows,
+        )
+        .into_array();
+        Vector::try_new_vector_array(storage)
     }
 
     /// Builds a [`FixedShapeTensor`] extension array whose storage is a [`ConstantArray`],

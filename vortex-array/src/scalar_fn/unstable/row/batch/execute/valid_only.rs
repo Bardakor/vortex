@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
@@ -24,6 +25,34 @@ enum ResolvedValidity {
 }
 
 impl Batch {
+    /// Resolve deferred evidence from the encoded path by executing only observable rows.
+    pub(super) fn resolve_reduced_error(
+        &self,
+        error: VortexError,
+        kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
+        try_unfiltered: impl FnOnce(
+            BorrowedExecutionArgs<'_>,
+            &Mask,
+            &mut ExecutionCtx,
+        ) -> VortexResult<Option<RowExecution>>,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        let valid = self.validity.clone().execute_mask(self.row_count, ctx)?;
+
+        if valid.all_true() {
+            return Err(error);
+        }
+        if valid.all_false() {
+            return Ok(self.all_null());
+        }
+
+        if let Some(result) = self.try_execute_unfiltered(try_unfiltered, &valid, ctx)? {
+            return Ok(result);
+        }
+
+        self.filter_and_scatter(kernel, &valid, ctx)
+    }
+
     /// Resolve validity, try unfiltered execution, then fall back to filtering.
     pub(super) fn execute_valid_only(
         &self,

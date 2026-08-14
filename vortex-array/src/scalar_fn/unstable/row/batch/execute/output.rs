@@ -14,6 +14,7 @@ use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
 use crate::scalar::Scalar;
 use crate::scalar_fn::ScalarFnId;
+use crate::validity::Validity;
 
 impl Batch {
     pub(super) fn all_null(&self) -> ArrayRef {
@@ -26,6 +27,32 @@ impl Batch {
         expected_len: usize,
     ) -> VortexResult<ArrayRef> {
         reconcile_output(self.id, &self.result_dtype, expected_len, values)
+    }
+
+    /// Reconcile an encoding-aware result and apply the batch's strict input validity.
+    pub(super) fn finalize_reduced(
+        &self,
+        values: ArrayRef,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        validate_output(self.id, &self.result_dtype, self.row_count, &values)?;
+
+        let input_valid = self.validity.execute_mask(self.row_count, ctx)?;
+        let output_valid = values.validity()?.execute_mask(self.row_count, ctx)?;
+        vortex_ensure!(
+            input_valid.bitand_not(&output_valid).all_false(),
+            "the {} encoded reduction produced nulls for valid rows",
+            self.id,
+        );
+
+        let values = match self.validity.clone() {
+            Validity::NonNullable | Validity::AllValid => values,
+            Validity::Array(valid) => values.mask(valid)?,
+            // Handled before the encoding-aware hook runs.
+            Validity::AllInvalid => return Ok(self.all_null()),
+        };
+
+        cast_output_nullability(&self.result_dtype, values)
     }
 
     /// Validate the output from a row kernel before batch validity is attached.

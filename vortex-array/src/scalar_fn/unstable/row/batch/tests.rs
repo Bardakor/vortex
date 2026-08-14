@@ -32,7 +32,6 @@ use crate::dtype::DType;
 use crate::dtype::NativePType;
 use crate::dtype::Nullability;
 use crate::scalar_fn::EmptyOptions;
-use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::VecExecutionArgs;
 use crate::scalar_fn::unstable::row::InputElement;
@@ -60,7 +59,13 @@ struct AddShort(ShortVisit);
 struct ShortDecodeI64;
 
 #[derive(Clone)]
-struct Identity;
+struct OriginalInputReducer;
+
+#[derive(Clone)]
+struct InvalidEncodedReduction;
+
+#[derive(Clone)]
+struct DeferredOriginalReducer;
 
 #[derive(Clone)]
 struct ValidOnlyIdentity;
@@ -325,16 +330,31 @@ impl RowFn for RetryConstantAdd {
             },
         )
     }
+
+    fn reduce_encoded(
+        &self,
+        _options: &Self::Options,
+        args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<RowExecution>> {
+        if args[0].len() == 1 {
+            return Ok(Some(RowExecution::Output(
+                ConstantArray::new(0u8, args[0].len()).into_array(),
+            )));
+        }
+
+        Ok(None)
+    }
 }
 
-impl RowFn for Identity {
+impl RowFn for OriginalInputReducer {
     type Options = EmptyOptions;
 
     const ARG_NAMES: &'static [&'static str] = &["value"];
     const FALLIBLE: bool = false;
 
     fn id(&self) -> ScalarFnId {
-        static ID: CachedId = CachedId::new("test.identity");
+        static ID: CachedId = CachedId::new("test.original_input_reducer");
         *ID
     }
 
@@ -345,6 +365,89 @@ impl RowFn for Identity {
         visitor: V,
     ) -> VortexResult<V::VisitResult> {
         visitor.visit::<(i64,), i64>(|(value,)| value)
+    }
+
+    fn reduce_encoded(
+        &self,
+        _options: &Self::Options,
+        args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<RowExecution>> {
+        if args[0].len() == 3 {
+            return Ok(Some(RowExecution::Output(
+                ConstantArray::new(42_i64, 3).into_array(),
+            )));
+        }
+
+        Ok(None)
+    }
+}
+
+impl RowFn for InvalidEncodedReduction {
+    type Options = usize;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+    const FALLIBLE: bool = false;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.invalid_encoded_reduction");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit::<(i64,), i64>(|(value,)| value)
+    }
+
+    fn reduce_encoded(
+        &self,
+        null_index: &Self::Options,
+        _args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<RowExecution>> {
+        Ok(Some(RowExecution::Output(
+            PrimitiveArray::new(
+                vec![10_i64, 20],
+                Validity::from_iter((0..2).map(|index| index != *null_index)),
+            )
+            .into_array(),
+        )))
+    }
+}
+
+impl RowFn for DeferredOriginalReducer {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+    const FALLIBLE: bool = true;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.deferred_original_reducer");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit::<(i64,), i64>(|(value,)| value)
+    }
+
+    fn reduce_encoded(
+        &self,
+        _options: &Self::Options,
+        _args: &[ArrayRef],
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<RowExecution>> {
+        Ok(Some(RowExecution::DeferredError(vortex_err!(
+            InvalidArgument: "encoded payload failed"
+        ))))
     }
 }
 
@@ -550,7 +653,7 @@ fn test_short_constant_null_tolerant_decode_is_rejected() -> VortexResult<()> {
 }
 
 #[test]
-fn test_dense_retry_preserves_valid_row_failure() -> VortexResult<()> {
+fn test_dense_retry_does_not_reduce_filtered_inputs() -> VortexResult<()> {
     let lhs =
         PrimitiveArray::new(vec![u8::MAX, 1], Validity::from_iter([true, false])).into_array();
     let rhs = ConstantArray::new(1u8, 2).into_array();
@@ -585,12 +688,88 @@ fn test_dense_retry_suppresses_null_row_failure() -> VortexResult<()> {
 }
 
 #[test]
+fn test_reduce_encoded_defers_errors_behind_nulls() -> VortexResult<()> {
+    let input =
+        PrimitiveArray::new(vec![10_i64, 20], Validity::from_iter([true, false])).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = execute_rows(&DeferredOriginalReducer, &EmptyOptions, &args, &mut ctx)?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_empty_batch_skips_deferred_encoded_error() -> VortexResult<()> {
+    let input = PrimitiveArray::from_iter(Vec::<i64>::new()).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 0);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = execute_rows(&DeferredOriginalReducer, &EmptyOptions, &args, &mut ctx)?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[rstest]
+#[case::all_valid(Validity::AllValid)]
+#[case::mixed(Validity::from_iter([true, false]))]
+fn test_reduce_encoded_rejects_nulls_on_valid_rows(#[case] validity: Validity) -> VortexResult<()> {
+    let input = PrimitiveArray::new(vec![10_i64, 20], validity).into_array();
+    let args = VecExecutionArgs::new(vec![input], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let error = match execute_rows(&InvalidEncodedReduction, &0, &args, &mut ctx) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("an encoded reduction introduced a null on a valid row"),
+    };
+    let error = error.to_string();
+
+    assert!(
+        error.contains("test.invalid_encoded_reduction"),
+        "the boundary error must name the function, got {error}",
+    );
+    assert!(
+        error.contains("encoded reduction produced nulls for valid rows"),
+        "the boundary error must identify invalid reduced output, got {error}",
+    );
+    Ok(())
+}
+
+#[test]
+fn test_reduce_encoded_preserves_input_nulls() -> VortexResult<()> {
+    let input =
+        PrimitiveArray::new(vec![10_i64, 20], Validity::from_iter([true, false])).into_array();
+    let args = VecExecutionArgs::new(vec![input.clone()], 2);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = execute_rows(&InvalidEncodedReduction, &1, &args, &mut ctx)?;
+
+    assert_arrays_eq!(&actual, &input, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_reduce_encoded_precedes_constant_broadcast() -> VortexResult<()> {
+    let input = ConstantArray::new(7_i64, 3).into_array();
+    let args = VecExecutionArgs::new(vec![input], 3);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = execute_rows(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
+    let expected = ConstantArray::new(42_i64, 3).into_array();
+
+    assert_arrays_eq!(&actual, &expected, &mut ctx);
+    Ok(())
+}
+
+#[test]
 fn test_constant_input_broadcasts_one_row() -> VortexResult<()> {
     let input = ConstantArray::new(7_i64, 2).into_array();
     let args = VecExecutionArgs::new(vec![input.clone()], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let actual = execute_rows(&Identity, &EmptyOptions, &args, &mut ctx)?;
+    let actual = execute_rows(&OriginalInputReducer, &EmptyOptions, &args, &mut ctx)?;
 
     assert_arrays_eq!(&actual, &input, &mut ctx);
     Ok(())
@@ -614,7 +793,8 @@ fn test_resolve_validity_array_masks(#[case] validity: [bool; 2]) -> VortexResul
     let mut ctx = array_session().create_execution_ctx();
 
     let actual = batch.execute(
-        |args, _ctx| Ok(RowExecution::Output(args.get(0)?)),
+        |_args, _ctx| Ok(None),
+        |args, _ctx| Ok(RowExecution::Output(args.arrays()[0].clone())),
         |_args, _valid, _ctx| Ok(None),
         &mut ctx,
     )?;
@@ -642,7 +822,8 @@ fn test_valid_only_filters_and_scatters() -> VortexResult<()> {
     let mut ctx = array_session().create_execution_ctx();
 
     let actual = batch.execute(
-        |args, _ctx| Ok(RowExecution::Output(args.get(0)?)),
+        |_args, _ctx| Ok(None),
+        |args, _ctx| Ok(RowExecution::Output(args.arrays()[0].clone())),
         |_args, _valid, _ctx| Ok(None),
         &mut ctx,
     )?;

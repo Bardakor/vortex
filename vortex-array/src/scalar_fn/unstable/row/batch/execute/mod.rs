@@ -3,8 +3,8 @@
 
 //! Selects a batch execution strategy.
 //!
-//! [`Batch::execute`] handles universal fast paths, then delegates to dense or valid-only
-//! execution.
+//! [`Batch::execute`] handles universal fast paths and encoded reductions, then delegates to dense
+//! or valid-only execution.
 
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
@@ -28,13 +28,18 @@ mod output;
 pub(crate) use output::finalize_kernel_output;
 
 impl Batch {
-    /// Apply constant folding and null handling around `kernel`.
+    /// Apply encoded reductions, constant folding, and null handling around `kernel`.
     ///
-    /// When the mask contains valid and invalid rows, `try_unfiltered` may avoid filtering.
-    /// `Ok(None)` filters the valid rows and scatters the output back. Every result is checked
-    /// against the planned shape and dtype.
+    /// `reduce` receives the original inputs before constant broadcasting. When the mask contains
+    /// valid and invalid rows, `try_unfiltered` may avoid filtering. `Ok(None)` filters the valid
+    /// rows and scatters the output back. Every result is checked against the planned shape and
+    /// dtype.
     pub(crate) fn execute(
         &self,
+        reduce: impl FnOnce(
+            BorrowedExecutionArgs<'_>,
+            &mut ExecutionCtx,
+        ) -> VortexResult<Option<RowExecution>>,
         kernel: impl Fn(BorrowedExecutionArgs<'_>, &mut ExecutionCtx) -> VortexResult<RowExecution>,
         try_unfiltered: impl FnOnce(
             BorrowedExecutionArgs<'_>,
@@ -53,6 +58,20 @@ impl Batch {
             })
         {
             return Ok(self.all_null());
+        }
+
+        // An empty mask is both all-true and all-false, so deferred encoded evidence cannot be
+        // attributed to an observable row. Let the ordinary policy construct the typed empty
+        // output instead.
+        if self.row_count > 0
+            && let Some(execution) = reduce(self.execution_args(&self.inputs, self.row_count), ctx)?
+        {
+            match execution {
+                RowExecution::Output(values) => return self.finalize_reduced(values, ctx),
+                RowExecution::DeferredError(error) => {
+                    return self.resolve_reduced_error(error, kernel, try_unfiltered, ctx);
+                }
+            }
         }
 
         // All inputs constant, and their conjoined validity proves every row non-null. This sees

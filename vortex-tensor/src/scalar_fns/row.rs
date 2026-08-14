@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+//! What the tensor scalar functions add to the row-function machinery: an element type that reads a
+//! tensor row and the width rule they share.
+
+use std::marker::PhantomData;
+
+use num_traits::Float;
+use vortex_array::ArrayRef;
+use vortex_array::ExecutionCtx;
+use vortex_array::arrays::ExtensionArray;
+use vortex_array::arrays::Masked;
+use vortex_array::arrays::extension::ExtensionArrayExt;
+use vortex_array::arrays::masked::MaskedArraySlotsExt;
+use vortex_array::dtype::DType;
+use vortex_array::dtype::NativePType;
+use vortex_array::dtype::PType;
+use vortex_array::scalar_fn::unstable::row::InputElement;
+use vortex_buffer::Buffer;
+use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
+use vortex_error::vortex_ensure_eq;
+
+use crate::utils::extract_flat_elements;
+use crate::utils::validate_tensor_float_input;
+use crate::utils::validate_tensor_float_inputs;
+
+/// The width rule the tensor scalar functions share: every argument is the same float tensor dtype,
+/// and the width is its element ptype.
+pub(crate) fn tensor_element_ptype(args: &[DType]) -> VortexResult<PType> {
+    Ok(validate_tensor_float_inputs(args)?.element_ptype())
+}
+
+/// Marker for tensor-valued input elements: accepts any tensor-like extension column whose
+/// elements are `T`, and presents each row as its flat elements, `&[T]`.
+pub struct TensorRow<T>(PhantomData<T>);
+
+/// The decoded form of a [`TensorRow`] column: one flat typed buffer plus the stride to read it at.
+///
+/// Typed at decode time rather than per row. `FlatElements::row` re-derives its typed slice on every
+/// call, which costs a ptype check and a buffer downcast per row; a row loop reads every row, so it
+/// pays that once here instead.
+pub struct TensorRows<T> {
+    /// Every row's elements, back to back.
+    elements: Buffer<T>,
+
+    /// Number of logical tensor rows, stored so zero-width tensors retain their length.
+    rows: usize,
+
+    /// Elements per row, the length of each row slice.
+    list_size: usize,
+
+    /// `list_size` for a full column and `0` for constant-backed storage, so `index * stride` pins a
+    /// constant to its single materialized row without a branch in the loop.
+    stride: usize,
+}
+
+// SAFETY: `TensorRows` records the row count validated during decode, and both checked and
+// unchecked access use the same stride and row width.
+unsafe impl<T: Float + NativePType> InputElement for TensorRow<T> {
+    type Column = TensorRows<T>;
+    type View<'a> = &'a TensorRows<T>;
+    type Elem<'a> = &'a [T];
+
+    // Tensor storage is a fully materialized non-nullable primitive buffer, so the elements behind
+    // a null row are arbitrary values rather than an unresolvable reference.
+    const DENSE_SAFE: bool = true;
+    // Tensor storage is a primitive buffer; reading it cannot fail on account of its values.
+    const DECODE_FALLIBLE: bool = false;
+
+    fn validate(dtype: &DType) -> VortexResult<()> {
+        let tensor_match = validate_tensor_float_input(dtype)?;
+        let expected = T::PTYPE;
+        vortex_ensure_eq!(
+            tensor_match.element_ptype(),
+            expected,
+            "expected a tensor of {expected} elements, got {dtype}",
+        );
+        Ok(())
+    }
+
+    fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self::Column> {
+        // Dense batch execution owns the mask and restores it on the result. Decode the values
+        // directly so a nullable tensor does not rebuild its extension storage under that mask.
+        let array = match array.as_opt::<Masked>() {
+            Some(masked) => masked.child().clone(),
+            None => array,
+        };
+
+        let rows = array.len();
+        let list_size = validate_tensor_float_input(array.dtype())?.list_size() as usize;
+        let ext: ExtensionArray = array.execute(ctx)?;
+        let flat = extract_flat_elements(ext.storage_array(), list_size, ctx)?;
+        let list_size = flat.list_size();
+        let stride = flat.row_stride();
+        let elements = flat.into_buffer::<T>();
+
+        let expected_elements = if stride == 0 {
+            list_size
+        } else {
+            vortex_ensure_eq!(
+                stride,
+                list_size,
+                "per-row tensor stride must equal its width, got {stride}",
+            );
+            let Some(expected_elements) = rows.checked_mul(stride) else {
+                vortex_bail!(
+                    "tensor row storage length must fit usize, got {rows} rows of width {stride}",
+                );
+            };
+
+            expected_elements
+        };
+        vortex_ensure_eq!(
+            elements.len(),
+            expected_elements,
+            "tensor row storage must contain {expected_elements} elements, got {}",
+            elements.len(),
+        );
+
+        Ok(TensorRows {
+            elements,
+            rows,
+            list_size,
+            stride,
+        })
+    }
+
+    fn can_decode_null_tolerant(_array: &ArrayRef) -> VortexResult<bool> {
+        Ok(true)
+    }
+
+    fn get(column: &Self::Column, index: usize) -> &[T] {
+        let start = index * column.stride;
+        &column.elements.as_slice()[start..start + column.list_size]
+    }
+
+    fn view(column: &Self::Column) -> Self::View<'_> {
+        column
+    }
+
+    fn view_len(view: &Self::View<'_>) -> usize {
+        view.rows
+    }
+
+    fn get_from_view<'a>(view: &Self::View<'a>, index: usize) -> &'a [T]
+    where
+        Self: 'a,
+    {
+        Self::get(view, index)
+    }
+
+    unsafe fn get_from_view_unchecked<'a>(view: &Self::View<'a>, index: usize) -> &'a [T]
+    where
+        Self: 'a,
+    {
+        let start = index * view.stride;
+
+        // SAFETY: decode established one complete stored row for stride 0, or `rows` contiguous
+        // `list_size`-element rows otherwise. The caller guarantees `index < rows`.
+        unsafe {
+            std::slice::from_raw_parts(view.elements.as_slice().as_ptr().add(start), view.list_size)
+        }
+    }
+}
