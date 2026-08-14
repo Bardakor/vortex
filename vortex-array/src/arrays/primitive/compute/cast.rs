@@ -316,7 +316,7 @@ fn cast_integer_values_to_decimal_buffer<S, T>(
     values: &[S],
     decimal_dtype: DecimalDType,
     valid_values: &Mask,
-    cast: impl FnMut(S) -> Option<T>,
+    cast: impl Fn(S) -> Option<T>,
 ) -> VortexResult<Buffer<T>>
 where
     S: IntegerPType + ToI256,
@@ -402,7 +402,7 @@ fn decimal_value_fits_precision<T: NativeDecimalType>(
 fn cast_primitive_to_decimal_buffer<S, T>(
     values: &[S],
     valid_values: &Mask,
-    mut cast: impl FnMut(S) -> Option<T>,
+    cast: impl Fn(S) -> Option<T>,
 ) -> Result<Buffer<T>, usize>
 where
     S: NativePType,
@@ -415,13 +415,13 @@ where
     let mut buffer = BufferMut::<T>::with_capacity(values.len());
     match valid_values {
         Mask::AllTrue(_) => {
-            values.try_map_into(&mut buffer.spare_capacity_mut()[..values.len()], &mut cast)?;
+            values.try_map_into(&mut buffer.spare_capacity_mut()[..values.len()], &cast)?;
         }
         Mask::Values(mask) => {
             values.try_map_masked_into(
                 mask.bit_buffer(),
                 &mut buffer.spare_capacity_mut()[..values.len()],
-                &mut cast,
+                &cast,
             )?;
         }
         Mask::AllFalse(_) => unreachable!("all-null values are handled before allocating"),

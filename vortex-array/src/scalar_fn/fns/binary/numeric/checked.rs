@@ -49,7 +49,7 @@ pub(super) fn checked_lanes<S, T, Apply>(
 where
     S: IndexedSource,
     T: Copy + Default,
-    Apply: FnMut(S::Item) -> Option<T>,
+    Apply: Fn(S::Item) -> Option<T>,
 {
     let len = source.len();
     debug_assert_eq!(len, valid_rows.len());
@@ -89,13 +89,13 @@ where
 pub(super) fn checked_apply_lanes<S, T, Fail, Apply>(
     source: S,
     valid_rows: &Mask,
-    mut apply: Apply,
+    apply: Apply,
 ) -> Result<Buffer<T>, usize>
 where
     S: IndexedSource + Copy,
     T: Copy + Default,
     Fail: Failure,
-    Apply: FnMut(S::Item) -> (T, Fail),
+    Apply: Fn(S::Item) -> (T, Fail),
 {
     let len = source.len();
     debug_assert_eq!(len, valid_rows.len());
@@ -109,14 +109,14 @@ where
     let mut values = BufferMut::<T>::with_capacity(len);
 
     let out = &mut values.spare_capacity_mut()[..len];
-    if source.map_checked_into(out, &mut apply) != Fail::default() {
-        let mut checked = |item: S::Item| {
+    if source.map_checked_into(out, &apply) != Fail::default() {
+        let checked = |item: S::Item| {
             let (value, failure) = apply(item);
             (failure == Fail::default()).then_some(value)
         };
         match valid_bits {
-            None => source.try_map_into(out, &mut checked)?,
-            Some(valid_bits) => source.try_map_masked_into(valid_bits, out, &mut checked)?,
+            None => source.try_map_into(out, checked)?,
+            Some(valid_bits) => source.try_map_masked_into(valid_bits, out, checked)?,
         }
     }
 
