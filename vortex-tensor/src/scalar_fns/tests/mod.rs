@@ -3,5 +3,7 @@
 
 //! Tests for the tensor scalar functions.
 
+mod cosine_similarity;
+mod inner_product;
 mod l2_norm;
 mod row;

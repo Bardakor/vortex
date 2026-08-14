@@ -65,6 +65,9 @@ pub fn unit_norm_tolerance(element_ptype: PType, dimensions: usize) -> f64 {
 }
 
 /// Computes `sqrt(sum(v_i^2))` for one row. An empty or all-zero row produces `0.0`.
+///
+/// L2 norm and cosine similarity share this implementation so prepared constant norms use the
+/// same accumulation order as rows from per-row inputs.
 pub(crate) fn l2_norm_row<T: Float + NativePType>(row: &[T]) -> T {
     let mut sum_squared = T::zero();
     for &element in row {
@@ -119,19 +122,6 @@ pub fn validate_tensor_float_input(input_dtype: &DType) -> VortexResult<TensorMa
     );
 
     Ok(tensor_match)
-}
-
-/// Validates that two arguments of a binary tensor-like operator share the same float tensor
-/// dtype (ignoring top-level nullability), returning the shared [`TensorMatch`].
-pub fn validate_binary_tensor_float_inputs<'a>(
-    lhs: &'a DType,
-    rhs: &DType,
-) -> VortexResult<TensorMatch<'a>> {
-    vortex_ensure!(
-        lhs.eq_ignore_nullability(rhs),
-        "binary tensor expression expects inputs to have the same dtype, got {lhs} and {rhs}"
-    );
-    validate_tensor_float_input(lhs)
 }
 
 /// Validates that every argument has the same float tensor dtype, ignoring nullability.
@@ -332,7 +322,7 @@ impl BinaryTensorOpMetadata {
 
         let lhs_dtype = DType::from_proto(lhs_pb, session)?;
         let rhs_dtype = DType::from_proto(rhs_pb, session)?;
-        validate_binary_tensor_float_inputs(&lhs_dtype, &rhs_dtype)?;
+        validate_tensor_float_inputs(&[lhs_dtype.clone(), rhs_dtype.clone()])?;
 
         let lhs = children.get(0, &lhs_dtype, len)?;
         let rhs = children.get(1, &rhs_dtype, len)?;

@@ -21,7 +21,6 @@ pub use array::NormalizedSlots;
 mod compress;
 pub use compress::NormalizedScheme;
 pub use compress::normalize;
-pub(crate) use compress::try_build_constant_normalized;
 
 mod execute;
 
