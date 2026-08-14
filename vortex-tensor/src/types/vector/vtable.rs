@@ -10,6 +10,7 @@ use vortex_array::scalar::ScalarValue;
 use vortex_error::VortexResult;
 use vortex_session::registry::CachedId;
 
+use crate::types::unit_vector::UnitVector;
 use crate::types::vector::Vector;
 use crate::types::vector::validate_vector_storage_dtype;
 
@@ -36,7 +37,7 @@ impl ExtVTable for Vector {
         let DType::Extension(other_ext) = other else {
             return None;
         };
-        if !other_ext.is::<Self>() {
+        if !other_ext.is::<Self>() && !other_ext.is::<UnitVector>() {
             return None;
         }
         let widened = ext_dtype
