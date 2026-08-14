@@ -4,6 +4,7 @@
 #![expect(clippy::unwrap_used)]
 
 use divan::Bencher;
+use divan::counter::ItemsCount;
 use mimalloc::MiMalloc;
 use rand::RngExt;
 use rand::SeedableRng;
@@ -38,6 +39,7 @@ const ARRAY_SIZE: usize = 65_536;
 fn bench_compare(bencher: Bencher, lhs: ArrayRef, rhs: ArrayRef, op: Operator) {
     let session = vortex_array::array_session();
     bencher
+        .counter(ItemsCount::new(ARRAY_SIZE))
         .with_inputs(|| (&lhs, &rhs, session.create_execution_ctx()))
         .bench_refs(|input| {
             input
@@ -47,6 +49,31 @@ fn bench_compare(bencher: Bencher, lhs: ArrayRef, rhs: ArrayRef, op: Operator) {
                 .unwrap()
                 .execute::<Canonical>(&mut input.2)
         });
+}
+
+fn u8_array(offset: u8) -> ArrayRef {
+    (0u8..=u8::MAX)
+        .cycle()
+        .take(ARRAY_SIZE)
+        .map(|value| value.wrapping_add(offset))
+        .collect::<Buffer<_>>()
+        .into_array()
+}
+
+fn i32_array(offset: i32) -> ArrayRef {
+    (0i32..)
+        .take(ARRAY_SIZE)
+        .map(|value| value.wrapping_mul(31).wrapping_add(offset))
+        .collect::<Buffer<_>>()
+        .into_array()
+}
+
+fn u64_array(offset: u64) -> ArrayRef {
+    (0u64..)
+        .take(ARRAY_SIZE)
+        .map(|value| value.wrapping_mul(31).wrapping_add(offset))
+        .collect::<Buffer<_>>()
+        .into_array()
 }
 
 fn bool_array(rng: &mut StdRng) -> ArrayRef {
@@ -83,6 +110,13 @@ fn int_array_nullable(rng: &mut StdRng) -> ArrayRef {
 fn float_array(rng: &mut StdRng) -> ArrayRef {
     (0..ARRAY_SIZE)
         .map(|_| rng.random_range(0.0f64..1.0))
+        .collect::<Buffer<_>>()
+        .into_array()
+}
+
+fn f32_array(rng: &mut StdRng) -> ArrayRef {
+    (0..ARRAY_SIZE)
+        .map(|_| rng.random_range(0.0f32..1.0))
         .collect::<Buffer<_>>()
         .into_array()
 }
@@ -154,6 +188,14 @@ fn compare_int_constant(bencher: Bencher) {
 }
 
 #[divan::bench]
+fn compare_int_constant_lhs(bencher: Bencher) {
+    let mut rng = StdRng::seed_from_u64(0);
+    let constant = ConstantArray::new(50_000_000i64, ARRAY_SIZE).into_array();
+    let arr = int_array(&mut rng);
+    bench_compare(bencher, constant, arr, Operator::Gte);
+}
+
+#[divan::bench]
 fn compare_int_eq(bencher: Bencher) {
     let mut rng = StdRng::seed_from_u64(0);
     let arr1 = int_array(&mut rng);
@@ -162,11 +204,84 @@ fn compare_int_eq(bencher: Bencher) {
 }
 
 #[divan::bench]
+fn compare_i32(bencher: Bencher) {
+    let lhs = i32_array(1);
+    let rhs = i32_array(17);
+    bench_compare(bencher, lhs, rhs, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_i32_constant(bencher: Bencher) {
+    let lhs = i32_array(1);
+    let rhs = ConstantArray::new(1_000_000i32, ARRAY_SIZE).into_array();
+    bench_compare(bencher, lhs, rhs, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_u8(bencher: Bencher) {
+    let lhs = u8_array(1);
+    let rhs = u8_array(17);
+    bench_compare(bencher, lhs, rhs, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_u8_constant(bencher: Bencher) {
+    let lhs = u8_array(1);
+    let rhs = ConstantArray::new(127u8, ARRAY_SIZE).into_array();
+    bench_compare(bencher, lhs, rhs, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_u64(bencher: Bencher) {
+    let lhs = u64_array(1);
+    let rhs = u64_array(17);
+    bench_compare(bencher, lhs, rhs, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_u64_constant(bencher: Bencher) {
+    let lhs = u64_array(1);
+    let rhs = ConstantArray::new(1_000_000u64, ARRAY_SIZE).into_array();
+    bench_compare(bencher, lhs, rhs, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_u64_eq(bencher: Bencher) {
+    let lhs = u64_array(1);
+    let rhs = u64_array(17);
+    bench_compare(bencher, lhs, rhs, Operator::Eq);
+}
+
+#[divan::bench]
 fn compare_float(bencher: Bencher) {
     let mut rng = StdRng::seed_from_u64(0);
     let arr1 = float_array(&mut rng);
     let arr2 = float_array(&mut rng);
     bench_compare(bencher, arr1, arr2, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_float_eq(bencher: Bencher) {
+    let mut rng = StdRng::seed_from_u64(0);
+    let arr1 = float_array(&mut rng);
+    let arr2 = float_array(&mut rng);
+    bench_compare(bencher, arr1, arr2, Operator::Eq);
+}
+
+#[divan::bench]
+fn compare_f32(bencher: Bencher) {
+    let mut rng = StdRng::seed_from_u64(0);
+    let arr1 = f32_array(&mut rng);
+    let arr2 = f32_array(&mut rng);
+    bench_compare(bencher, arr1, arr2, Operator::Gte);
+}
+
+#[divan::bench]
+fn compare_f32_eq(bencher: Bencher) {
+    let mut rng = StdRng::seed_from_u64(0);
+    let arr1 = f32_array(&mut rng);
+    let arr2 = f32_array(&mut rng);
+    bench_compare(bencher, arr1, arr2, Operator::Eq);
 }
 
 #[divan::bench]
