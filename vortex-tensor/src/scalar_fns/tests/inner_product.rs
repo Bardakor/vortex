@@ -217,13 +217,13 @@ fn one_side_normalized_rhs() -> VortexResult<()> {
 }
 
 #[test]
-fn both_normalized_null_norms() -> VortexResult<()> {
-    // Row 0: valid, row 1: null (via nullable norms on lhs).
+fn both_normalized_null_rows() -> VortexResult<()> {
     let normalized_l = tensor_array(&[2], &[0.6, 0.8, 1.0, 0.0])?;
-    let norms_l = PrimitiveArray::from_option_iter([Some(5.0f64), None]).into_array();
+    let norms_l = PrimitiveArray::from_iter([5.0f64, 1.0]).into_array();
     let mut ctx = SESSION.create_execution_ctx();
 
-    let lhs = Normalized::try_new(normalized_l, norms_l, &mut ctx)?.into_array();
+    let validity = Validity::from_iter([true, false]);
+    let lhs = Normalized::try_new(normalized_l, norms_l, validity, &mut ctx)?.into_array();
     let rhs = normalized_array(&[2], &[0.6, 0.8, 1.0, 0.0], &[5.0, 1.0], &mut ctx)?;
 
     let scalar_fn = InnerProduct.bind(EmptyOptions);

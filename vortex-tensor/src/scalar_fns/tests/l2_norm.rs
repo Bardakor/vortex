@@ -233,7 +233,8 @@ fn normalized_readthrough_returns_stored_norms() -> VortexResult<()> {
     let norms = PrimitiveArray::from_iter([5.0f64, 2.0]).into_array();
     // SAFETY: A focused test of the lossy storage contract: the stored norms are authoritative
     // even though this normalized child violates the unit-norm invariant.
-    let denorm = unsafe { Normalized::new_unchecked(normalized, norms) }.into_array();
+    let denorm =
+        unsafe { Normalized::new_unchecked(normalized, norms, Validity::NonNullable) }.into_array();
 
     assert_close(&eval_l2_norm(denorm)?, &[5.0, 2.0]);
     Ok(())
@@ -248,10 +249,12 @@ fn normalized_readthrough_returns_stored_norms() -> VortexResult<()> {
 #[test]
 fn normalized_readthrough_survives_null_rows() -> VortexResult<()> {
     let normalized = tensor_array(&[2], &[1.2, 1.6, 3.0, 0.0])?;
-    let norms = PrimitiveArray::from_option_iter([Some(5.0f64), None]).into_array();
+    let norms = PrimitiveArray::from_iter([5.0f64, 2.0]).into_array();
     // SAFETY: Intentionally lossy, as in `normalized_readthrough_returns_stored_norms`, so that
     // a recompute fallback is observable.
-    let denorm = unsafe { Normalized::new_unchecked(normalized, norms) }.into_array();
+    let denorm =
+        unsafe { Normalized::new_unchecked(normalized, norms, Validity::from_iter([true, false])) }
+            .into_array();
 
     let scalar_fn = L2Norm.bind(EmptyOptions);
     let result = ScalarFnArray::try_new(scalar_fn, vec![denorm])?;
@@ -264,13 +267,19 @@ fn normalized_readthrough_survives_null_rows() -> VortexResult<()> {
     Ok(())
 }
 
-/// The readthrough must still propagate nulls carried by the `norms` child.
+/// The readthrough must still propagate validity carried by the `Normalized` parent.
 #[test]
-fn normalized_readthrough_propagates_null_norms() -> VortexResult<()> {
+fn normalized_readthrough_propagates_parent_validity() -> VortexResult<()> {
     let normalized = tensor_array(&[2], &[0.6, 0.8, 1.0, 0.0])?;
-    let norms = PrimitiveArray::from_option_iter([Some(5.0f64), None]).into_array();
+    let norms = PrimitiveArray::from_iter([5.0f64, 1.0]).into_array();
     let mut ctx = SESSION.create_execution_ctx();
-    let denorm = Normalized::try_new(normalized, norms, &mut ctx)?.into_array();
+    let denorm = Normalized::try_new(
+        normalized,
+        norms,
+        Validity::from_iter([true, false]),
+        &mut ctx,
+    )?
+    .into_array();
 
     let scalar_fn = L2Norm.bind(EmptyOptions);
     let result = ScalarFnArray::try_new(scalar_fn, vec![denorm])?;

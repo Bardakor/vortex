@@ -4,8 +4,8 @@
 //! Visitors that execute dense and skip-invalid row loops.
 //!
 //! Each visit revalidates its concrete signature and checks that its output dtype and null policy
-//! match the plan before entering a row loop. [`ExecuteValidRows`] can decline unsupported
-//! skip-invalid execution so the batch layer filters the inputs and retries with [`ExecuteRows`].
+//! match the plan before entering a row loop. [`ExecuteValidRows`] can decline, so the batch layer
+//! filters the inputs and retries with [`ExecuteRows`].
 
 use std::ops::BitOrAssign;
 
@@ -36,8 +36,8 @@ use crate::scalar_fn::unstable::row::execute::execute_owned_infallible;
 use crate::scalar_fn::unstable::row::execute::execute_sink;
 use crate::scalar_fn::unstable::row::execute::execute_sink_valid_rows;
 
-/// The run-time visit that decodes every column once and runs the selected row loop.
-pub struct ExecuteRows<'args, 'ctx, F: RowFn> {
+/// The runtime visit that decodes every column once and runs the selected row loop.
+pub(crate) struct ExecuteRows<'args, 'ctx, F: RowFn> {
     /// The inputs for this kernel invocation.
     args: &'args dyn ExecutionArgs,
 
@@ -58,7 +58,7 @@ pub struct ExecuteRows<'args, 'ctx, F: RowFn> {
 }
 
 impl<'args, 'ctx, F: RowFn> ExecuteRows<'args, 'ctx, F> {
-    pub fn new(
+    pub(crate) fn new(
         args: &'args dyn ExecutionArgs,
         dtypes: &'args [DType],
         options: &'args F::Options,
@@ -158,11 +158,11 @@ impl<F: RowFn> RowVisitor<F::Options> for ExecuteRows<'_, '_, F> {
     }
 }
 
-/// The run-time visit that tries skip-invalid execution over the original input columns.
+/// The runtime visit that executes valid rows over the original input columns.
 ///
 /// Only output sinks have a contract for skipped output positions. Owned visits therefore decline
-/// so batch execution can use its filter-and-scatter fallback.
-pub struct ExecuteValidRows<'args, 'ctx, F: RowFn> {
+/// so batch execution can filter the valid inputs and scatter the output back.
+pub(crate) struct ExecuteValidRows<'args, 'ctx, F: RowFn> {
     /// The original inputs for this kernel invocation.
     args: &'args dyn ExecutionArgs,
 
@@ -178,7 +178,7 @@ pub struct ExecuteValidRows<'args, 'ctx, F: RowFn> {
     /// The nullable execution policy selected by the planning visit.
     policy: RowPolicy,
 
-    /// The conjoined validity, materialized by batch execution and guaranteed mixed.
+    /// The conjoined validity, containing both valid and invalid rows.
     valid: &'args Mask,
 
     /// The execution context used to decode the input columns.
@@ -186,7 +186,7 @@ pub struct ExecuteValidRows<'args, 'ctx, F: RowFn> {
 }
 
 impl<'args, 'ctx, F: RowFn> ExecuteValidRows<'args, 'ctx, F> {
-    pub fn new(
+    pub(crate) fn new(
         args: &'args dyn ExecutionArgs,
         dtypes: &'args [DType],
         options: &'args F::Options,

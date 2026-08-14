@@ -27,20 +27,31 @@ pub struct ArgColumn<T: InputElement>(
 );
 
 enum ArgColumnKind<T: InputElement> {
+    /// One decoded value per batch row; executors validate the exact length before traversal.
     PerRow(T::Column),
+
+    /// Exactly one decoded row, established by [`ArgColumn::try_from_constant`].
     Constant(T::Column),
 }
 
 impl<T: InputElement> ArgColumn<T> {
+    fn try_from_constant(column: T::Column) -> VortexResult<Self> {
+        let decoded_len = T::view_len(&T::view(&column));
+        vortex_ensure_eq!(
+            decoded_len,
+            1,
+            "a decoded batch-constant input must contain exactly 1 row, got {decoded_len}",
+        );
+
+        Ok(Self(ArgColumnKind::Constant(column)))
+    }
+
     fn decode(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self> {
         // An empty input has no row 0 to slice, and its row loop runs zero times either way.
         if let Some(constant) = batch_constant(&array)
             && !array.is_empty()
         {
-            return Ok(Self(ArgColumnKind::Constant(T::decode(
-                constant.slice(0..1)?,
-                ctx,
-            )?)));
+            return Self::try_from_constant(T::decode(constant.slice(0..1)?, ctx)?);
         }
 
         Ok(Self(ArgColumnKind::PerRow(T::decode(array, ctx)?)))
@@ -52,10 +63,7 @@ impl<T: InputElement> ArgColumn<T> {
         if let Some(constant) = batch_constant(&array)
             && !array.is_empty()
         {
-            return Ok(Some(Self(ArgColumnKind::Constant(T::decode(
-                constant.slice(0..1)?,
-                ctx,
-            )?))));
+            return Self::try_from_constant(T::decode(constant.slice(0..1)?, ctx)?).map(Some);
         }
 
         Ok(T::decode_null_tolerant(array, ctx)?
@@ -88,14 +96,14 @@ impl<T: InputElement> ArgColumn<T> {
     }
 
     fn addresses_rows(&self, row_count: usize) -> bool {
-        // A constant is always read at index zero, so it addresses any batch length.
+        // A constant is validated when constructed and is always read at index zero.
         match &self.0 {
             ArgColumnKind::PerRow(column) => T::view_len(&T::view(column)) == row_count,
             ArgColumnKind::Constant(_) => true,
         }
     }
 
-    fn constant(&self) -> Option<T::Elem<'_>> {
+    fn constant_value(&self) -> Option<T::Elem<'_>> {
         match &self.0 {
             ArgColumnKind::PerRow(_) => None,
             ArgColumnKind::Constant(column) => Some(T::get(column, 0)),
@@ -130,7 +138,7 @@ pub trait ElementTuple: 'static + private::Sealed {
     /// The decoded column representations.
     type Columns;
 
-    /// Borrowed views of decoded columns when every argument stores one value per row.
+    /// Borrowed views of decoded columns with no batch constants.
     type Views<'a>;
 
     /// The borrowed row of element values.
@@ -138,9 +146,9 @@ pub trait ElementTuple: 'static + private::Sealed {
 
     /// The batch-constant element values.
     ///
-    /// `Some` carries the value of a batch-constant argument. `None` marks a per-row argument. A
-    /// [`RowVisitor`] passes these values to its prepare closure so constant work can leave the row
-    /// loop.
+    /// `Some` carries the value of a batch-constant argument. `None` marks a non-constant argument.
+    /// A [`RowVisitor`] passes these values to its prepare closure so constant work can leave the
+    /// row loop.
     ///
     /// [`RowVisitor`]: crate::scalar_fn::unstable::row::RowVisitor
     type ConstElems<'a>;
@@ -170,34 +178,38 @@ pub trait ElementTuple: 'static + private::Sealed {
 
     /// Decode every input column once while tolerating null rows.
     ///
-    /// Return `Ok(None)` when an argument has no null-tolerant representation. The skip-invalid
-    /// strategy calls this once per batch.
+    /// Return `Ok(None)` when an argument has no null-tolerant representation. Valid-row execution
+    /// calls this once per batch.
     fn decode_null_tolerant(
         args: &dyn ExecutionArgs,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<Self::Columns>>;
 
     /// Read the row of elements at `index`. Must be `O(1)`: it is called in the row loop.
+    ///
+    /// Each argument selects either its batch-constant value or row `index`. Keep that selection
+    /// visible in the loop so LLVM can unswitch it before vectorizing.
     fn get(columns: &Self::Columns, index: usize) -> Self::Elems<'_>;
 
-    /// Borrow every decoded column directly, or `None` when any argument is batch-constant.
+    /// Borrow the decoded columns when none is batch-constant.
     ///
-    /// This is selected once outside the hot loop. Keeping `ArgColumn` out of the resulting tuple
-    /// gives the optimizer ordinary contiguous column access without a per-row constant check.
-    fn per_row_views(columns: &Self::Columns) -> Option<Self::Views<'_>>;
+    /// Returns `None` if any column is batch-constant. Otherwise, omitting [`ArgColumn`] from the
+    /// returned tuple removes constant checks from the row loop.
+    fn views_no_constants(columns: &Self::Columns) -> Option<Self::Views<'_>>;
 
     /// Whether every view contains exactly `row_count` rows.
     ///
-    /// The executor calls this once before the all-per-row hot loop. A successful check gives LLVM
-    /// a dominating equality between the loop bound and every source length, which lets it optimize
-    /// the tuple access as one fixed-length traversal.
+    /// The executor calls this once before the loop used when no input is batch-constant. A
+    /// successful check gives LLVM a dominating equality between the loop bound and every source
+    /// length, which lets it optimize the tuple access as one fixed-length traversal.
     fn view_lens_match(views: &Self::Views<'_>, row_count: usize) -> bool;
 
-    /// Whether every per-row argument contains exactly `row_count` rows.
+    /// Whether every non-constant argument contains exactly `row_count` rows.
     ///
-    /// This is the mixed-shape equivalent of [`view_lens_match`](Self::view_lens_match) when
-    /// [`per_row_views`](Self::per_row_views) declines. It runs once before the hot loop for the
-    /// same LLVM optimization. A batch constant is exempt because decoding collapsed it to one row.
+    /// This is the equivalent of [`view_lens_match`](Self::view_lens_match) when the columns include
+    /// batch constants. It runs once before the hot loop for the same LLVM optimization. A batch
+    /// constant is exempt because its [`ArgColumn`] constructor already validated the one-row
+    /// representation produced by decoding.
     fn decoded_lens_match(columns: &Self::Columns, row_count: usize) -> bool;
 
     /// Read one row from borrowed views.
@@ -257,7 +269,7 @@ impl ElementTuple for () {
 
     fn get(_columns: &Self::Columns, _index: usize) -> Self::Elems<'_> {}
 
-    fn per_row_views(_columns: &Self::Columns) -> Option<Self::Views<'_>> {
+    fn views_no_constants(_columns: &Self::Columns) -> Option<Self::Views<'_>> {
         Some(())
     }
 
@@ -341,7 +353,7 @@ macro_rules! element_tuple {
                 ($(columns.$idx.get(index),)+)
             }
 
-            fn per_row_views(columns: &Self::Columns) -> Option<Self::Views<'_>> {
+            fn views_no_constants(columns: &Self::Columns) -> Option<Self::Views<'_>> {
                 Some(($($t::view(columns.$idx.per_row_column()?),)+))
             }
 
@@ -372,7 +384,7 @@ macro_rules! element_tuple {
             }
 
             fn constants(columns: &Self::Columns) -> Self::ConstElems<'_> {
-                ($(columns.$idx.constant(),)+)
+                ($(columns.$idx.constant_value(),)+)
             }
         }
     };

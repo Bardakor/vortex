@@ -25,6 +25,7 @@ use crate::VortexSessionExecute;
 use crate::array_session;
 use crate::arrays::BoolArray;
 use crate::arrays::ConstantArray;
+use crate::arrays::MaskedArray;
 use crate::arrays::PrimitiveArray;
 use crate::assert_arrays_eq;
 use crate::dtype::DType;
@@ -52,7 +53,7 @@ struct NullarySeven;
 struct AddThree;
 
 #[derive(Clone)]
-struct AddShort;
+struct AddShort(ShortVisit);
 
 /// An element whose decode drops the last row, standing in for an invalid element implementation.
 struct ShortDecodeI64;
@@ -65,6 +66,9 @@ struct InvalidEncodedReduction;
 
 #[derive(Clone)]
 struct DeferredOriginalReducer;
+
+#[derive(Clone)]
+struct ValidOnlyIdentity;
 
 #[derive(Clone)]
 struct SinkOptions;
@@ -90,6 +94,12 @@ enum PreparedVisit {
     Deferred,
 }
 
+#[derive(Clone, Copy)]
+enum ShortVisit {
+    Owned,
+    Sink,
+}
+
 // SAFETY: the view and unchecked access delegate to the `i64` implementation. The implementation
 // deliberately returns a short column so the executor's pre-loop length guard can be tested.
 unsafe impl InputElement for ShortDecodeI64 {
@@ -97,7 +107,7 @@ unsafe impl InputElement for ShortDecodeI64 {
     type View<'a> = &'a [i64];
     type Elem<'a> = i64;
 
-    const DENSE_SAFE: bool = true;
+    const DENSE_SAFE: bool = false;
     const DECODE_FALLIBLE: bool = false;
 
     fn validate(dtype: &DType) -> VortexResult<()> {
@@ -279,9 +289,16 @@ impl RowFn for AddShort {
         _args: &[DType],
         visitor: V,
     ) -> VortexResult<V::VisitResult> {
-        visitor.visit_into::<(ShortDecodeI64, i64), I64Sink, _>(|(lhs, rhs), output| {
-            *output = lhs + rhs;
-        })
+        match self.0 {
+            ShortVisit::Owned => {
+                visitor.visit::<(ShortDecodeI64, i64), i64>(|(lhs, rhs)| lhs + rhs)
+            }
+            ShortVisit::Sink => {
+                visitor.visit_into::<(ShortDecodeI64, i64), I64Sink, _>(|(lhs, rhs), output| {
+                    *output = lhs + rhs;
+                })
+            }
+        }
     }
 }
 
@@ -434,6 +451,30 @@ impl RowFn for DeferredOriginalReducer {
     }
 }
 
+impl RowFn for ValidOnlyIdentity {
+    type Options = EmptyOptions;
+
+    const ARG_NAMES: &'static [&'static str] = &["value"];
+    const FALLIBLE: bool = true;
+
+    fn id(&self) -> ScalarFnId {
+        static ID: CachedId = CachedId::new("test.valid_only_identity");
+        *ID
+    }
+
+    fn dispatch<V: RowVisitor<Self::Options>>(
+        &self,
+        _options: &Self::Options,
+        _args: &[DType],
+        visitor: V,
+    ) -> VortexResult<V::VisitResult> {
+        visitor.visit_into::<(i64,), I64Sink, VortexResult<()>>(|(value,), output| {
+            *output = value;
+            Ok(())
+        })
+    }
+}
+
 impl RowFn for SinkOptions {
     type Options = bool;
 
@@ -529,7 +570,7 @@ impl RowFn for PreparedAdd {
 fn test_batch_rejects_input_length_mismatch() -> VortexResult<()> {
     static ID: CachedId = CachedId::new("test.row_batch");
 
-    let input = PrimitiveArray::new(vec![1i64, 2], Validity::NonNullable).into_array();
+    let input = PrimitiveArray::new(vec![1_i64, 2], Validity::NonNullable).into_array();
     let args = VecExecutionArgs::new(vec![input], 3);
     let result = Batch::new(*ID, &args, |_| {
         Ok(BatchPlan {
@@ -549,7 +590,7 @@ fn test_short_decode_beside_constant_is_rejected() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![lhs, rhs], 64);
     let mut ctx = array_session().create_execution_ctx();
 
-    let error = match execute_rows(&AddShort, &EmptyOptions, &args, &mut ctx) {
+    let error = match execute_rows(&AddShort(ShortVisit::Sink), &EmptyOptions, &args, &mut ctx) {
         Err(error) => error,
         Ok(_) => vortex_bail!("a short decoded column passed the pre-loop length check"),
     };
@@ -563,6 +604,54 @@ fn test_short_decode_beside_constant_is_rejected() -> VortexResult<()> {
     Ok(())
 }
 
+#[rstest]
+#[case::owned(ShortVisit::Owned)]
+#[case::sink(ShortVisit::Sink)]
+fn test_short_constant_decode_is_rejected(#[case] visit: ShortVisit) -> VortexResult<()> {
+    let lhs = ConstantArray::new(10_i64, 64).into_array();
+    let rhs = PrimitiveArray::from_iter(0..64_i64).into_array();
+    let args = VecExecutionArgs::new(vec![lhs, rhs], 64);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let error = match execute_rows(&AddShort(visit), &EmptyOptions, &args, &mut ctx) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("a short constant decode passed the pre-loop length check"),
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("batch-constant input must contain exactly 1 row, got 0"),
+        "unexpected error: {error}",
+    );
+    Ok(())
+}
+
+#[test]
+fn test_short_constant_null_tolerant_decode_is_rejected() -> VortexResult<()> {
+    let lhs = MaskedArray::try_new(
+        ConstantArray::new(10_i64, 4).into_array(),
+        Validity::from_iter([true, false, true, false]),
+    )?
+    .into_array();
+    let rhs = PrimitiveArray::from_iter(0..4_i64).into_array();
+    let args = VecExecutionArgs::new(vec![lhs, rhs], 4);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let error = match execute_rows(&AddShort(ShortVisit::Sink), &EmptyOptions, &args, &mut ctx) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("a short null-tolerant constant decode passed validation"),
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("decoded batch-constant input must contain exactly 1 row, got 0"),
+        "unexpected error: {error}",
+    );
+    Ok(())
+}
+
 #[test]
 fn test_dense_retry_does_not_reduce_filtered_inputs() -> VortexResult<()> {
     let lhs =
@@ -571,9 +660,15 @@ fn test_dense_retry_does_not_reduce_filtered_inputs() -> VortexResult<()> {
     let args = VecExecutionArgs::new(vec![lhs, rhs], 2);
     let mut ctx = array_session().create_execution_ctx();
 
-    let result = execute_rows(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx);
+    let error = match execute_rows(&RetryConstantAdd, &EmptyOptions, &args, &mut ctx) {
+        Err(error) => error,
+        Ok(_) => vortex_bail!("valid-row overflow must remain observable"),
+    };
 
-    assert!(result.is_err());
+    assert!(
+        error.to_string().contains("checked add overflowed"),
+        "unexpected error: {error}",
+    );
     Ok(())
 }
 
@@ -791,7 +886,7 @@ fn test_kernel_output_rejects_nulls_at_function_boundary(
         "the boundary error must name the function, got {error}",
     );
     assert!(
-        error.contains("row kernel produced nulls for valid rows"),
+        error.contains("row kernel must produce only valid rows"),
         "the boundary error must identify invalid row output, got {error}",
     );
     Ok(())
@@ -840,9 +935,22 @@ fn test_nullary_row_function_broadcasts() -> VortexResult<()> {
     let mut ctx = array_session().create_execution_ctx();
 
     let actual = execute_rows(&NullarySeven, &EmptyOptions, &args, &mut ctx)?;
-    let expected = PrimitiveArray::from_iter([7i64, 7, 7]).into_array();
+    let expected = PrimitiveArray::from_iter([7_i64, 7, 7]).into_array();
 
     assert_arrays_eq!(&actual, &expected, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn test_valid_only_empty_batch_preserves_nonnullable_dtype() -> VortexResult<()> {
+    let input = PrimitiveArray::from_iter(std::iter::empty::<i64>()).into_array();
+    let args = VecExecutionArgs::new(vec![input], 0);
+    let mut ctx = array_session().create_execution_ctx();
+
+    let actual = execute_rows(&ValidOnlyIdentity, &EmptyOptions, &args, &mut ctx)?;
+
+    assert_eq!(actual.len(), 0);
+    assert_eq!(actual.dtype(), &DType::from(i64::PTYPE));
     Ok(())
 }
 

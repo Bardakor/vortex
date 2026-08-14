@@ -136,7 +136,7 @@ pub(crate) enum RowPolicy {
     /// Evaluate all rows, retrying only valid rows if a deferred error is raised.
     DenseWithRetry,
 
-    /// Execute only valid rows, trying skip-invalid execution before filtering.
+    /// Execute only valid rows over the original inputs before filtering.
     ValidOnly,
 }
 

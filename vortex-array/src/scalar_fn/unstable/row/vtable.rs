@@ -76,6 +76,8 @@ impl<F: RowFn> ScalarFnVTable for F {
         union_child_validities(expression)
     }
 
+    // `RowFn` is stricter than `ScalarFnVTable::is_strict`: its kernel cannot produce null from
+    // valid inputs, so batch execution derives output validity only from input validity.
     fn is_strict(&self, _options: &Self::Options) -> bool {
         true
     }
