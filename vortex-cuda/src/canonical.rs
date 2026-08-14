@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::try_join_all;
+use vortex::array::ArrayRef;
 use vortex::array::Canonical;
 use vortex::array::IntoArray;
 use vortex::array::VortexSessionExecute;
@@ -12,12 +13,14 @@ use vortex::array::arrays::Bool;
 use vortex::array::arrays::BoolArray;
 use vortex::array::arrays::DecimalArray;
 use vortex::array::arrays::ExtensionArray;
+use vortex::array::arrays::ListViewArray;
 use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::StructArray;
 use vortex::array::arrays::VarBinViewArray;
 use vortex::array::arrays::bool::BoolDataParts;
 use vortex::array::arrays::decimal::DecimalDataParts;
 use vortex::array::arrays::extension::ExtensionArrayExt;
+use vortex::array::arrays::listview::ListViewDataParts;
 use vortex::array::arrays::primitive::PrimitiveDataParts;
 use vortex::array::arrays::struct_::StructDataParts;
 use vortex::array::arrays::varbinview::BinaryView;
@@ -29,6 +32,16 @@ use vortex::buffer::BitBuffer;
 use vortex::buffer::Buffer;
 use vortex::buffer::ByteBuffer;
 use vortex::error::VortexResult;
+
+/// Copy a canonical child array to the host.
+async fn child_into_host(child: ArrayRef) -> VortexResult<ArrayRef> {
+    #[allow(clippy::disallowed_methods)]
+    Ok(child
+        .execute::<Canonical>(&mut legacy_session().create_execution_ctx())?
+        .into_host()
+        .await?
+        .into_array())
+}
 
 /// Copy a `Validity::Array` bitmap back to the host.
 ///
@@ -168,6 +181,23 @@ impl CanonicalCudaExt for Canonical {
                 Ok(Canonical::VarBinView(unsafe {
                     VarBinViewArray::new_unchecked(host_views, host_buffers, dtype, validity)
                 }))
+            }
+            Canonical::List(list) => {
+                let ListViewDataParts {
+                    elements,
+                    offsets,
+                    sizes,
+                    validity,
+                    ..
+                } = list.into_data_parts();
+                let validity = validity_into_host(validity).await?;
+
+                Ok(Canonical::List(ListViewArray::try_new(
+                    child_into_host(elements).await?,
+                    child_into_host(offsets).await?,
+                    child_into_host(sizes).await?,
+                    validity,
+                )?))
             }
             Canonical::Extension(ext) => {
                 // Copy the storage array to host and rewrap in ExtensionArray.
