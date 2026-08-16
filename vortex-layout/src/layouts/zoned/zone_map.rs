@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use vortex_array::ArrayRef;
@@ -21,7 +22,7 @@ use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::StructArray;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::dtype::DType;
-use vortex_array::dtype::FieldNames;
+use vortex_array::dtype::FieldName;
 use vortex_array::dtype::StructFields;
 use vortex_array::expr::BoundExpression;
 use vortex_array::expr::Expression;
@@ -38,6 +39,7 @@ use vortex_array::stats::bind::StatBinder;
 use vortex_array::stats::bind::bind_stats;
 use vortex_array::validity::Validity;
 use vortex_buffer::buffer;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
@@ -60,8 +62,14 @@ pub struct ZoneMap {
     array: StructArray,
     // Aggregate functions stored in the zone map, ordered by their stats-table fields.
     aggregate_fns: Arc<[AggregateFnRef]>,
+    // Stats-table column backing each entry of `aggregate_fns`, or `None` when the table has no
+    // column for it. Resolving one means formatting the aggregate's display name and scanning the
+    // table, which is too much to repeat for every stat a predicate asks for.
+    aggregate_field_names: Arc<[Option<FieldName>]>,
     // Scope that lowered pruning predicates are evaluated against. See [`pruning_scope`].
     scope: StructArray,
+    // Name of the row-count column within `scope`. See [`row_count_field_name`].
+    row_count_field: FieldName,
 }
 
 impl ZoneMap {
@@ -90,12 +98,25 @@ impl ZoneMap {
         zone_len: u64,
         row_count: u64,
     ) -> Self {
-        let scope = pruning_scope(&array, zone_len, row_count);
+        let (scope, row_count_field) = pruning_scope(&array, zone_len, row_count);
+        let aggregate_field_names = aggregate_fns
+            .iter()
+            .map(|aggregate_fn| {
+                let field_name = FieldName::from(aggregate_fn.to_string());
+                array
+                    .unmasked_field_by_name_opt(&field_name)
+                    .is_some()
+                    .then_some(field_name)
+            })
+            .collect();
+
         Self {
             column_dtype,
             array,
             aggregate_fns,
+            aggregate_field_names,
             scope,
+            row_count_field,
         }
     }
 
@@ -131,13 +152,12 @@ impl ZoneMap {
     /// `true` means the zone cannot contain matching rows and can be skipped.
     ///
     /// Row-count placeholders are resolved during lowering against a per-zone column that
-    /// [`ZoneMap::pruning_scope`] materializes, so the lowered predicate is directly evaluable.
+    /// [`pruning_scope`] materializes, so the lowered predicate is directly evaluable.
     pub fn prune(
         &self,
         predicate: &BoundExpression,
         session: &VortexSession,
     ) -> VortexResult<Mask> {
-        let mut ctx = session.create_execution_ctx();
         let predicate = self.lower_stats(predicate.clone())?;
 
         // A rewrite rule that proves its case from the predicate alone lowers to a constant, which
@@ -150,6 +170,7 @@ impl ZoneMap {
             });
         }
 
+        let mut ctx = session.create_execution_ctx();
         self.scope
             .clone()
             .into_array()
@@ -162,6 +183,7 @@ impl ZoneMap {
         let binder = ZoneMapStatsBinder {
             zone_map: self,
             scope_dtype: self.scope.dtype(),
+            bound: RefCell::default(),
         };
         bind_stats(predicate, &binder)
     }
@@ -169,50 +191,59 @@ impl ZoneMap {
 
 /// Build the scope that a lowered pruning predicate is evaluated against.
 ///
-/// The scope is a two-field struct: [`STATS_FIELD`] nests the stored zone-map table, and
-/// [`ROW_COUNT_FIELD`] holds the number of rows in each zone. The row count is a layout property
-/// rather than a stored stat, and the final zone may be shorter than the nominal zone length, so it
-/// cannot be resolved to a literal. Materializing it costs nothing: uniform zones use a
-/// [`ConstantArray`] and a short final zone uses a two-run run-end encoded array.
+/// The scope is the stored zone-map table with one extra column appended, holding the number of
+/// rows in each zone. The row count is a layout property rather than a stored stat, and the final
+/// zone may be shorter than the nominal zone length, so it cannot be resolved to a literal.
+/// Materializing it costs nothing: uniform zones use a [`ConstantArray`] and a short final zone
+/// uses a two-run run-end encoded array.
 ///
-/// Nesting is what keeps the row count addressable. Appending it beside the stat columns would put
-/// a name this module chooses into a namespace that aggregate display names and legacy stat names
-/// also write to, and a collision would not be loud: [`StructFields`] permits duplicate names and
-/// resolves lookups to the *first* match, so a colliding stat column would silently shadow the row
-/// count and corrupt pruning. One level down, stat names cannot reach the two names this module
-/// owns.
+/// Keeping the row count in the same namespace as the stat columns is what makes a stat reference
+/// a single [`get_item`]. Every reference is evaluated per zone, and a lowered predicate can hold
+/// dozens of them, so the extra hop a nested scope would add is paid over and over. The name
+/// collision that flatness risks is handled once, at construction, by [`row_count_field_name`].
 ///
 /// The scope is built once per zone map rather than per predicate, because its dtype and its
 /// row-count column depend only on the stats table and the layout's zone geometry.
-fn pruning_scope(array: &StructArray, zone_len: u64, row_count: u64) -> StructArray {
-    let num_zones = array.len();
-    let row_counts = row_count_array(zone_len, row_count, num_zones);
-    let fields = StructFields::new(
-        FieldNames::from([STATS_FIELD, ROW_COUNT_FIELD]),
-        vec![array.dtype().clone(), row_counts.dtype().clone()],
-    );
+fn pruning_scope(array: &StructArray, zone_len: u64, row_count: u64) -> (StructArray, FieldName) {
+    let row_counts = row_count_array(zone_len, row_count, array.len());
+    let row_count_field = row_count_field_name(array.struct_fields());
+    let scope = array
+        .with_column(row_count_field.clone(), row_counts)
+        .vortex_expect("row-count column matches the stats table length");
 
-    // SAFETY: both fields are `num_zones` long and their dtypes are taken from the arrays
-    // themselves, so they match the struct dtype by construction.
-    unsafe {
-        StructArray::new_unchecked(
-            [array.clone().into_array(), row_counts],
-            fields,
-            num_zones,
-            Validity::NonNullable,
-        )
-    }
+    (scope, row_count_field)
 }
 
-/// Field of the pruning scope nesting the stored zone-map table.
-const STATS_FIELD: &str = "stats";
+/// Pick a name for the pruning scope's row-count column that no stat column already uses.
+///
+/// A collision would not be loud: [`StructFields`] permits duplicate names and resolves lookups to
+/// the *first* match, so a stats column named `row_count` would silently shadow the row count and
+/// corrupt pruning. Stat column names come from aggregate display names and legacy stat names, so
+/// this module cannot reserve a name up front; it appends underscores until the name is free.
+fn row_count_field_name(stats_fields: &StructFields) -> FieldName {
+    if stats_fields.find(ROW_COUNT_FIELD).is_none() {
+        return FieldName::from(ROW_COUNT_FIELD);
+    }
 
-/// Field of the pruning scope holding the number of rows in each zone.
+    let mut name = String::from(ROW_COUNT_FIELD);
+    while stats_fields.find(&name).is_some() {
+        name.push('_');
+    }
+    FieldName::from(name)
+}
+
+/// Preferred name of the pruning scope's row-count column.
 const ROW_COUNT_FIELD: &str = "row_count";
 
 struct ZoneMapStatsBinder<'a> {
     zone_map: &'a ZoneMap,
     scope_dtype: &'a DType,
+    // Aggregates already lowered during this pass, keyed by the requested aggregate function.
+    //
+    // A falsifier repeats the same stat many times — a sixteen-term `IN` list asks for `min` and
+    // `max` once per term — and resolving one means scanning the stats table and binding a fresh
+    // expression against the scope.
+    bound: RefCell<Vec<(AggregateFnRef, Option<BoundExpression>)>>,
 }
 
 impl StatBinder for ZoneMapStatsBinder<'_> {
@@ -232,6 +263,34 @@ impl StatBinder for ZoneMapStatsBinder<'_> {
             self.zone_map.column_dtype
         );
 
+        if let Some((_, cached)) = self
+            .bound
+            .borrow()
+            .iter()
+            .find(|(cached_fn, _)| cached_fn == aggregate_fn)
+        {
+            return Ok(cached.clone());
+        }
+
+        let bound = self.bind_aggregate_uncached(aggregate_fn)?;
+        self.bound
+            .borrow_mut()
+            .push((aggregate_fn.clone(), bound.clone()));
+        Ok(bound)
+    }
+
+    fn bind_row_count(&self) -> VortexResult<Option<BoundExpression>> {
+        get_item(self.zone_map.row_count_field.clone(), root())
+            .bind(self.scope_dtype)
+            .map(Some)
+    }
+}
+
+impl ZoneMapStatsBinder<'_> {
+    fn bind_aggregate_uncached(
+        &self,
+        aggregate_fn: &AggregateFnRef,
+    ) -> VortexResult<Option<BoundExpression>> {
         if let Some(stat_expr) = self.zone_map.aggregate_field_expr(aggregate_fn) {
             return Ok(Some(self.bind_target(stat_expr)?));
         }
@@ -279,56 +338,46 @@ impl StatBinder for ZoneMapStatsBinder<'_> {
         Ok(None)
     }
 
-    fn bind_row_count(&self) -> VortexResult<Option<BoundExpression>> {
-        get_item(ROW_COUNT_FIELD, root())
-            .bind(self.scope_dtype)
-            .map(Some)
-    }
-}
-
-impl ZoneMapStatsBinder<'_> {
     /// Bind a stat expression against the pruning scope it was built for.
     fn bind_target(&self, expr: Expression) -> VortexResult<BoundExpression> {
         expr.bind(self.scope_dtype)
     }
 }
 
-/// Root of the stored zone-map table within the pruning scope.
-///
-/// Stat expressions are built against this rather than against the scope root, so that binding a
-/// stat is a single walk rather than a build-then-rebase.
-fn stats_root() -> Expression {
-    get_item(STATS_FIELD, root())
-}
-
 impl ZoneMap {
     fn aggregate_field_expr(&self, requested: &AggregateFnRef) -> Option<Expression> {
+        // A stat the zone map stores verbatim is the overwhelmingly common case, and it needs no
+        // name at all: stats-table columns are named after the aggregates in `aggregate_fns`, so a
+        // stored aggregate equal to the requested one names the same column the display-name
+        // lookup below would find.
+        if let Some(field_name) = self.stored_field_name(requested) {
+            return Some(aggregate_result_expr(
+                requested,
+                get_item(field_name.clone(), root()),
+            ));
+        }
+
         let field_name = requested.to_string();
         if self.array.unmasked_field_by_name_opt(&field_name).is_some() {
             return Some(aggregate_result_expr(
                 requested,
-                get_item(field_name, stats_root()),
+                get_item(field_name, root()),
             ));
         }
 
         let mut approximate = None;
-        for stored in self.aggregate_fns.iter() {
-            let field_name = stored.to_string();
-            if self.array.unmasked_field_by_name_opt(&field_name).is_none() {
-                continue;
-            }
-
+        for (stored, field_name) in self.stored_fields() {
             match stored.can_satisfy(requested) {
                 AggregateFnSatisfaction::Exact => {
                     return Some(aggregate_result_expr(
                         stored,
-                        get_item(field_name, stats_root()),
+                        get_item(field_name.clone(), root()),
                     ));
                 }
                 AggregateFnSatisfaction::Approximate => {
                     approximate = Some(aggregate_result_expr(
                         stored,
-                        get_item(field_name, stats_root()),
+                        get_item(field_name.clone(), root()),
                     ));
                 }
                 AggregateFnSatisfaction::No => {}
@@ -336,6 +385,21 @@ impl ZoneMap {
         }
 
         approximate
+    }
+
+    /// The stats-table column storing `requested` verbatim, if the zone map has one.
+    fn stored_field_name(&self, requested: &AggregateFnRef) -> Option<&FieldName> {
+        self.stored_fields()
+            .find(|(stored, _)| *stored == requested)
+            .map(|(_, field_name)| field_name)
+    }
+
+    /// The stored aggregates that have a column in the stats table, paired with that column.
+    fn stored_fields(&self) -> impl Iterator<Item = (&AggregateFnRef, &FieldName)> {
+        self.aggregate_fns
+            .iter()
+            .zip(self.aggregate_field_names.iter())
+            .filter_map(|(stored, field_name)| Some((stored, field_name.as_ref()?)))
     }
 
     fn stat_field_expr(&self, stat: Stat) -> Option<Expression> {
@@ -350,7 +414,7 @@ impl ZoneMap {
 
     fn legacy_stat_field_expr(&self, stat: Stat) -> Option<Expression> {
         if self.array.unmasked_field_by_name_opt(stat.name()).is_some() {
-            return Some(get_item(stat.name(), stats_root()));
+            return Some(get_item(stat.name(), root()));
         }
 
         None
@@ -432,6 +496,7 @@ mod tests {
     use vortex_array::dtype::FieldNames;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
+    use vortex_array::dtype::StructFields;
     use vortex_array::expr::BoundExpression;
     use vortex_array::expr::Expression;
     use vortex_array::expr::cast;
@@ -458,8 +523,8 @@ mod tests {
     use vortex_mask::Mask;
 
     use crate::layouts::zoned::zone_map::ROW_COUNT_FIELD;
-    use crate::layouts::zoned::zone_map::STATS_FIELD;
     use crate::layouts::zoned::zone_map::ZoneMap;
+    use crate::layouts::zoned::zone_map::row_count_field_name;
     use crate::test::SESSION;
 
     fn falsify(expr: &Expression, dtype: DType) -> BoundExpression {
@@ -806,10 +871,10 @@ mod tests {
 
     #[test]
     fn stat_column_cannot_shadow_the_row_count_field() {
-        // A stats column named `row_count` sits one level below the pruning scope's own
-        // `row_count` field, so it cannot shadow it. Were the two flattened into one namespace,
-        // this column would win every lookup: `StructFields` resolves duplicates to the first
-        // match, and pruning would silently read `999` as each zone's row count.
+        // A stats column already named `row_count` forces the scope's own row-count column to a
+        // different name. Without that, this column would win every lookup: `StructFields`
+        // resolves duplicate names to the first match, and pruning would silently read `999` as
+        // each zone's row count.
         let zone_map = unsafe {
             ZoneMap::new_unchecked(
                 PType::U64.into(),
@@ -831,6 +896,8 @@ mod tests {
             )
         };
 
+        assert_ne!(zone_map.row_count_field.as_ref(), ROW_COUNT_FIELD);
+
         // Zones hold 4, 4 and 2 rows, so the last two are entirely null.
         let expr = is_not_null(root());
         let pruning_expr = falsify(&expr, PType::U64.into());
@@ -840,6 +907,18 @@ mod tests {
             BoolArray::from_iter([false, true, true]),
             &mut SESSION.create_execution_ctx()
         );
+    }
+
+    #[test]
+    fn row_count_field_name_keeps_looking_until_it_is_free() {
+        let taken = StructFields::new(
+            FieldNames::from(["row_count", "row_count_"]),
+            vec![PType::U64.into(), PType::U64.into()],
+        );
+        assert_eq!(row_count_field_name(&taken).as_ref(), "row_count__");
+
+        let free = StructFields::new(FieldNames::from(["max"]), vec![PType::U64.into()]);
+        assert_eq!(row_count_field_name(&free).as_ref(), ROW_COUNT_FIELD);
     }
 
     #[test]
@@ -892,7 +971,7 @@ mod tests {
         let lowered = zone_map.lower_stats(pruning_expr).unwrap();
 
         let expected = eq(
-            get_item("null_count", get_item(STATS_FIELD, root())),
+            get_item("null_count", root()),
             get_item(ROW_COUNT_FIELD, root()),
         )
         .bind(scope_dtype)

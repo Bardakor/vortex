@@ -143,7 +143,12 @@ impl BoundExpression {
         children: impl IntoIterator<Item = BoundExpression>,
     ) -> VortexResult<Self> {
         let children = Vec::from_iter(children);
-        let BoundExpression::Scalar { scalar_fn, .. } = &self else {
+        let BoundExpression::Scalar {
+            dtype,
+            scalar_fn,
+            children: old_children,
+        } = &self
+        else {
             vortex_ensure!(
                 children.is_empty(),
                 "Root expression cannot have {} children",
@@ -151,6 +156,23 @@ impl BoundExpression {
             );
             return Ok(self);
         };
+
+        // A return dtype is a function of the argument dtypes alone, so replacing children that
+        // type the same cannot change it. Rewrites usually substitute deep inside a tree and leave
+        // every dtype on the path to the root untouched, and recomputing one means a vector of
+        // cloned dtypes and a virtual call per node on that path.
+        if children.len() == old_children.len()
+            && children
+                .iter()
+                .zip(old_children.iter())
+                .all(|(new, old)| new.dtype() == old.dtype())
+        {
+            return Ok(Self::Scalar {
+                dtype: dtype.clone(),
+                scalar_fn: scalar_fn.clone(),
+                children: children.into(),
+            });
+        }
 
         Self::try_new(scalar_fn.clone(), children)
     }
