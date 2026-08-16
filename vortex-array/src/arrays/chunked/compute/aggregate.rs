@@ -51,11 +51,16 @@ mod tests {
     use crate::array_session;
     use crate::arrays::BoolArray;
     use crate::arrays::ChunkedArray;
+    use crate::arrays::DecimalArray;
     use crate::arrays::PrimitiveArray;
     use crate::dtype::DType;
+    use crate::dtype::DecimalDType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
+    use crate::dtype::i256;
+    use crate::scalar::DecimalValue;
     use crate::scalar::Scalar;
+    use crate::validity::Validity;
 
     fn run_sum(batch: &crate::ArrayRef) -> VortexResult<Scalar> {
         let mut ctx = array_session().create_execution_ctx();
@@ -227,6 +232,36 @@ mod tests {
         )?;
         let result = run_sum(&chunked.into_array())?;
         assert!(result.is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn sum_chunked_decimal_defers_precision_overflow_until_final_result() -> VortexResult<()> {
+        let decimal_dtype = DecimalDType::new(76, 0);
+        let six_e75 = i256::from_i128(10)
+            .checked_pow(75)
+            .map(|value| value * i256::from_i128(6))
+            .ok_or_else(|| vortex_error::vortex_err!("6e75 must fit in i256"))?;
+        let chunked = ChunkedArray::try_new(
+            vec![
+                DecimalArray::new(
+                    buffer![six_e75, six_e75],
+                    decimal_dtype,
+                    Validity::NonNullable,
+                )
+                .into_array(),
+                DecimalArray::new(buffer![-six_e75], decimal_dtype, Validity::NonNullable)
+                    .into_array(),
+            ],
+            DType::Decimal(decimal_dtype, Nullability::NonNullable),
+        )?;
+
+        let result = run_sum(&chunked.into_array())?;
+
+        assert_eq!(
+            result.as_decimal().decimal_value(),
+            Some(DecimalValue::I256(six_e75))
+        );
         Ok(())
     }
 

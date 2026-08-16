@@ -188,7 +188,7 @@ impl AggregateFnVTable for Sum {
                 *acc += val;
                 false
             }
-            SumState::Decimal { value, dtype } => {
+            SumState::Decimal { value, .. } => {
                 let val = other
                     .as_decimal()
                     .decimal_value()
@@ -196,7 +196,7 @@ impl AggregateFnVTable for Sum {
                 match value.checked_add(&val) {
                     Some(r) => {
                         *value = r;
-                        !value.fits_in_precision(*dtype)
+                        false
                     }
                     None => true,
                 }
@@ -219,7 +219,11 @@ impl AggregateFnVTable for Sum {
                     .return_dtype
                     .as_decimal_opt()
                     .vortex_expect("return dtype must be decimal");
-                Scalar::decimal(*value, decimal_dtype, Nullability::Nullable)
+                if value.fits_in_precision(decimal_dtype) {
+                    Scalar::decimal(*value, decimal_dtype, Nullability::Nullable)
+                } else {
+                    Scalar::null(partial.return_dtype.as_nullable())
+                }
             }
         })
     }

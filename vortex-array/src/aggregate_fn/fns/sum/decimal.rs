@@ -15,7 +15,6 @@ use vortex_mask::Mask;
 use super::SumState;
 use crate::ExecutionCtx;
 use crate::arrays::DecimalArray;
-use crate::dtype::DecimalDType;
 use crate::dtype::DecimalType;
 use crate::dtype::NativeDecimalType;
 use crate::match_each_decimal_value_type;
@@ -47,7 +46,7 @@ pub(super) fn accumulate_decimal(
             let initial: I = value
                 .cast()
                 .vortex_expect("cannot fail to cast initial value");
-            match sum_decimal_value(initial, d.buffer::<T>(), validity, *dtype) {
+            match sum_decimal_value(initial, d.buffer::<T>(), validity) {
                 Some(v) => *value = v,
                 None => return Ok(true),
             }
@@ -60,7 +59,6 @@ fn sum_decimal_value<T, I>(
     initial: I,
     values: Buffer<T>,
     validity: Option<&BitBuffer>,
-    output_dtype: DecimalDType,
 ) -> Option<DecimalValue>
 where
     T: AsPrimitive<I>,
@@ -73,9 +71,9 @@ where
         None => sum_decimal(values, initial),
     };
 
+    // Precision is a property of the final aggregate. Keep the native intermediate value so later
+    // batches can cancel it; `Sum::to_scalar` validates the final precision.
     sum.map(DecimalValue::from)
-        // We have to make sure that the decimal value fits the precision of the decimal dtype.
-        .filter(|v| v.fits_in_precision(output_dtype))
 }
 
 fn sum_decimal<T: AsPrimitive<I>, I: Copy + CheckedAdd + 'static>(
