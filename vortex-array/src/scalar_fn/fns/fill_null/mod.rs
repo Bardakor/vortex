@@ -151,9 +151,8 @@ fn fill_null_canonical(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     let arr = canonical.to_array_ref();
-    if let Some(result) = precondition(&arr, fill_value)? {
-        // The result of precondition may return another ScalarFn, in which case we should
-        // apply it immediately.
+    if let Some(result) = short_circuit(&arr, fill_value)? {
+        // The short circuit can return a lazy `ScalarFn`, so this forces it for now.
         // TODO(aduffy): Remove this once we have better driver check. We're also implicitly
         //  relying on the fact that Cast execution will do an optimize on its result.
         return result.execute::<ArrayRef>(ctx);
