@@ -211,7 +211,7 @@ where
 fn checked_op_lanes<S, T, Op>(
     source: S,
     valid_rows: &Mask,
-    mut to_operands: impl FnMut(S::Item) -> (T, T),
+    to_operands: impl Fn(S::Item) -> (T, T),
 ) -> Result<Buffer<T>, usize>
 where
     S: IndexedSource + Copy,

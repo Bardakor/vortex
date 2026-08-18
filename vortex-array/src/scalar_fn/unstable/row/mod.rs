@@ -11,15 +11,23 @@
 //! [`RowFn::dispatch`] implementation uses a [`RowVisitor`] to select an [`ElementTuple`] and
 //! either an [`OutputElement`] or [`OutputSink`] for each supported dtype combination.
 //!
+//! Unlike a general strict function, a [`RowFn`] cannot produce null from valid inputs.
+//!
 //! Prepared visits move work derived from constant operands outside the hot loop. Deferred visits
 //! reduce compact failure evidence in that loop and retry only valid rows when null payloads may
 //! have caused the failure.
+
+// TODO(connor)[RowFn]: Remove this expectation when #9450 connects the batch executor.
+#[expect(dead_code)]
+mod execute;
+pub use execute::RowExecution;
 
 mod row_fn;
 pub use row_fn::RowFn;
 
 mod types;
 pub use types::ElementTuple;
+pub use types::FailureEvidence;
 pub use types::IndexedElementTuple;
 pub use types::InitializedElement;
 pub use types::InputElement;
@@ -27,6 +35,7 @@ pub use types::OutputElement;
 pub use types::OutputSink;
 pub use types::SinkResult;
 pub use types::UninitElementSink;
+pub use types::ViewLen;
 
 mod visitor;
 pub use visitor::RowVisitor;

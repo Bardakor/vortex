@@ -7,13 +7,13 @@
 //! selected visit with the input dtypes during planning and return its output dtype.
 
 use std::mem::needs_drop;
-use std::ops::BitOrAssign;
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 
 use crate::dtype::DType;
 use crate::scalar_fn::unstable::row::ElementTuple;
+use crate::scalar_fn::unstable::row::FailureEvidence;
 use crate::scalar_fn::unstable::row::IndexedElementTuple;
 use crate::scalar_fn::unstable::row::OutputElement;
 use crate::scalar_fn::unstable::row::OutputSink;
@@ -36,7 +36,7 @@ const fn assert_input_visit_contract<F: RowFn, Args: ElementTuple>() {
     // Dictionary push-down can evaluate values that no input row references. Every dispatch must
     // therefore match the function-wide fallibility declaration.
     assert!(
-        !Args::DECODE_FALLIBLE || F::FALLIBLE,
+        Args::DECODE_INFALLIBLE || F::FALLIBLE,
         "RowFn::FALLIBLE must be true when input decoding can fail",
     );
 }
@@ -69,7 +69,7 @@ where
     Function: RowFn,
     Args: IndexedElementTuple,
     Out: OutputElement,
-    Fail: Copy + Default + BitOrAssign,
+    Fail: FailureEvidence,
 {
     assert_owned_visit_contract::<Function, Args, Out>();
     assert!(
@@ -106,7 +106,7 @@ where
 {
     Args::validate(dtypes)?;
 
-    let dtype = Sink::output_dtype(options, dtypes)?;
+    let dtype = Sink::return_dtype(options)?;
     vortex_ensure!(
         !dtype.is_nullable(),
         "row output sinks must declare a non-nullable dtype, got {dtype}",
