@@ -140,13 +140,18 @@ impl LayoutReader for ZonedReader {
         mask: Mask,
     ) -> VortexResult<MaskFuture> {
         trace!("Stats pruning evaluation: {} - {}", &self.name, expr);
-        let data_eval = self
-            .data_child()?
-            .pruning_evaluation(row_range, expr, mask.clone())?;
 
         let Some(pruning_mask_future) = self.pruning.pruning_mask_future(expr.clone()) else {
             trace!("Stats pruning evaluation: not prune-able {expr}");
-            return Ok(data_eval);
+            let lazy_children = Arc::clone(&self.lazy_children);
+            let row_range = row_range.clone();
+            let expr = expr.clone();
+            return Ok(MaskFuture::new(mask.len(), async move {
+                let data_child = Arc::clone(lazy_children.get(0)?);
+                data_child
+                    .pruning_evaluation(&row_range, &expr, mask)?
+                    .await
+            }));
         };
 
         let row_count = row_range.end - row_range.start;
@@ -169,6 +174,8 @@ impl LayoutReader for ZonedReader {
             .try_collect()?;
 
         let name = Arc::clone(&self.name);
+        let lazy_children = Arc::clone(&self.lazy_children);
+        let row_range = row_range.clone();
         let expr = expr.clone();
 
         Ok(MaskFuture::new(mask.len(), async move {
@@ -188,8 +195,15 @@ impl LayoutReader for ZonedReader {
             let mask_density = mask.density();
             let mut stats_mask = mask.bitand(&stats_mask);
 
-            // Forward to data child for further pruning.
+            // Only materialize the data child after statistics have pruned the input, and pass
+            // that sparse mask down so chunked readers can skip fully excluded chunks.
             if !stats_mask.all_false() {
+                let data_child = Arc::clone(lazy_children.get(0)?);
+                let data_eval = data_child.pruning_evaluation(
+                    &row_range,
+                    &expr,
+                    stats_mask.clone(),
+                )?;
                 let data_mask = data_eval.await?;
                 stats_mask = stats_mask.bitand(&data_mask);
             }
