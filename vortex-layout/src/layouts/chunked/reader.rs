@@ -307,9 +307,8 @@ impl LayoutReader for ChunkedReader {
         for (chunk_idx, _, chunk_range, mask_range) in self.ranges(row_range) {
             let chunk_mask = mask.slice(mask_range);
             if chunk_mask.all_false() {
-                // The input mask already excludes this chunk. Returning all true means the child
-                // contributes no additional pruning while avoiding reader construction entirely.
-                chunk_evals.push(MaskFuture::new_true(chunk_mask.len()));
+                // Preserve already-excluded rows without materializing the child reader.
+                chunk_evals.push(MaskFuture::ready(chunk_mask));
                 continue;
             }
 
