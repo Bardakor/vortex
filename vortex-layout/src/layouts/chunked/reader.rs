@@ -41,7 +41,7 @@ use crate::segments::SegmentSource;
 pub struct ChunkedReader {
     layout: ChunkedLayout,
     name: Arc<str>,
-    lazy_children: LazyReaderChildren,
+    lazy_children: Arc<LazyReaderChildren>,
     /// Lazily computed classification of which chunks register no interior splits, letting
     /// [`ChunkedReader::register_splits`] avoid materializing those chunks' readers.
     chunk_skips: OnceCell<ChunkSkips>,
@@ -98,7 +98,7 @@ impl ChunkedReader {
         Self {
             layout,
             name,
-            lazy_children,
+            lazy_children: Arc::new(lazy_children),
             chunk_skips: OnceCell::new(),
         }
     }
@@ -305,9 +305,17 @@ impl LayoutReader for ChunkedReader {
         let mut chunk_evals = vec![];
 
         for (chunk_idx, _, chunk_range, mask_range) in self.ranges(row_range) {
+            let chunk_mask = mask.slice(mask_range);
+            if chunk_mask.all_false() {
+                // The input mask already excludes this chunk. Returning all true means the child
+                // contributes no additional pruning while avoiding reader construction entirely.
+                chunk_evals.push(MaskFuture::new_true(chunk_mask.len()));
+                continue;
+            }
+
             let chunk_reader = self.chunk_reader(chunk_idx)?;
             let chunk_eval = chunk_reader
-                .pruning_evaluation(&chunk_range, expr, mask.slice(mask_range))
+                .pruning_evaluation(&chunk_range, expr, chunk_mask)
                 .map_err(|err| {
                     err.with_context(format!(
                         "While evaluating pruning filter on chunk {chunk_idx}"
@@ -351,12 +359,29 @@ impl LayoutReader for ChunkedReader {
         let mut chunk_evals = vec![];
 
         for (chunk_idx, _, chunk_range, mask_range) in self.ranges(row_range) {
-            let chunk_reader = self.chunk_reader(chunk_idx)?;
-            let chunk_eval = chunk_reader
-                .filter_evaluation(&chunk_range, expr, mask.slice(mask_range))
-                .map_err(|err| {
-                    err.with_context(format!("While evaluating filter on chunk {chunk_idx}"))
-                })?;
+            let lazy_children = Arc::clone(&self.lazy_children);
+            let expr = expr.clone();
+            let chunk_mask = mask.slice(mask_range);
+            let chunk_len = chunk_mask.len();
+
+            let chunk_eval = MaskFuture::new(chunk_len, async move {
+                let chunk_mask = chunk_mask.await?;
+                if chunk_mask.all_false() {
+                    return Ok(chunk_mask);
+                }
+
+                let chunk_reader = Arc::clone(lazy_children.get(chunk_idx)?);
+                let chunk_eval = chunk_reader
+                    .filter_evaluation(
+                        &chunk_range,
+                        &expr,
+                        MaskFuture::ready(chunk_mask),
+                    )
+                    .map_err(|err| {
+                        err.with_context(format!("While evaluating filter on chunk {chunk_idx}"))
+                    })?;
+                chunk_eval.await
+            });
             chunk_evals.push(chunk_eval);
         }
 
@@ -442,6 +467,7 @@ mod test {
     use vortex_buffer::buffer;
     use vortex_io::runtime::single::block_on;
     use vortex_io::session::RuntimeSessionExt;
+    use vortex_mask::Mask;
     use vortex_session::registry::ReadContext;
 
     use crate::LayoutRef;
@@ -544,6 +570,35 @@ mod test {
             .unwrap();
 
         assert_eq!(splits, expected.into_iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_filter_skips_fully_masked_chunks() {
+        let layout = nested_chunked_layout();
+        block_on(|_handle| async {
+            let reader = layout
+                .new_reader(
+                    "".into(),
+                    Arc::new(TestSegments::default()),
+                    &SESSION,
+                    &Default::default(),
+                )
+                .unwrap();
+            let expr = root().bind(reader.dtype()).unwrap();
+            let row_count = usize::try_from(layout.row_count()).unwrap();
+
+            let result = reader
+                .filter_evaluation(
+                    &(0..layout.row_count()),
+                    &expr,
+                    MaskFuture::ready(Mask::new_false(row_count)),
+                )
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(result.all_false());
+        })
     }
 
     #[rstest]
