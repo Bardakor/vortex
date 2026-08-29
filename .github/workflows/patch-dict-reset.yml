@@ -22,104 +22,111 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          bytes_path = Path('vortex-array/src/builders/dict/bytes.rs')
+          def lines(*items):
+              return "\n".join(items) + "\n"
+
+          bytes_path = Path("vortex-array/src/builders/dict/bytes.rs")
           src = bytes_path.read_text()
-          old = '''    fn reset(&mut self) -> ArrayRef {
-              let views = mem::take(&mut self.views).freeze();
-              let buffer = mem::take(&mut self.values).freeze();
-              let value_nulls = mem::take(&mut self.values_nulls).freeze();
+          needle = lines(
+              "        let value_nulls = mem::take(&mut self.values_nulls).freeze();",
+              "",
+              "        // SAFETY: we build the views explicitly and the bytes should be checked before feeding",
+          )
+          replacement = lines(
+              "        let value_nulls = mem::take(&mut self.values_nulls).freeze();",
+              "        self.lookup = Some(HashTable::new());",
+              "        self.null_code = OnceCell::new();",
+              "",
+              "        // SAFETY: we build the views explicitly and the bytes should be checked before feeding",
+          )
+          assert src.count(needle) == 1
+          src = src.replace(needle, replacement, 1)
 
-              // SAFETY: we build the views explicitly and the bytes should be checked before feeding
-          '''
-          new = '''    fn reset(&mut self) -> ArrayRef {
-              let views = mem::take(&mut self.views).freeze();
-              let buffer = mem::take(&mut self.values).freeze();
-              let value_nulls = mem::take(&mut self.values_nulls).freeze();
-              self.lookup = Some(HashTable::new());
-              self.null_code = OnceCell::new();
-
-              // SAFETY: we build the views explicitly and the bytes should be checked before feeding
-          '''
-          assert old in src
-          src = src.replace(old, new, 1)
-          marker = '''    #[test]
-              fn repeated_values() -> VortexResult<()> {
-          '''
-          test = '''    #[test]
-              fn reset_clears_encoder_state() -> VortexResult<()> {
-                  let first = VarBinViewArray::from_iter_str(["one", "two"]).into_array();
-                  let mut encoder = crate::builders::dict::dict_encoder(
-                      &first,
-                      &crate::builders::dict::UNCONSTRAINED,
-                  );
-                  let mut ctx = SESSION.create_execution_ctx();
-                  encoder.encode(&first, &mut ctx)?;
-                  encoder.reset();
-
-                  let second = VarBinViewArray::from_iter_str(["one", "three"]).into_array();
-                  let codes = encoder.encode(&second, &mut ctx)?;
-                  assert_eq!(codes.as_slice::<u8>(), &[0, 1]);
-
-                  let values = encoder.reset().execute::<VarBinViewArray>(&mut ctx)?;
-                  assert_eq!(values.bytes_at(0), b"one");
-                  assert_eq!(values.bytes_at(1), b"three");
-                  Ok(())
-              }
-
-          '''
-          assert marker in src
+          marker = lines(
+              "    #[test]",
+              "    fn repeated_values() -> VortexResult<()> {",
+          )
+          test = lines(
+              "    #[test]",
+              "    fn reset_clears_encoder_state() -> VortexResult<()> {",
+              "        let first = VarBinViewArray::from_iter_str([\"one\", \"two\"]).into_array();",
+              "        let mut encoder = crate::builders::dict::dict_encoder(",
+              "            &first,",
+              "            &crate::builders::dict::UNCONSTRAINED,",
+              "        );",
+              "        let mut ctx = SESSION.create_execution_ctx();",
+              "        encoder.encode(&first, &mut ctx)?;",
+              "        encoder.reset();",
+              "",
+              "        let second = VarBinViewArray::from_iter_str([\"one\", \"three\"]).into_array();",
+              "        let codes = encoder.encode(&second, &mut ctx)?;",
+              "        assert_eq!(codes.len(), 2);",
+              "",
+              "        let values = encoder.reset().execute::<VarBinViewArray>(&mut ctx)?;",
+              "        assert_eq!(values.bytes_at(0), b\"one\");",
+              "        assert_eq!(values.bytes_at(1), b\"three\");",
+              "        Ok(())",
+              "    }",
+              "",
+          )
+          assert src.count(marker) == 1
           bytes_path.write_text(src.replace(marker, test + marker, 1))
 
-          primitive_path = Path('vortex-array/src/builders/dict/primitive.rs')
+          primitive_path = Path("vortex-array/src/builders/dict/primitive.rs")
           src = primitive_path.read_text()
-          old = '''    fn reset(&mut self) -> ArrayRef {
-              PrimitiveArray::new(
-                  self.values.clone(),
-                  Validity::from_bit_buffer(mem::take(&mut self.values_nulls).freeze(), self.nullability),
-              )
-              .into_array()
-          }
-          '''
-          new = '''    fn reset(&mut self) -> ArrayRef {
-              let values = mem::take(&mut self.values);
-              let values_nulls = mem::take(&mut self.values_nulls).freeze();
-              self.lookup.clear();
-              self.null_code = OnceCell::new();
-
-              PrimitiveArray::new(
-                  values,
-                  Validity::from_bit_buffer(values_nulls, self.nullability),
-              )
-              .into_array()
-          }
-          '''
-          assert old in src
+          old = lines(
+              "    fn reset(&mut self) -> ArrayRef {",
+              "        PrimitiveArray::new(",
+              "            self.values.clone(),",
+              "            Validity::from_bit_buffer(mem::take(&mut self.values_nulls).freeze(), self.nullability),",
+              "        )",
+              "        .into_array()",
+              "    }",
+          )
+          new = lines(
+              "    fn reset(&mut self) -> ArrayRef {",
+              "        let values = mem::take(&mut self.values);",
+              "        let values_nulls = mem::take(&mut self.values_nulls).freeze();",
+              "        self.lookup.clear();",
+              "        self.null_code = OnceCell::new();",
+              "",
+              "        PrimitiveArray::new(",
+              "            values,",
+              "            Validity::from_bit_buffer(values_nulls, self.nullability),",
+              "        )",
+              "        .into_array()",
+              "    }",
+          )
+          assert src.count(old) == 1
           src = src.replace(old, new, 1)
-          marker = '''    #[test]
-              fn encode_primitive_nulls() {
-          '''
-          test = '''    #[test]
-              fn reset_clears_encoder_state() {
-                  let first = PrimitiveArray::from_option_iter([Some(1i32), None, Some(3)]).into_array();
-                  let mut encoder = crate::builders::dict::dict_encoder(
-                      &first,
-                      &crate::builders::dict::UNCONSTRAINED,
-                  );
-                  let mut ctx = SESSION.create_execution_ctx();
-                  encoder.encode(&first, &mut ctx).unwrap();
-                  encoder.reset();
 
-                  let second = PrimitiveArray::from_option_iter([Some(4i32), Some(5)]).into_array();
-                  let codes = encoder.encode(&second, &mut ctx).unwrap();
-                  assert_eq!(codes.as_slice::<u8>(), &[0, 1]);
-
-                  let values = encoder.reset();
-                  let expected_values = buffer![4i32, 5].into_array();
-                  assert_arrays_eq!(&values, expected_values, &mut ctx);
-              }
-
-          '''
-          assert marker in src
+          marker = lines(
+              "    #[test]",
+              "    fn encode_primitive_nulls() {",
+          )
+          test = lines(
+              "    #[test]",
+              "    fn reset_clears_encoder_state() {",
+              "        let first = PrimitiveArray::from_option_iter([Some(1i32), None, Some(3)]).into_array();",
+              "        let mut encoder = crate::builders::dict::dict_encoder(",
+              "            &first,",
+              "            &crate::builders::dict::UNCONSTRAINED,",
+              "        );",
+              "        let mut ctx = SESSION.create_execution_ctx();",
+              "        encoder.encode(&first, &mut ctx).unwrap();",
+              "        encoder.reset();",
+              "",
+              "        let second = PrimitiveArray::from_option_iter([Some(4i32), Some(5)]).into_array();",
+              "        let codes = encoder.encode(&second, &mut ctx).unwrap();",
+              "        assert_eq!(codes.as_slice::<u32>(), &[0, 1]);",
+              "",
+              "        let values = encoder.reset();",
+              "        let expected_values = buffer![4i32, 5].into_array();",
+              "        assert_arrays_eq!(&values, expected_values, &mut ctx);",
+              "    }",
+              "",
+          )
+          assert src.count(marker) == 1
           primitive_path.write_text(src.replace(marker, test + marker, 1))
           PY
       - name: Format
