@@ -61,6 +61,15 @@ pub fn bytes_dict_builder(dtype: DType, constraints: &DictConstraints) -> Box<dy
     }
 }
 
+fn checked_view_offset(values_len: usize, value_len: usize) -> Option<u32> {
+    if value_len <= BinaryView::MAX_INLINED_SIZE {
+        return Some(0);
+    }
+
+    u32::try_from(value_len).ok()?;
+    u32::try_from(values_len).ok()
+}
+
 impl<Code: UnsignedPType> BytesDictBuilder<Code> {
     pub fn new(dtype: DType, constraints: &DictConstraints) -> Self {
         Self {
@@ -103,21 +112,19 @@ impl<Code: UnsignedPType> BytesDictBuilder<Code> {
                     return None;
                 }
 
-                let next_code = self.views.len();
-                let view = BinaryView::make_view(
-                    val,
-                    0,
-                    u32::try_from(self.values.len()).vortex_expect("values length must fit in u32"),
-                );
-                let additional_bytes = if view.is_inlined() {
-                    size_of::<BinaryView>()
+                let external_value_bytes = if val.len() > BinaryView::MAX_INLINED_SIZE {
+                    val.len()
                 } else {
-                    size_of::<BinaryView>() + val.len()
+                    0
                 };
-
-                if self.dict_bytes() + additional_bytes > self.max_dict_bytes {
+                let additional_bytes = size_of::<BinaryView>().checked_add(external_value_bytes)?;
+                if self.dict_bytes().checked_add(additional_bytes)? > self.max_dict_bytes {
                     return None;
                 }
+
+                let offset = checked_view_offset(self.values.len(), val.len())?;
+                let next_code = self.views.len();
+                let view = BinaryView::make_view(val, 0, offset);
 
                 self.views.push(view);
                 self.values_nulls.append_true();
@@ -141,7 +148,10 @@ impl<Code: UnsignedPType> BytesDictBuilder<Code> {
         }
 
         if self.views.len() >= self.max_dict_len
-            || self.dict_bytes() + size_of::<BinaryView>() > self.max_dict_bytes
+            || self
+                .dict_bytes()
+                .checked_add(size_of::<BinaryView>())?
+                > self.max_dict_bytes
         {
             return None;
         }
@@ -318,6 +328,7 @@ mod test {
     use vortex_error::VortexResult;
     use vortex_session::VortexSession;
 
+    use super::checked_view_offset;
     use crate::IntoArray;
     use crate::VortexSessionExecute;
     use crate::arrays::PrimitiveArray;
@@ -332,6 +343,27 @@ mod test {
     use crate::validity::Validity;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(crate::array_session);
+
+    #[test]
+    fn outlined_view_offset_must_fit_u32() {
+        let outlined_len = BinaryView::MAX_INLINED_SIZE + 1;
+        assert_eq!(
+            checked_view_offset(u32::MAX as usize + 1, outlined_len),
+            None
+        );
+        assert_eq!(
+            checked_view_offset(u32::MAX as usize, outlined_len),
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn inline_view_does_not_require_external_offset() {
+        assert_eq!(
+            checked_view_offset(usize::MAX, BinaryView::MAX_INLINED_SIZE),
+            Some(0)
+        );
+    }
 
     #[test]
     fn encode_varbin() -> VortexResult<()> {
