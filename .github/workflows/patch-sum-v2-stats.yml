@@ -1,0 +1,133 @@
+name: Patch SumV2 stats
+
+on:
+  push:
+    branches:
+      - fix/sum-v2-stats
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply SumV2 stats integration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          stats_array = Path("vortex-array/src/stats/array.rs")
+          src = stats_array.read_text()
+          src = src.replace(
+              "use crate::aggregate_fn::fns::sum::sum;",
+              "use crate::aggregate_fn::fns::sum_v2::sum_v2;",
+              1,
+          )
+          old = """                        sum(self.dyn_array_ref, ctx)\n"""
+          new = """                        sum_v2(self.dyn_array_ref, ctx)\n"""
+          assert src.count(old) == 1
+          stats_array.write_text(src.replace(old, new, 1))
+
+          stats_mod = Path("vortex-array/src/expr/stats/mod.rs")
+          src = stats_mod.read_text()
+          old = """                return aggregate_fn::fns::sum::Sum
+                    .return_dtype(&NumericalAggregateOpts::skip_nans(), data_type);
+"""
+          new = """                return aggregate_fn::fns::sum_v2::SumV2
+                    .return_dtype(&NumericalAggregateOpts::skip_nans(), data_type);
+"""
+          assert src.count(old) == 1
+          src = src.replace(old, new, 1)
+
+          old = """            Self::Sum => aggregate_fn::fns::sum::Sum.bind(NumericalAggregateOpts::skip_nans()),
+"""
+          new = """            Self::Sum => {
+                aggregate_fn::fns::sum_v2::SumV2.bind(NumericalAggregateOpts::skip_nans())
+            }
+"""
+          assert src.count(old) == 1
+          src = src.replace(old, new, 1)
+
+          old = """    pub fn from_aggregate_fn(aggregate_fn: &AggregateFnRef) -> Option<Self> {
+        if let Some(options) = aggregate_fn.as_opt::<aggregate_fn::fns::sum::Sum>() {
+            return options.skip_nans.then_some(Self::Sum);
+        }
+"""
+          new = """    pub fn from_aggregate_fn(aggregate_fn: &AggregateFnRef) -> Option<Self> {
+        if let Some(options) = aggregate_fn.as_opt::<aggregate_fn::fns::sum_v2::SumV2>() {
+            return options.skip_nans.then_some(Self::Sum);
+        }
+        // Legacy files may still store the original `vortex.sum` aggregate in the Sum stat slot.
+        if let Some(options) = aggregate_fn.as_opt::<aggregate_fn::fns::sum::Sum>() {
+            return options.skip_nans.then_some(Self::Sum);
+        }
+"""
+          assert src.count(old) == 1
+          src = src.replace(old, new, 1)
+
+          imports = """    use crate::VortexSessionExecute;
+    use crate::array_session;
+    use crate::arrays::PrimitiveArray;
+    use crate::expr::stats::Stat;
+"""
+          imports_new = """    use crate::VortexSessionExecute;
+    use crate::aggregate_fn::AggregateFnVTableExt;
+    use crate::aggregate_fn::NumericalAggregateOpts;
+    use crate::aggregate_fn::fns::sum::Sum as LegacySum;
+    use crate::aggregate_fn::fns::sum_v2::SumV2;
+    use crate::array_session;
+    use crate::arrays::PrimitiveArray;
+    use crate::expr::stats::Stat;
+"""
+          assert src.count(imports) == 1
+          src = src.replace(imports, imports_new, 1)
+
+          marker = """    #[test]
+    fn has_same_dtype_as_array() {
+"""
+          tests = """    #[test]
+    fn sum_stat_uses_sum_v2() {
+        let aggregate = Stat::Sum.aggregate_fn().expect("Sum has an aggregate");
+        assert!(aggregate.is::<SumV2>());
+        assert_eq!(Stat::from_aggregate_fn(&aggregate), Some(Stat::Sum));
+
+        let legacy = LegacySum.bind(NumericalAggregateOpts::skip_nans());
+        assert_eq!(Stat::from_aggregate_fn(&legacy), Some(Stat::Sum));
+    }
+
+    #[test]
+    fn sum_stat_of_all_nulls_is_null() {
+        let array = PrimitiveArray::from_option_iter::<i32, _>([None, None]);
+        let sum = array
+            .statistics()
+            .compute_stat(Stat::Sum, &mut array_session().create_execution_ctx())
+            .unwrap()
+            .expect("i32 supports Sum");
+
+        assert!(sum.is_null());
+    }
+
+"""
+          assert src.count(marker) == 1
+          stats_mod.write_text(src.replace(marker, tests + marker, 1))
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Test vortex-array
+        run: cargo test -p vortex-array --lib
+      - name: Check diff
+        run: git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vortex-array/src/stats/array.rs vortex-array/src/expr/stats/mod.rs
+          git diff --cached --check
+          git commit -m "fix: use SumV2 for array statistics"
+          git push
